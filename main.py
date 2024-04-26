@@ -10,7 +10,7 @@ from tensorflow.keras.regularizers import l2
 
 from Losses.losses import ce_loss
 from Processing.transforms import Transforms
-from Model.unets import res_unet
+from Model.unets import res_unet, build_unet
 from Model.custom_layers import PixelShuffle
 from cfg.config import load_config
 from Dataloader.dataloader import get_dataset
@@ -143,7 +143,7 @@ if __name__ == '__main__':
             )
         else:
             tf.print('Building new model...')
-            model = res_unet(
+            model = build_unet(
                 img_size=cfg['INPUT_SIZE'],
                 num_classes=cfg['OUT_CHANNELS'],
                 num_levels=cfg['N_MODEL_LEVELS'],
@@ -153,6 +153,7 @@ if __name__ == '__main__':
                 use_pixel_shuffle=True,
                 use_attention=cfg['USE_ATTENTION'],
                 activation=tf.keras.layers.LeakyReLU(),
+                return_logits=False
             )
         model.compile()
         model.summary()
