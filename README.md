@@ -131,7 +131,7 @@ You can customize the model architecture and training routine by modifying:
 Contributions to this project are welcome. Please ensure to follow the existing coding style and add unit tests for any new or changed functionality.
 
 ## License
-Distributed under the MIT License. See LICENSE for more information.
+Distributed under the GPL-3.0 License. See LICENSE for more information.
 
 ## Authors
 Benjamin Isaac Wilson - benjamintaya0111@gmail.com
