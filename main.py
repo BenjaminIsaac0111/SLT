@@ -10,7 +10,7 @@ from tensorflow.keras.regularizers import l2
 
 from Losses.losses import ce_loss
 from Processing.transforms import Transforms
-from Model.unets import res_unet, build_unet
+from Model.unets import build_unet
 from Model.custom_layers import PixelShuffle
 from cfg.config import load_config
 from Dataloader.dataloader import get_dataset

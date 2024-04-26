@@ -11,18 +11,13 @@ def ce_loss(y_true, y_pred, class_weight=None):
 
 
 @tf.function
-def mean_squared_error(y_true, y_pred):
-    return tf.reduce_mean(tf.square(y_true - y_pred))
-
-
-@tf.function
 def custom_iou(y_true, y_pred):
     """
     Calculate Intersection over Union for the regions specified by the one-hot encoded mask.
 
     Args:
         y_true: The ground truth labels, one-hot encoded.
-        y_pred: The predicted labels, logits or softmax probabilities.
+        y_pred: The predicted logits.
     Returns:
         The average IoU score across all classes for the masked regions.
     """
@@ -48,12 +43,3 @@ def custom_iou(y_true, y_pred):
 
     average_iou = tf.reduce_mean(valid_iou_scores)
     return average_iou
-
-
-@tf.function
-def calculate_entropy(predictions, num_classes):
-    epsilon = 1e-5  # to prevent log(0)
-    entropy = -tf.reduce_sum(predictions * tf.math.log(predictions + epsilon), axis=-1)
-    max_entropy = tf.math.log(tf.constant(num_classes, dtype=tf.float32))
-    normalized_entropy = entropy / max_entropy
-    return normalized_entropy
