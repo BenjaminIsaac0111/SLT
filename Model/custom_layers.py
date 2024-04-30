@@ -173,7 +173,7 @@ class AttentionBlock(layers.Layer):
             activation='sigmoid'
         )
 
-        self.pixel_shuffle = PixelShuffle(2)
+        self.upsample = layers.UpSampling2D(2, interpolation='bilinear')
         self.attention_multiply = layers.Multiply()
 
         super(AttentionBlock, self).build(input_shape)
@@ -190,7 +190,7 @@ class AttentionBlock(layers.Layer):
         add_xg = self.add_xg_leaky_relu(add_xg)
 
         psi = self.psi_conv(add_xg)
-        psi = self.pixel_shuffle(psi)
+        psi = self.upsample(psi)
         output = self.attention_multiply([psi, x])
 
         return output
@@ -200,31 +200,4 @@ class AttentionBlock(layers.Layer):
         config.update({
             'inter_channel': self.inter_channel
         })
-        return config
-
-
-import tensorflow as tf
-
-
-class SoftLabelGatingLayer(tf.keras.layers.Layer):
-    def __init__(self, num_labels, **kwargs):
-        super(SoftLabelGatingLayer, self).__init__(**kwargs)
-        self.num_labels = num_labels
-
-    def build(self, input_shape):
-        self.gate_weights = self.add_weight(
-            shape=(self.num_labels,),
-            initializer='ones',  # Start with equal weighting
-            trainable=True,
-            name='gate_weights'
-        )
-
-    def call(self, soft_labels):
-        # Apply the gating weights to the soft labels
-        gated_soft_labels = soft_labels * self.gate_weights
-        return gated_soft_labels
-
-    def get_config(self):
-        config = super(SoftLabelGatingLayer, self).get_config()
-        config.update({'num_labels': self.num_labels})
         return config
