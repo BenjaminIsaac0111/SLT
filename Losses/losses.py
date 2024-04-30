@@ -1,6 +1,7 @@
 import tensorflow as tf
 
 
+
 @tf.function
 def ce_loss(y_true, y_pred, class_weight=None):
     if class_weight is None:
@@ -10,8 +11,40 @@ def ce_loss(y_true, y_pred, class_weight=None):
     return ce_loss
 
 
+def focal_loss(y_true, y_pred, gamma=2.0, alpha_weights=None):
+    """
+    Calculate the focal loss for each pixel with class weighting and then average across all pixels.
+
+    Args:
+        y_true (tensor): True labels with shape [batch, height, width, num_classes].
+        y_pred (tensor): Predictions with shape [batch, height, width, num_classes].
+        gamma (float): Focusing parameter.
+        alpha_weights (tensor): Class weights. It should have the same shape as the class axis of y_true/y_pred.
+
+    Returns:
+        loss (tensor): Computed focal loss value.
+    """
+    epsilon = tf.keras.backend.epsilon()
+    y_pred = tf.clip_by_value(y_pred, epsilon, 1. - epsilon)
+
+    # Calculate cross entropy loss
+    cross_entropy = -y_true * tf.math.log(y_pred)
+
+    # If alpha_weights provided, use them, otherwise use the default alpha scalar.
+    if alpha_weights is not None:
+        alpha_factor = y_true * alpha_weights
+    else:
+        alpha_factor = y_true * 0.25  # default alpha scalar if no weights provided
+
+    # Calculate focal loss components
+    loss = alpha_factor * tf.math.pow(1 - y_pred, gamma) * cross_entropy
+
+    # Sum over the class dimension and average over all other dimensions
+    return tf.reduce_mean(tf.reduce_sum(loss, axis=-1))
+
+
 @tf.function
-def custom_iou(y_true, y_pred):
+def custom_validation_iou(y_true, y_pred):
     """
     Calculate Intersection over Union for the regions specified by the one-hot encoded mask.
 

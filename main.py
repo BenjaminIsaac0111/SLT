@@ -7,11 +7,10 @@ from tensorflow.keras import optimizers, mixed_precision
 from tensorflow.keras.models import load_model
 from tensorflow.keras.utils import Progbar
 from tensorflow.keras.regularizers import l2
-
-from Losses.losses import ce_loss
+from Losses.losses import focal_loss, ce_loss, custom_validation_iou
 from Processing.transforms import Transforms
 from Model.unets import build_unet
-from Model.custom_layers import PixelShuffle
+from Model.custom_layers import PixelShuffle, AttentionBlock
 from cfg.config import load_config
 from Dataloader.dataloader import get_dataset
 
@@ -61,7 +60,10 @@ if __name__ == '__main__':
             with tf.GradientTape() as tape:
                 x, y = batch
                 probs = model(x, training=True)
-                loss = ce_loss(y_true=y, y_pred=probs, class_weight=class_weights)
+                if cfg['USE_FOCAL_LOSS']:
+                    loss = focal_loss(y_true=y, y_pred=probs)
+                else:
+                    loss = ce_loss(y_true=y, y_pred=probs, class_weight=class_weights)
                 scaled_total_loss = optimizer.get_scaled_loss(loss)
             scaled_grads = tape.gradient(scaled_total_loss, model.trainable_weights)
             grads = optimizer.get_unscaled_gradients(scaled_grads)
@@ -78,9 +80,11 @@ if __name__ == '__main__':
         def step_fn(batch=None):
             x_val, y_val = batch
             val_probs = model(x_val, training=False)
-            val_loss = ce_loss(y_true=y_val, y_pred=val_probs)
+            if cfg['USE_FOCAL_LOSS']:
+                val_loss = focal_loss(y_true=y_val, y_pred=val_probs, alpha_weights=class_weights)
+            else:
+                val_loss = ce_loss(y_true=y_val, y_pred=val_probs, class_weight=class_weights)
             return val_loss
-
         val_loss = strategy.run(step_fn, args=(batch,))
         per_replica_val_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, val_loss, axis=None)
         return per_replica_val_loss
@@ -139,7 +143,7 @@ if __name__ == '__main__':
             model = load_model(
                 filepath=checkpoint_model,
                 compile=False,
-                custom_objects={'PixelShuffle': PixelShuffle}
+                custom_objects={'PixelShuffle': PixelShuffle, 'AttentionBlock': AttentionBlock}
             )
         else:
             tf.print('Building new model...')
@@ -161,7 +165,10 @@ if __name__ == '__main__':
     # Main training loop
     for epoch in range(start_epoch, cfg['EPOCHS']):
         ds = iter(distributed_training_ds)
-        train_pb = Progbar(cfg['STEPS'] // global_batch_size, stateful_metrics=['Epoch', 'ce_loss'])
+        train_pb = Progbar(
+            cfg['STEPS'] // global_batch_size,
+            stateful_metrics=['Epoch', 'focal_loss' if cfg['USE_FOCAL_LOSS'] else 'ce_loss']
+        )
         avg_loss = 0.0
         num_batches = 0
 
@@ -171,7 +178,7 @@ if __name__ == '__main__':
             num_batches += 1
             train_pb.update(
                 num_batches,
-                values=[('Epoch', int(epoch) + 1), ('ce_loss', avg_loss / num_batches)]
+                values=[('Epoch', int(epoch) + 1), ('focal_loss' if cfg['USE_FOCAL_LOSS'] else 'ce_loss', avg_loss / num_batches)]
             )
 
         val_ds = iter(distributed_validation_ds)
@@ -198,4 +205,4 @@ if __name__ == '__main__':
             model.save(best_model)
             with open(model_save_log_path, 'a') as save_log:
                 save_log.write(
-                    f'Epoch {epoch+1}: Model saved with Validation Loss: {avg_val_loss.numpy() / num_val_batches}\n')
+                    f'Epoch {epoch + 1}: Model saved with Validation Loss: {avg_val_loss.numpy() / num_val_batches}\n')

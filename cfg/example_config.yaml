@@ -9,7 +9,7 @@ INPUT_SIZE:
 - 512 # Width
 OUT_CHANNELS: 9 # Number of output classes.
 LEARNING_RATE: 1.0e-05
-USE_XLA: False # Enable Just in Time (JIT) compilation.
+USE_XLA: False # Enable Just in Time (JIT) compilation. (NOTE: There are issues using this across multiple GPUs, set to False if you are experiancing issues)
 DATA_DIR: Examples/ # Location of your data.
 TRAINING_LIST: Examples/train.txt # A .txt containing a list of filenames for training data.
 TESTING_LIST: Examples/test.txt # A .txt containing a list of filenames for test data used in validation.
@@ -29,7 +29,10 @@ CLASS_COMPONENTS:
   6: Tumour-Lumen
   7: Mucin
   8: Muscle
-CLASS_WEIGHTS:
+
+USE_FOCAL_LOSS: True # else use weighted cross entropy
+
+CLASS_WEIGHTS: # weights for weighted cross entropy.
 - 1.38333643
 - 0.33804931
 - 0.28400663
