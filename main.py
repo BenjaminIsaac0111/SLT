@@ -154,7 +154,7 @@ if __name__ == '__main__':
                 num_conv_per_level=cfg['N_CONV_PER_LAYER'],
                 num_filters=cfg['N_FILTERS'],
                 regularisation=l2(),
-                use_pixel_shuffle=True,
+                use_pixel_shuffle=cfg['USE_PIXEL_SHUFFLE'],
                 use_attention=cfg['USE_ATTENTION'],
                 activation=tf.keras.layers.LeakyReLU(),
                 return_logits=False

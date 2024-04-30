@@ -90,7 +90,7 @@ def build_unet(
         if use_pixel_shuffle:
             x = PixelShuffle(upscale_factor=2, name=f'decoder_pixel_shuffle_{level}')(x)
         else:
-            x = layers.UpSampling2D(2, name=f'decoder_upsampling_{level}')(x)
+            x = layers.UpSampling2D(2, name=f'decoder_upsampling_{level}', interpolation='bilinear')(x)
 
         # Attention mechanism
         if use_attention:

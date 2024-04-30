@@ -2,23 +2,26 @@ MODEL_DIR: ./Model_Example_Outputs/
 MODEL_NAME: attention_resnet_example.h5
 N_MODEL_LEVELS: 2 # Number of Down-sampling and Up-sampling levels.
 N_CONV_PER_LAYER: 2 # Number of Conv blocks per level.
-USE_ATTENTION: True # Build model with additive attention block.
 N_FILTERS: 64 # Filters per layers. (This is constant, unlike the original UNET)
+USE_ATTENTION: True # Build model with additive attention block.
+USE_PIXEL_SHUFFLE: False # Use Pixel Shuffle to Up-Sample the skip connections in the decoder, else use stander Up-Sample.
 INPUT_SIZE:
 - 1024 # Height
 - 512 # Width
 OUT_CHANNELS: 9 # Number of output classes.
 LEARNING_RATE: 1.0e-05
-USE_XLA: False # Enable Just in Time (JIT) compilation. (NOTE: There are issues using this across multiple GPUs, set to False if you are experiancing issues)
+USE_XLA: True # Enable Just in Time (JIT) compilation. (NOTE: There are issues using this across multiple GPUs, set to False if you are experiencing issues)
+USE_FOCAL_LOSS: True # else use weighted cross entropy
 DATA_DIR: Examples/ # Location of your data.
 TRAINING_LIST: Examples/train.txt # A .txt containing a list of filenames for training data.
 TESTING_LIST: Examples/test.txt # A .txt containing a list of filenames for test data used in validation.
 SHUFFLE_BUFFER_SIZE: 256
 BATCH_SIZE: 1
-EPOCHS: 10
+EPOCHS: 100
 STEPS: 237
 VAL_BATCH_SIZE: 1
 VAL_STEPS: 60
+
 CLASS_COMPONENTS:
   0: Non-Informative
   1: Tumour
@@ -29,8 +32,6 @@ CLASS_COMPONENTS:
   6: Tumour-Lumen
   7: Mucin
   8: Muscle
-
-USE_FOCAL_LOSS: True # else use weighted cross entropy
 
 CLASS_WEIGHTS: # weights for weighted cross entropy.
 - 1.38333643

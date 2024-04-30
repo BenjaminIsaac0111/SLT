@@ -77,36 +77,39 @@ Ensure your configuration file (`configuration.yaml`) includes the correct paths
 - **MODEL_NAME**: The name for the saved model files. This will be used to save the final model and intermediate checkpoints. Example: `attention_resnet_example.h5`.
 
 ### Model Architecture
-- **N_MODEL_LEVELS**: Specifies the number of levels in the U-Net architecture, where each level includes one down-sampling step in the encoder and one up-sampling step in the decoder. Example: 2.
-- **N_CONV_PER_LAYER**: Number of convolution blocks per level. Each block typically consists of a convolution followed by a normalization and activation function. Example: 2.
+- **N_MODEL_LEVELS**: Specifies the number of levels in the U-Net architecture, where each level includes one down-sampling step in the encoder and one up-sampling step in the decoder. Example: `2`.
+- **N_CONV_PER_LAYER**: Number of convolution blocks per level. Each block typically consists of a convolution followed by a normalization and activation function. Example: `2`.
 - **USE_ATTENTION**: Determines whether additive attention blocks are included in the decoder for focusing on salient features. Set to `True` to enable.
-- **N_FILTERS**: The number of filters in each convolution layer, constant across all layers, unlike the original U-Net which doubles the filters after each down-sampling. Example: 64.
+- **USE_PIXEL_SHUFFLE**: Determine whether to use Pixel Shuffle for Upsampling. If False then default is Up-Sampling with bilinear interpolation. Set to `True` to enable.
+- **N_FILTERS**: The number of filters in each convolution layer, constant across all layers, unlike the original U-Net which doubles the filters after each down-sampling. Example: `64`.
 - **INPUT_SIZE**: Dimensions of the input images that the model will accept. Specified as height and width. Example: [1024, 512].
-- **OUT_CHANNELS**: The number of output classes for segmentation. Each class corresponds to a different label in the segmentation task. Example: 9.
+- **OUT_CHANNELS**: The number of output classes for segmentation. Each class corresponds to a different label in the segmentation task. Example: `9`.
 
 ### Training Configuration
 - **LEARNING_RATE**: The initial learning rate for the optimizer. Example: `1.0e-05`.
-- **USE_XLA**: Enables TensorFlow's XLA (Accelerated Linear Algebra) JIT compilation, which can improve performance by optimizing the model's computation graph. Set to `False` by default.
+- **USE_XLA**: Enables TensorFlow's XLA (Accelerated Linear Algebra) JIT compilation, which can improve performance by optimizing the model's computation graph.
+- **USE_FOCAL_LOSS**: Use Focal Cross Entropy Loss. This can help with learning rarer examples in your dataset, else use a standard weighted cross entropy. Set to `True` to enable.
 - **DATA_DIR**: Directory where training and testing data are located. Example: `Examples/`.
 - **TRAINING_LIST**: File path containing a list of filenames for training data images. Example: `Examples/train.txt`.
 - **TESTING_LIST**: File path containing a list of filenames for test data images used during validation. Example: `Examples/test.txt`.
-- **SHUFFLE_BUFFER_SIZE**: The buffer size used by the shuffle operation in the dataset preparation. It helps in randomizing the input data during training. Example: 256.
-- **BATCH_SIZE**: Number of training examples utilized in one iteration. Example: 1.
-- **EPOCHS**: Total number of training cycles through the entire dataset. Example: 10.
-- **STEPS**: Total number of batches of samples to train in one epoch. Example: 237.
-- **VAL_BATCH_SIZE**: Number of examples per batch during validation. Typically, the same as `BATCH_SIZE` unless specified. Example: 1.
-- **VAL_STEPS**: Number of validation batches to execute at the end of each epoch. Example: 60.
+- **SHUFFLE_BUFFER_SIZE**: The buffer size used by the shuffle operation in the dataset preparation. It helps in randomizing the input data during training. Example: `256`.
+- **BATCH_SIZE**: Number of training examples utilized in one iteration. Example: `1`.
+- **EPOCHS**: Total number of training cycles through the entire dataset. Example: `10`.
+- **STEPS**: Total number of batches of samples to train in one epoch. Example: `237`.
+- **VAL_BATCH_SIZE**: Number of examples per batch during validation. Typically, the same as `BATCH_SIZE` unless specified. Example: `1`.
+- **VAL_STEPS**: Number of validation batches to execute at the end of each epoch. Example: `60`.
 
 ### Class Components and Weights
 - **CLASS_COMPONENTS**: A dictionary that maps each class index to a meaningful name, helping to understand the model's outputs. Example mappings include:
   - `0`: Non-Informative
   - `1`: Tumour
   - `2`: Stroma, and so on.
-- **CLASS_WEIGHTS**: List of weights for each class to handle class imbalance during training. Higher weights can be assigned to classes that are underrepresented or more important to detect accurately.
+- **CLASS_WEIGHTS**: List of weights for each class to handle class imbalance during training. Higher weights can be assigned to classes that are underrepresented or more important to detect accurately. 
+This is applied to both the focal or cross entropy losses if set.
 
 To train the model, run the following command with you specified configuration (see example file in cfg/):
-```bash
-python main.py --config cfg/config_example.yaml
+```
+main.py --config cfg/config_example.yaml
 ```
 This script will train the model according to the parameters specified in the YAML configuration file. Training progress will be displayed on the console.
 
@@ -136,4 +139,4 @@ Distributed under the GPL-3.0 License. See LICENSE for more information.
 ## Authors
 Benjamin Isaac Wilson - benjamintaya0111@gmail.com
 ## Acknowledgments
-This project was inspired by the U-Net architecture initially proposed for biomedical image segmentation and Attention-UNet.
+This project was inspired by the U-Net architecture initially proposed for biomedical image segmentation and its Attention-UNet variation.

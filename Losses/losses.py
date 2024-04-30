@@ -1,7 +1,6 @@
 import tensorflow as tf
 
 
-
 @tf.function
 def ce_loss(y_true, y_pred, class_weight=None):
     if class_weight is None:
@@ -34,13 +33,42 @@ def focal_loss(y_true, y_pred, gamma=2.0, alpha_weights=None):
     if alpha_weights is not None:
         alpha_factor = y_true * alpha_weights
     else:
-        alpha_factor = y_true * 0.25  # default alpha scalar if no weights provided
+        alpha_factor = 1.0
 
     # Calculate focal loss components
     loss = alpha_factor * tf.math.pow(1 - y_pred, gamma) * cross_entropy
 
     # Sum over the class dimension and average over all other dimensions
     return tf.reduce_mean(tf.reduce_sum(loss, axis=-1))
+
+
+def focal_distillation_loss(teacher_logits, student_logits, gamma=2.0, alpha_weights=None, temperature=1.0):
+    """
+    Calculate the focal loss for each pixel with class weighting and then average across all pixels.
+
+    Args:
+        y_true (tensor): True labels with shape [batch, height, width, num_classes].
+        y_pred (tensor): Predictions with shape [batch, height, width, num_classes].
+        gamma (float): Focusing parameter.
+        alpha_weights (tensor): Class weights. It should have the same shape as the class axis of y_true/y_pred.
+
+    Returns:
+        loss (tensor): Computed focal loss value.
+    """
+
+    teacher_soft_labels = tf.nn.softmax(teacher_logits / temperature)
+    student_soft_labels = tf.nn.softmax(student_logits / temperature)
+
+    # Calculate cross entropy loss
+    kl_divergence = student_soft_labels * tf.math.log(student_soft_labels / teacher_soft_labels)
+
+    # Calculate focal loss components
+    modulating_factor = tf.math.pow(1 - tf.abs(student_soft_labels - teacher_soft_labels), gamma) * kl_divergence
+    # If alpha_weights provided, multiply by class weights
+    if alpha_weights is not None:
+        modulating_factor *= alpha_weights
+    # Sum over the class dimension and average over all other dimensions
+    return tf.reduce_mean(tf.reduce_sum(modulating_factor, axis=-1))
 
 
 @tf.function
