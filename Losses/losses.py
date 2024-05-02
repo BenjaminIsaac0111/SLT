@@ -1,8 +1,24 @@
 import tensorflow as tf
 
 
-@tf.function
 def ce_loss(y_true, y_pred, class_weight=None):
+    """
+
+    This method computes the cross-entropy loss between the true labels `y_true` and the predicted labels `y_pred`.
+    It supports the option to apply class weights to the loss calculation.
+
+    Parameters: - y_true: A tensor containing the true labels. Shape: [batch_size, num_classes] - y_pred: A tensor
+    containing the predicted labels. Shape: [batch_size, num_classes] - class_weight (optional): A tensor specifying
+    the weight for each class. If not provided, all classes will have equal weight. Shape: [batch_size, num_classes]
+
+    Returns:
+        - ce_loss: A scalar tensor representing the cross-entropy loss.
+
+    Example usage:
+        y_true = [[0, 1, 0], [1, 0, 0]]
+        y_pred = [[0.3, 0.6, 0.1], [0.7, 0.2, 0.1]]
+        loss = ce_loss(y_true, y_pred)
+    """
     if class_weight is None:
         class_weight = tf.ones_like(y_true)
     weights = tf.reduce_sum(y_true * class_weight, axis=-1)
@@ -42,23 +58,48 @@ def focal_loss(y_true, y_pred, gamma=2.0, alpha_weights=None):
     return tf.reduce_mean(tf.reduce_sum(loss, axis=-1))
 
 
-def focal_distillation_loss(teacher_logits, student_logits, gamma=2.0, alpha_weights=None, temperature=1.0):
+def kl_distillation_loss(teacher_logits, student_logits, temperature=2.0):
     """
-    Calculate the focal loss for each pixel with class weighting and then average across all pixels.
+    Calculates the Kullback-Leibler divergence loss between teacher and student logits for knowledge distillation.
 
-    Args:
-        y_true (tensor): True labels with shape [batch, height, width, num_classes].
-        y_pred (tensor): Predictions with shape [batch, height, width, num_classes].
-        gamma (float): Focusing parameter.
-        alpha_weights (tensor): Class weights. It should have the same shape as the class axis of y_true/y_pred.
+    Parameters:
+    - teacher_logits: tf.Tensor, teacher model logits.
+    - student_logits: tf.Tensor, student model logits.
+    - temperature: float, temperature factor for adjusting the soft loss (default=2.0).
 
     Returns:
-        loss (tensor): Computed focal loss value.
+    - soft_target_loss: tf.Tensor, the calculated soft target loss.
+
+    """
+    # Calculate the soft loss with the temperature factor adjusted
+    teacher_soft_targets = tf.nn.softmax(teacher_logits / temperature)
+    student_soft_predictions = tf.nn.softmax(student_logits / temperature)
+    soft_target_loss = tf.keras.losses.kullback_leibler_divergence(
+        y_true=teacher_soft_targets,
+        y_pred=student_soft_predictions
+    ) * (temperature ** 2)  # Note the squaring of the temperature
+    return soft_target_loss
+
+
+def focal_distillation_loss(teacher_logits, student_logits, gamma=2.0, alpha_weights=None, temperature=2.0):
+    """
+
+    Calculate the focal distillation loss between the teacher and student logits.
+
+    Parameters:
+    teacher_logits (tf.Tensor): The logits from the teacher model.
+    student_logits (tf.Tensor): The logits from the student model.
+    gamma (float, optional): The focusing parameter. Defaults to 2.0.
+    alpha_weights (tf.Tensor, optional): The weights for each class. Defaults to None.
+    temperature (float, optional): The temperature for the softmax operation. Defaults to 2.0.
+
+    Returns:
+    tf.Tensor: The focal distillation loss.
+
     """
 
     teacher_soft_labels = tf.nn.softmax(teacher_logits / temperature)
     student_soft_labels = tf.nn.softmax(student_logits / temperature)
-
     # Calculate cross entropy loss
     kl_divergence = student_soft_labels * tf.math.log(student_soft_labels / teacher_soft_labels)
 

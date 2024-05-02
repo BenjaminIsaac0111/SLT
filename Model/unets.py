@@ -1,4 +1,5 @@
 from tensorflow.keras.regularizers import l2
+import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
 from tensorflow_addons.layers import GroupNormalization
@@ -135,11 +136,12 @@ def build_unet(
         activation=activation,
         padding="same",
         kernel_regularizer=regularisation,
-        name=f'output_conv'
+        name='output_conv'
     )(x)
     outputs = layers.Softmax(dtype="float32")(logits)
 
     if return_logits:
-        return keras.Model(inputs=inputs, outputs=logits)
+        logits = tf.cast(logits, dtype=tf.float32) # Cant seem to do this in the logits layer directly.
+        return keras.Model(inputs=inputs, outputs=[outputs, logits])
     else:
         return keras.Model(inputs=inputs, outputs=outputs)

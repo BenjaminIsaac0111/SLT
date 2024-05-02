@@ -1,6 +1,6 @@
 MODEL_DIR: ./Model_Example_Outputs/
 MODEL_NAME: attention_resnet_example.h5
-N_MODEL_LEVELS: 2 # Number of Down-sampling and Up-sampling levels.
+N_MODEL_LEVELS: 4 # Number of Down-sampling and Up-sampling levels.
 N_CONV_PER_LAYER: 2 # Number of Conv blocks per level.
 N_FILTERS: 64 # Filters per layers. (This is constant, unlike the original UNET)
 USE_ATTENTION: True # Build model with additive attention block.
@@ -33,7 +33,7 @@ CLASS_COMPONENTS:
   7: Mucin
   8: Muscle
 
-CLASS_WEIGHTS: # weights for weighted cross entropy.
+CLASS_WEIGHTS: # weights for weighted cross entropy or alpha for focal loss.
 - 1.38333643
 - 0.33804931
 - 0.28400663
