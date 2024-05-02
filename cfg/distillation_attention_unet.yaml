@@ -1,0 +1,51 @@
+# CHOOSE A PRETRAINED TEACHER
+TEACHER_MODEL: Model_Example_Outputs/attention_resnet_pretrained.h5/pretrained_attention_resnet.h5
+DISTILLATION_ALPHA: 0.01
+
+# STUDENT MODEL
+MODEL_DIR: ./Model_Example_Outputs/
+MODEL_NAME: student_attention_resnet.h5
+N_MODEL_LEVELS: 5
+N_CONV_PER_LAYER: 5
+N_FILTERS: 64
+OUT_CHANNELS: 9
+USE_ATTENTION: True
+USE_PIXEL_SHUFFLE: False
+LEARNING_RATE: 1.0e-05
+EPOCHS: 100
+BATCH_SIZE: 1
+STEPS: 16384
+VAL_BATCH_SIZE: 1
+VAL_STEPS: 8800
+SHUFFLE_BUFFER_SIZE: 256
+USE_XLA: True
+USE_FOCAL_LOSS: True
+DATA_DIR: A:/PATCHES/CRO7_PATCHES
+#DATA_DIR: C:/Users/benja/OneDrive - University of Leeds/DATABACKUP/CR07 Collated_Data/8px/
+TRAINING_LIST: C:/Users/wispy/OneDrive - University of Leeds/PhD Projects/working_data/data/Fold_1_TrainingData.txt
+TESTING_LIST: C:/Users/wispy/OneDrive - University of Leeds/PhD Projects/working_data/data/Fold_1_TestData.txt
+INPUT_SIZE:
+- 1024
+- 512
+CLASS_COMPONENTS:
+  0: Non-Informative
+  1: Tumour
+  2: Stroma
+  3: Necrosis
+  4: Vessel
+  5: Inflammation
+  6: Tumour-Lumen
+  7: Mucin
+  8: Muscle
+
+
+CLASS_WEIGHTS:
+- 1.38333643
+- 0.33804931
+- 0.28400663
+- 1.63984806
+- 5.28325519
+- 10.0
+- 1.61236405
+- 8.36243097
+- 4.21306924

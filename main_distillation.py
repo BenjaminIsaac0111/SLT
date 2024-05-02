@@ -288,11 +288,11 @@ if __name__ == '__main__':
 
         with open(f'{checkpoint_dir}errors_{cfg["MODEL_NAME"][:-3]}.csv', 'a') as f:
             f.write(
-                f'{epoch + 1},'
-                f'{avg_loss.numpy() / num_batches:.4f},'
-                f'{avg_hard_label_loss.numpy() / num_batches:.4f},'
-                f'{avg_soft_target_loss.numpy() / num_batches:.4f},'
-                f'{avg_val_loss.numpy() / num_val_batches:.4f}\n'
+                f'{epoch + 1:.0},'
+                f'{avg_loss.numpy() / num_batches},'
+                f'{avg_hard_label_loss.numpy() / num_batches},'
+                f'{avg_soft_target_loss.numpy() / num_batches},'
+                f'{avg_val_loss.numpy() / num_val_batches}\n'
             )
 
         model.save(checkpoint_model)
