@@ -15,6 +15,9 @@ setup(
         "License :: OSI Approved :: GPT-3.0 License",
         "Operating System :: OS Independent",
     ],
+    # NOTE: I have only tested these specific dependencies on Windows Systems. These are the last versions of TF for
+    # on available on Windows 10/11 OS. New versions of TF > 2.10 must be installed via Windows Subsystem Linux 2 (WSL2)
+    # or a linux system.
     install_requires=[
         "tensorflow~=2.10.0",
         "tensorflow-addons==0.20.0",

@@ -18,7 +18,7 @@ gpus = tf.config.experimental.list_physical_devices('GPU')
 for gpu in gpus:
     tf.config.experimental.set_memory_growth(gpu, True)
 
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '0'
 mixed_precision.set_global_policy('mixed_float16')
 
 
@@ -80,10 +80,7 @@ if __name__ == '__main__':
         def step_fn(batch=None):
             x_val, y_val = batch
             val_probs = model(x_val, training=False)
-            if cfg['USE_FOCAL_LOSS']:
-                val_loss = focal_loss(y_true=y_val, y_pred=val_probs, alpha_weights=class_weights)
-            else:
-                val_loss = ce_loss(y_true=y_val, y_pred=val_probs, class_weight=class_weights)
+            val_loss = ce_loss(y_true=y_val, y_pred=val_probs)
             return val_loss
         val_loss = strategy.run(step_fn, args=(batch,))
         per_replica_val_loss = strategy.reduce(tf.distribute.ReduceOp.SUM, val_loss, axis=None)
