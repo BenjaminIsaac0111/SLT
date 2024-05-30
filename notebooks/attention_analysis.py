@@ -17,10 +17,10 @@ from TeaPotts.utils import build_seg_cmap
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 mixed_precision.set_global_policy('mixed_float16')
 
-psuedo_working_dir = "Attention-UNET/"
+psuedo_working_dir = "./Attention-UNET/"
 cfg = {
-    "MODEL_DIR": ("%sModel_Example_Outputs/" % psuedo_working_dir),
-    "MODEL_NAME": "student_attention_resnet.h5",
+    "MODEL_DIR": ("%scfg/unet_training_experiments/Outputs" % psuedo_working_dir),
+    "MODEL_NAME": "baseline_unet_fl_f2.h5",
     "N_MODEL_LEVELS": 2,  # Number of Down-sampling and Up-sampling levels
     "N_CONV_PER_LAYER": 2,  # Number of Conv blocks per level
     "USE_ATTENTION": True,  # Build model with additive attention block
@@ -100,49 +100,41 @@ test_ds = get_dataset(
     batch_size=1
 )
 
+# %%
+
+column_names = ['Loss', 'Validation Loss']
+
+# Read the CSV file into a DataFrame with no header and assign column names
+data = pd.read_csv(f"{cfg['MODEL_DIR']}/{cfg['MODEL_NAME']}/errors_{cfg['MODEL_NAME'][:-3]}.txt", header=None, names=column_names, delimiter='\t')
+
+# Check if the DataFrame is not empty
+if not data.empty:
+    # Plotting each column
+    plt.figure(figsize=(10, 8))
+    for column in data.columns:
+        plt.plot(data.index, data[column], label=column)
+
+    # Adding titles and labels
+    plt.title('Training and Validation Losses Over Epochs')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.legend()
+
+    # Show the plot
+    plt.grid(True)
+    plt.show()
+else:
+    print("The data file is empty or not found.")
 
 # %%
-def plot_losses(log_file_path):
-    # Define column names
-    column_names = ['Epoch', 'Total Loss', 'Hard Label Loss', 'Soft Target Loss', 'Validation Loss']
-
-    # Read the CSV file into a DataFrame with no header and assign column names
-    data = pd.read_csv(log_file_path, header=None, names=column_names)
-
-    # Check if the DataFrame is not empty
-    if not data.empty:
-        # Set the index to the 'Epoch' column for easier plotting
-        data.set_index('Epoch', inplace=True)
-
-        # Plotting each column
-        plt.figure(figsize=(10, 8))
-        for column in data.columns:
-            plt.plot(data.index, data[column], label=column)
-
-        # Adding titles and labels
-        plt.title('Training and Validation Losses Over Epochs')
-        plt.xlabel('Epoch')
-        plt.ylabel('Loss')
-        plt.legend()
-
-        # Show the plot
-        plt.grid(True)
-        plt.show()
-    else:
-        print("The data file is empty or not found.")
-
-
-plot_losses(f"{cfg['MODEL_DIR']}/{cfg['MODEL_NAME']}/errors_{cfg['MODEL_NAME'][:-3]}.csv")
-
-# %%
-checkpoint_dir = f"{cfg['MODEL_DIR']}/{cfg['MODEL_NAME']}/ckpt_{cfg['MODEL_NAME']}"  # this is weird...
+checkpoint_dir = f"{cfg['MODEL_DIR']}/{cfg['MODEL_NAME']}/best_{cfg['MODEL_NAME']}"  # this is weird...
 model = load_model(
     checkpoint_dir,
     custom_objects={
         'GroupNormalization': GroupNormalization(),
         'PixelShuffle': PixelShuffle,
         'AttentionBlock': AttentionBlock
-    })
+    }, compile=False)
 attentions = [layer.output for layer in model.layers if 'attention' in layer.name]
 attentions.append(model.output)
 embedder = tf.keras.models.Model(inputs=model.input, outputs=attentions)
@@ -157,7 +149,7 @@ i = 0
 x, y = next(ds)
 x = tf.cast(x, tf.float32)
 LUT, colour_patches = build_seg_cmap(components=cfg['CLASS_COMPONENTS'])
-probs, logits = model(x, training=False)
+probs = model(x, training=False)
 x_Seg = tf.math.argmax(probs, axis=-1)
 out = tf.nn.embedding_lookup(LUT[1:], x_Seg)
 plt.figure(figsize=(19.20, 10.80))
@@ -181,8 +173,8 @@ def process_attention_map(attention_map):
 
 
 # %%
-x, y = next(ds)
-x = tf.cast(x, tf.float32)
+# x, y = next(ds)
+# x = tf.cast(x, tf.float32)
 
 # Generate the outputs from the embedder model
 outputs = embedder(x, training=False)
