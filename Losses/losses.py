@@ -115,13 +115,27 @@ def focal_distillation_loss(teacher_logits, student_logits, gamma=2.0, alpha_wei
 @tf.function
 def custom_validation_iou(y_true, y_pred):
     """
-    Calculate Intersection over Union for the regions specified by the one-hot encoded mask.
-
+    Calculates the Average Intersection over Union (IoU) score for semantic segmentation models.
+    Nullifies contributions from location without ground truth in order to calculate IOU on areas with ground truth.
     Args:
-        y_true: The ground truth labels, one-hot encoded.
-        y_pred: The predicted logits.
+        y_true: The true labels of the segmentation masks. Expected shape is (batch_size, height, width, num_classes).
+        y_pred: The predicted logits of the segmentation masks. Expected shape is (batch_size, height, width, num_classes).
+
     Returns:
-        The average IoU score across all classes for the masked regions.
+        The average IoU score for the valid classes.
+
+    Raises:
+        None
+
+    Example:
+        y_true = tf.constant([[[[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+                               [[1, 1, 1], [0, 0, 0], [1, 1, 1]],
+                               [[0, 0, 0], [0, 1, 0], [0, 0, 0]]]])
+        y_pred = tf.constant([[[[0.9, 0.1, 0], [0.1, 0.8, 0.1], [0, 0, 0.9]],
+                               [[0.6, 0.3, 0.1], [0.1, 0.2, 0.7], [0.7, 0.2, 0.1]],
+                               [[0, 0, 0], [0, 0.9, 0], [0, 0, 0]]]])
+
+        result = custom_validation_iou(y_true, y_pred)
     """
     # Convert predictions from logits to one-hot format
     mask = tf.cast(y_true != 0, tf.float32)

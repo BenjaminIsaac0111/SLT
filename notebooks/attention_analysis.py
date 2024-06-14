@@ -20,7 +20,7 @@ mixed_precision.set_global_policy('mixed_float16')
 psuedo_working_dir = "./Attention-UNET/"
 cfg = {
     "MODEL_DIR": ("%scfg/unet_training_experiments/Outputs" % psuedo_working_dir),
-    "MODEL_NAME": "baseline_unet_fl_f2.h5",
+    "MODEL_NAME": "attention_unet_fl_f2.h5",
     "N_MODEL_LEVELS": 2,  # Number of Down-sampling and Up-sampling levels
     "N_CONV_PER_LAYER": 2,  # Number of Conv blocks per level
     "USE_ATTENTION": True,  # Build model with additive attention block

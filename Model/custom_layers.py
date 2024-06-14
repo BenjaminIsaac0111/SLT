@@ -143,7 +143,6 @@ class AttentionBlock(layers.Layer):
     def __init__(self, inter_channel, **kwargs):
         super(AttentionBlock, self).__init__(**kwargs)
         self.attention_multiply = None
-        self.pixel_shuffle = None
         self.inter_channel = inter_channel
 
     def build(self, input_shape):
