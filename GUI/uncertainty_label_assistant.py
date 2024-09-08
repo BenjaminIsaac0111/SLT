@@ -12,7 +12,7 @@ from PyQt5.QtCore import QObject, pyqtSignal, pyqtSlot, QThread, Qt, QTimer, QLi
 from PyQt5.QtGui import QImage, QPixmap, QPen, QColor, QTransform
 from PyQt5.QtWidgets import (
     QApplication, QGraphicsView, QGraphicsPixmapItem, QGraphicsScene,
-    QVBoxLayout, QListWidget, QListWidgetItem, QWidget, QSplitter, QGraphicsLineItem, QGraphicsItemGroup
+    QVBoxLayout, QListWidget, QListWidgetItem, QWidget, QSplitter, QGraphicsLineItem, QGraphicsItemGroup, QHBoxLayout
 )
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', stream=sys.stdout)
@@ -116,8 +116,9 @@ from PyQt5.QtWidgets import QGraphicsItemGroup, QGraphicsLineItem
 
 
 class ClickableArrowGroup(QGraphicsItemGroup):
-    def __init__(self, coord, arrow_color=QColor(57, 255, 20), arrow_size=24, parent=None):
+    def __init__(self, coord, arrow_color=QColor(57, 255, 20), arrow_size=24, parent=None, manager=None):
         super().__init__(parent)
+        self.manager = manager  # Reference to the ArrowManager
         x, y = int(coord[0]), int(coord[1])
 
         # Create the main arrow body and wings
@@ -186,14 +187,17 @@ class ClickableArrowGroup(QGraphicsItemGroup):
     def mousePressEvent(self, event):
         """Handle mouse click on the arrow and sync selection."""
         super().mousePressEvent(event)
-        if self.is_selected:
-            # Deselect the arrow
-            self.is_selected = False
-            self.reset_color()
-        else:
+        if not self.is_selected:
+            # Ask the manager to handle selection, which will deselect others
+            self.manager.select_arrow(self)
             # Select the arrow and set it to red
             self.is_selected = True
             self.set_arrow_color(QColor(255, 0, 0))
+
+    def deselect_arrow(self):
+        """Deselect this arrow."""
+        self.is_selected = False
+        self.reset_color()
 
     def hoverEnterEvent(self, event):
         """Highlight the arrow when hovered and sync hover with siblings."""
@@ -364,48 +368,65 @@ class PatchImageViewer(QWidget):
 
         self.load_hdf5_data()
 
+        # Defer scaling until layout is initialized
+        QTimer.singleShot(0, self.scale_image_to_view)
+
     def setup_ui(self):
-        self.main_splitter = QSplitter(Qt.Horizontal, self)
-        self.content_splitter = QSplitter(Qt.Vertical, self)
+        """Setup UI layout with a splitter between file selector and image views."""
         self.file_list_widget = QListWidget()
         self.file_list_widget.itemClicked.connect(self.on_file_selected)
-        self.content_splitter.addWidget(self.file_list_widget)
 
         # Setup individual views for each image type (image, overlay, uncertainty)
         self.setup_individual_graphics_views()
 
-        self.main_splitter.addWidget(self.content_splitter)
-        layout = QVBoxLayout(self)
-        layout.addWidget(self.main_splitter)
-        self.setLayout(layout)
+        # Organize the views in a horizontal layout
+        self.image_layout = QHBoxLayout()
+        self.image_layout.addWidget(self.image_view)
+        self.image_layout.addWidget(self.overlay_view)
+        self.image_layout.addWidget(self.uncertainty_view)
 
-        # Connect splitter's resize signal to scaling
-        self.main_splitter.splitterMoved.connect(self.scale_image_to_view)
-        self.content_splitter.splitterMoved.connect(self.scale_image_to_view)
+        # Create a widget to hold the image views and set the layout for the image views
+        image_container = QWidget()
+        image_container.setLayout(self.image_layout)
+
+        # Use a splitter between the image views and the file list
+        self.splitter = QSplitter(Qt.Horizontal, self)
+        self.splitter.addWidget(image_container)  # Add the image views to the splitter
+        self.splitter.addWidget(self.file_list_widget)  # Add the file selector to the splitter
+
+        # Connect the splitterMoved signal to resize the images when the splitter is moved
+        self.splitter.splitterMoved.connect(self.scale_image_to_view)
+
+        # Create the main layout and add the splitter
+        self.main_layout = QVBoxLayout(self)
+        self.main_layout.addWidget(self.splitter)
+        self.setLayout(self.main_layout)
 
     def setup_individual_graphics_views(self):
-        # Create separate scenes and views for the image, overlay, and uncertainty heatmap
+        """Create the scenes and views for the image, overlay, and uncertainty heatmap."""
         self.image_scene = QGraphicsScene(self)
         self.image_view = QGraphicsView(self.image_scene, self)
-        self.image_item = QGraphicsPixmapItem()  # Initialize the QGraphicsPixmapItem for the image
+        self.image_view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.image_view.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.image_item = QGraphicsPixmapItem()
         self.image_scene.addItem(self.image_item)
 
         self.overlay_scene = QGraphicsScene(self)
         self.overlay_view = QGraphicsView(self.overlay_scene, self)
-        self.overlay_item = QGraphicsPixmapItem()  # Initialize the QGraphicsPixmapItem for the overlay
+        self.overlay_view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.overlay_view.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.overlay_item = QGraphicsPixmapItem()
         self.overlay_scene.addItem(self.overlay_item)
 
         self.uncertainty_scene = QGraphicsScene(self)
         self.uncertainty_view = QGraphicsView(self.uncertainty_scene, self)
-        self.uncertainty_item = QGraphicsPixmapItem()  # Initialize the QGraphicsPixmapItem for the uncertainty heatmap
+        self.uncertainty_view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.uncertainty_view.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.uncertainty_item = QGraphicsPixmapItem()
         self.uncertainty_scene.addItem(self.uncertainty_item)
 
-        # Set layouts for the views in left-to-right order (image, overlay, uncertainty)
-        self.main_splitter.addWidget(self.image_view)
-        self.main_splitter.addWidget(self.overlay_view)
-        self.main_splitter.addWidget(self.uncertainty_view)
-
     def update_ui_with_images(self, image, mask, overlay, uncertainty_heatmap):
+        """Update the UI with the images and scale them properly on load."""
         self.current_image = image
         self.current_overlay = overlay
         self.current_uncertainty_heatmap = uncertainty_heatmap
@@ -415,7 +436,8 @@ class PatchImageViewer(QWidget):
         self.overlay_item.setPixmap(overlay)
         self.uncertainty_item.setPixmap(uncertainty_heatmap)
 
-        self.scale_image_to_view()  # Scale the view after updating the images
+        # Call scale_image_to_view to ensure they are scaled appropriately
+        self.scale_image_to_view()
 
         # Draw the arrows after the images have been properly set
         self.draw_arrows()
@@ -433,27 +455,9 @@ class PatchImageViewer(QWidget):
         for view in [self.image_view, self.overlay_view, self.uncertainty_view]:
             view.resetTransform()
 
-        # Get the bounding rectangles of all scenes
-        image_rect = self.image_view.scene().itemsBoundingRect()
-        overlay_rect = self.overlay_view.scene().itemsBoundingRect()
-        uncertainty_rect = self.uncertainty_view.scene().itemsBoundingRect()
-
-        # Create a combined bounding rectangle that encompasses all three scenes
-        combined_rect = image_rect.united(overlay_rect).united(uncertainty_rect)
-
-        # Ensure the combined rectangle is valid
-        if combined_rect.width() == 0 or combined_rect.height() == 0:
-            return  # No need to scale if the bounding rect has no size
-
-        # Calculate the scaling factor based on the combined bounding rectangle
-        scaleFactorX = self.width() / combined_rect.width() if combined_rect.width() > 0 else 1
-        scaleFactorY = self.height() / combined_rect.height() if combined_rect.height() > 0 else 1
-        scaleFactor = min(scaleFactorX, scaleFactorY)
-
-        # Apply the same scaling factor to all views and center them on the combined rect
+        # Fit the scenes to the view without exceeding the view's bounds
         for view in [self.image_view, self.overlay_view, self.uncertainty_view]:
-            view.scale(scaleFactor, scaleFactor)
-            view.centerOn(combined_rect.center())
+            view.fitInView(view.scene().itemsBoundingRect(), Qt.KeepAspectRatio)
 
     def load_hdf5_data(self):
         self.image_dataset = self.hdf5_file['rgb_images']
@@ -488,7 +492,10 @@ class PatchImageViewer(QWidget):
 
     def resizeEvent(self, event):
         """Handle window resize event to rescale images."""
+        # Rescale the images to fit the views
         self.scale_image_to_view()
+
+        # Call the parent class resize event
         super(PatchImageViewer, self).resizeEvent(event)
 
     def closeEvent(self, event):
@@ -528,17 +535,18 @@ class AnnotationManager:
                 self.scene.removeItem(item)  # Then remove from the scene
             item = None  # Explicitly dereference the item to avoid further access
 
+
 class ArrowManager:
     def __init__(self, image_scene, overlay_scene, uncertainty_scene):
         self.scenes = [image_scene, overlay_scene, uncertainty_scene]
-        # Use a dictionary to store corresponding arrows across scenes
-        self.synced_arrows = []
+        self.synced_arrows = []  # List of synced arrows across scenes
+        self.selected_arrow = None  # Track the currently selected arrow
 
     def draw_arrows(self, arrow_coords, image_item, arrow_color=(57, 255, 20), arrow_size=24):
         """Draw arrows on all scenes at the given coordinates and sync their selection."""
         self.synced_arrows.clear()  # Clear previous arrows
         for coord in arrow_coords:
-            y, x = coord  # Switch x and y coordinates
+            y, x = coord
             scene_x = image_item.pos().x() + x
             scene_y = image_item.pos().y() + y
 
@@ -546,7 +554,7 @@ class ArrowManager:
             arrow_group_instances = []
             for scene in self.scenes:
                 arrow_group = ClickableArrowGroup((scene_x, scene_y), arrow_color=QColor(*arrow_color),
-                                                  arrow_size=arrow_size)
+                                                  arrow_size=arrow_size, manager=self)
                 scene.addItem(arrow_group)
                 arrow_group_instances.append(arrow_group)
 
@@ -554,7 +562,7 @@ class ArrowManager:
             for arrow_group in arrow_group_instances:
                 arrow_group.set_sibling_arrows(arrow_group_instances)  # Pass the list of sibling arrows
 
-            self.synced_arrows.append(arrow_group_instances)  # Store them as synced arrows
+            self.synced_arrows.append(arrow_group_instances)
 
     def clear_annotations(self):
         """Clear all annotations from all scenes."""
@@ -565,6 +573,14 @@ class ArrowManager:
                         scene.removeItem(arrow_group)
         self.synced_arrows.clear()
 
+    def select_arrow(self, arrow_group):
+        """Handle arrow selection, ensuring only one arrow is selected at a time."""
+        # Deselect the currently selected arrow if one exists
+        if self.selected_arrow and self.selected_arrow != arrow_group:
+            self.selected_arrow.deselect_arrow()
+
+        # Set the new arrow as the selected one
+        self.selected_arrow = arrow_group
 
 
 # Main entry for testing
