@@ -8,7 +8,7 @@ from scipy.special import softmax
 from scipy.ndimage import maximum_filter
 from sklearn.cluster import DBSCAN
 
-from PyQt5.QtCore import QObject, pyqtSignal, pyqtSlot, QThread, Qt, QTimer, QLineF, QRectF, QPoint
+from PyQt5.QtCore import QObject, pyqtSignal, pyqtSlot, QThread, Qt, QTimer, QLineF, QRectF, QPoint, QEvent
 from PyQt5.QtGui import QImage, QPixmap, QPen, QColor, QTransform
 from PyQt5.QtWidgets import (
     QApplication, QGraphicsView, QGraphicsPixmapItem, QGraphicsScene,
@@ -110,23 +110,28 @@ class UncertaintyRegionSelector:
         return cluster_centers[:top_n]
 
 
+from PyQt5.QtCore import QPoint, QLineF, Qt
+from PyQt5.QtGui import QPen, QColor, QPainterPath
+from PyQt5.QtWidgets import QGraphicsItemGroup, QGraphicsLineItem
+
+
 class ClickableArrowGroup(QGraphicsItemGroup):
     def __init__(self, coord, arrow_color=QColor(57, 255, 20), arrow_size=24, parent=None):
         super().__init__(parent)
-        x, y = coord
+        x, y = int(coord[0]), int(coord[1])
 
         # Create the main arrow body and wings
-        arrow_tip = QPoint(x, y - arrow_size)
-        wing_left = QPoint(x - arrow_size // 2, y - arrow_size // 2)
-        wing_right = QPoint(x + arrow_size // 2, y - arrow_size // 2)
+        arrow_tip = QPoint(int(x), int(y - arrow_size))
+        wing_left = QPoint(int(x - arrow_size // 2), int(y - arrow_size // 2))
+        wing_right = QPoint(int(x + arrow_size // 2), int(y - arrow_size // 2))
 
         # Create the QGraphicsLineItem for the body and wings
-        pen = QPen(arrow_color, 2)
-        self.body_item = QGraphicsLineItem(QLineF(QPoint(x, y), arrow_tip))
+        pen = QPen(arrow_color, 3)
+        self.body_item = QGraphicsLineItem(QLineF(QPoint(int(x), int(y)), arrow_tip))
         self.body_item.setPen(pen)
-        self.wing_left_item = QGraphicsLineItem(QLineF(QPoint(x, y), wing_left))
+        self.wing_left_item = QGraphicsLineItem(QLineF(QPoint(int(x), int(y)), wing_left))
         self.wing_left_item.setPen(pen)
-        self.wing_right_item = QGraphicsLineItem(QLineF(QPoint(x, y), wing_right))
+        self.wing_right_item = QGraphicsLineItem(QLineF(QPoint(int(x), int(y)), wing_right))
         self.wing_right_item.setPen(pen)
 
         # Add the lines to the group
@@ -136,43 +141,83 @@ class ClickableArrowGroup(QGraphicsItemGroup):
 
         # Store default color for resetting later
         self.default_color = arrow_color
-        self.setAcceptHoverEvents(True)  # Enable hover events
+        self.setAcceptHoverEvents(True)
 
-        # Track if this arrow is selected
+        # Track if this arrow is selected and hovered
         self.is_selected = False
+        self.hovered = False
+
+        # To sync arrows across scenes
+        self.sibling_arrows = []
+
+        # Make the arrow selectable and expand the clickable area
+        self.setFlags(QGraphicsItemGroup.ItemIsSelectable)
+        self.setAcceptedMouseButtons(Qt.LeftButton)
+
+    def set_sibling_arrows(self, siblings):
+        """Set sibling arrows in other scenes."""
+        self.sibling_arrows = siblings
 
     def set_arrow_color(self, color):
-        """Set the color of the entire arrow group."""
-        pen = QPen(color, 2)
+        """Set the color of the entire arrow group and sync with sibling arrows."""
+        pen = QPen(color, 3)
+        self.body_item.setPen(pen)
+        self.wing_left_item.setPen(pen)
+        self.wing_right_item.setPen(pen)
+        self.sync_sibling_colors(color)
+
+    def reset_color(self):
+        """Reset the arrow color to its default and sync with sibling arrows."""
+        self.set_arrow_color(self.default_color)
+
+    def sync_sibling_colors(self, color):
+        """Sync the color of all sibling arrows across scenes."""
+        for sibling in self.sibling_arrows:
+            if sibling != self:
+                sibling._set_color_directly(color)
+
+    def _set_color_directly(self, color):
+        """Set color directly without triggering sync to avoid recursion."""
+        pen = QPen(color, 3)
         self.body_item.setPen(pen)
         self.wing_left_item.setPen(pen)
         self.wing_right_item.setPen(pen)
 
-    def reset_color(self):
-        """Reset the arrow color to its default."""
-        self.set_arrow_color(self.default_color)
-
     def mousePressEvent(self, event):
-        """Handle mouse click on the arrow."""
-        self.set_arrow_color(QColor(255, 0, 0))  # Change color to red when selected
-        self.is_selected = True
+        """Handle mouse click on the arrow and sync selection."""
         super().mousePressEvent(event)
-
-    def mouseReleaseEvent(self, event):
-        """Handle mouse release."""
-        super().mouseReleaseEvent(event)
+        if self.is_selected:
+            # Deselect the arrow
+            self.is_selected = False
+            self.reset_color()
+        else:
+            # Select the arrow and set it to red
+            self.is_selected = True
+            self.set_arrow_color(QColor(255, 0, 0))
 
     def hoverEnterEvent(self, event):
-        """Highlight the arrow when hovered."""
-        if not self.is_selected:
+        """Highlight the arrow when hovered and sync hover with siblings."""
+        if not self.is_selected and not self.hovered:
             self.set_arrow_color(QColor(255, 165, 0))  # Orange color on hover
+            self.hovered = True
         super().hoverEnterEvent(event)
 
     def hoverLeaveEvent(self, event):
-        """Reset color when hover ends."""
-        if not self.is_selected:
+        """Reset color when hover ends and sync with siblings."""
+        if not self.is_selected and self.hovered:
             self.reset_color()
+            self.hovered = False
         super().hoverLeaveEvent(event)
+
+    def boundingRect(self):
+        """Expand the bounding rectangle slightly to increase the clickable area."""
+        return self.childrenBoundingRect().adjusted(-5, -5, 5, 5)
+
+    def shape(self):
+        """Return a larger QPainterPath to improve hit detection."""
+        path = QPainterPath()
+        path.addRect(self.boundingRect())
+        return path
 
 
 class ImageLoaderWorker(QObject):
@@ -315,7 +360,7 @@ class PatchImageViewer(QWidget):
         self.worker.imageLoaded.connect(self.update_ui_with_images)
         self.thread.start()
 
-        self.annotation_manager = AnnotationManager(self.image_scene)
+        self.annotation_manager = ArrowManager(self.image_scene, self.overlay_scene, self.uncertainty_scene)
 
         self.load_hdf5_data()
 
@@ -376,26 +421,39 @@ class PatchImageViewer(QWidget):
         self.draw_arrows()
 
     def draw_arrows(self):
-        """Draw arrows on the first scene over the image."""
+        """Draw arrows on all scenes and sync them."""
         if self.annotation_manager:
             self.annotation_manager.clear_annotations()  # Clear previous annotations
-            # Ensure the arrows are drawn on the image scene
+            # Ensure the arrows are drawn and synced across all scenes
             self.annotation_manager.draw_arrows(self.selected_coords, self.image_item)
 
     def scale_image_to_view(self):
-        """Scale all views to fit the available space."""
+        """Scale all views to fit the available space, ensuring synchronized scaling across views."""
+        # Reset the transformation for all views
         for view in [self.image_view, self.overlay_view, self.uncertainty_view]:
             view.resetTransform()
-            rect = view.scene().itemsBoundingRect()
-            if rect.width() == 0 or rect.height() == 0:
-                continue
 
-            scaleFactorX = view.width() / rect.width() if rect.width() > 0 else 1
-            scaleFactorY = view.height() / rect.height() if rect.height() > 0 else 1
-            scaleFactor = min(scaleFactorX, scaleFactorY)
+        # Get the bounding rectangles of all scenes
+        image_rect = self.image_view.scene().itemsBoundingRect()
+        overlay_rect = self.overlay_view.scene().itemsBoundingRect()
+        uncertainty_rect = self.uncertainty_view.scene().itemsBoundingRect()
 
+        # Create a combined bounding rectangle that encompasses all three scenes
+        combined_rect = image_rect.united(overlay_rect).united(uncertainty_rect)
+
+        # Ensure the combined rectangle is valid
+        if combined_rect.width() == 0 or combined_rect.height() == 0:
+            return  # No need to scale if the bounding rect has no size
+
+        # Calculate the scaling factor based on the combined bounding rectangle
+        scaleFactorX = self.width() / combined_rect.width() if combined_rect.width() > 0 else 1
+        scaleFactorY = self.height() / combined_rect.height() if combined_rect.height() > 0 else 1
+        scaleFactor = min(scaleFactorX, scaleFactorY)
+
+        # Apply the same scaling factor to all views and center them on the combined rect
+        for view in [self.image_view, self.overlay_view, self.uncertainty_view]:
             view.scale(scaleFactor, scaleFactor)
-            view.centerOn(rect.center())
+            view.centerOn(combined_rect.center())
 
     def load_hdf5_data(self):
         self.image_dataset = self.hdf5_file['rgb_images']
@@ -437,6 +495,13 @@ class PatchImageViewer(QWidget):
         self.hdf5_file.close()
         super(PatchImageViewer, self).closeEvent(event)
 
+    def changeEvent(self, event):
+        """Handle window state changes like maximization or minimization."""
+        if event.type() == QEvent.WindowStateChange:
+            if self.isMaximized() or self.isFullScreen():
+                self.scale_image_to_view()
+        super().changeEvent(event)
+
 
 class AnnotationManager:
     def __init__(self, scene):
@@ -449,7 +514,8 @@ class AnnotationManager:
             y, x = coord  # Switch x and y coordinates here
             scene_x = image_item.pos().x() + x  # x coordinate
             scene_y = image_item.pos().y() + y  # y coordinate
-            arrow_group = ClickableArrowGroup((scene_x, scene_y), arrow_color=QColor(*arrow_color), arrow_size=arrow_size)
+            arrow_group = ClickableArrowGroup((scene_x, scene_y), arrow_color=QColor(*arrow_color),
+                                              arrow_size=arrow_size)
             self.scene.addItem(arrow_group)
             self.annotation_items.append(arrow_group)
 
@@ -462,7 +528,42 @@ class AnnotationManager:
                 self.scene.removeItem(item)  # Then remove from the scene
             item = None  # Explicitly dereference the item to avoid further access
 
+class ArrowManager:
+    def __init__(self, image_scene, overlay_scene, uncertainty_scene):
+        self.scenes = [image_scene, overlay_scene, uncertainty_scene]
+        # Use a dictionary to store corresponding arrows across scenes
+        self.synced_arrows = []
 
+    def draw_arrows(self, arrow_coords, image_item, arrow_color=(57, 255, 20), arrow_size=24):
+        """Draw arrows on all scenes at the given coordinates and sync their selection."""
+        self.synced_arrows.clear()  # Clear previous arrows
+        for coord in arrow_coords:
+            y, x = coord  # Switch x and y coordinates
+            scene_x = image_item.pos().x() + x
+            scene_y = image_item.pos().y() + y
+
+            # Create arrow groups for each scene
+            arrow_group_instances = []
+            for scene in self.scenes:
+                arrow_group = ClickableArrowGroup((scene_x, scene_y), arrow_color=QColor(*arrow_color),
+                                                  arrow_size=arrow_size)
+                scene.addItem(arrow_group)
+                arrow_group_instances.append(arrow_group)
+
+            # Sync the color and selection state of all arrows across scenes
+            for arrow_group in arrow_group_instances:
+                arrow_group.set_sibling_arrows(arrow_group_instances)  # Pass the list of sibling arrows
+
+            self.synced_arrows.append(arrow_group_instances)  # Store them as synced arrows
+
+    def clear_annotations(self):
+        """Clear all annotations from all scenes."""
+        for scene in self.scenes:
+            for arrow_group_instances in self.synced_arrows:
+                for arrow_group in arrow_group_instances:
+                    if arrow_group.scene():
+                        scene.removeItem(arrow_group)
+        self.synced_arrows.clear()
 
 
 
