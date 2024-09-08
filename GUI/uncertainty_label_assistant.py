@@ -1,40 +1,183 @@
-from PyQt5.QtCore import QObject, pyqtSignal, pyqtSlot, QThread, Qt, QMetaObject, Q_ARG, QTimer, QLine, QPoint
-from PyQt5.QtGui import QImage, QPixmap, QPainter, QPen, QColor
-from PyQt5.QtWidgets import QApplication, QGraphicsView, QGraphicsPixmapItem, \
-    QGraphicsScene, QVBoxLayout, QListWidget, QListWidgetItem, QWidget, QSplitter, QSlider
-from PIL import Image
-import numpy as np
-from scipy.ndimage import maximum_filter
-from scipy.special import softmax
-import h5py
 import sys
 import logging
+import numpy as np
+import h5py
+from PIL import Image
 from matplotlib import pyplot as plt
+from scipy.special import softmax
+from scipy.ndimage import maximum_filter
 from sklearn.cluster import DBSCAN
 
-logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s - %(levelname)s - %(message)s',
-                    stream=sys.stdout)
-
-import math
-from PyQt5.QtCore import QObject, pyqtSignal, pyqtSlot, QThread, Qt, QMetaObject, Q_ARG, QTimer, QLine
-from PyQt5.QtGui import QImage, QPixmap, QPainter, QPen, QColor
-from PyQt5.QtWidgets import QApplication, QGraphicsView, QGraphicsPixmapItem, QGraphicsScene, QVBoxLayout, QListWidget, \
-    QListWidgetItem, QWidget, QSplitter
-from PIL import Image
-import numpy as np
-from scipy.special import softmax
-import h5py
-import sys
-import logging
-from matplotlib import pyplot as plt
+from PyQt5.QtCore import QObject, pyqtSignal, pyqtSlot, QThread, Qt, QTimer, QLineF, QRectF, QPoint
+from PyQt5.QtGui import QImage, QPixmap, QPen, QColor, QTransform
+from PyQt5.QtWidgets import (
+    QApplication, QGraphicsView, QGraphicsPixmapItem, QGraphicsScene,
+    QVBoxLayout, QListWidget, QListWidgetItem, QWidget, QSplitter, QGraphicsLineItem, QGraphicsItemGroup
+)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', stream=sys.stdout)
 
 
+class ZoomedArrowViewer(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Zoomed Arrow Viewer")
+        self.zoomed_view = QGraphicsView(self)
+        self.zoomed_scene = QGraphicsScene(self)
+        self.zoomed_view.setScene(self.zoomed_scene)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.zoomed_view)
+        self.setLayout(layout)
+
+        self.zoomed_pixmap_item = QGraphicsPixmapItem()
+        self.zoomed_scene.addItem(self.zoomed_pixmap_item)
+
+    def update_image(self, zoomed_pixmap):
+        """Update the viewer with the zoomed image."""
+        self.zoomed_pixmap_item.setPixmap(zoomed_pixmap)
+        self.zoomed_scene.setSceneRect(QRectF(zoomed_pixmap.rect()))
+        self.zoomed_view.fitInView(self.zoomed_pixmap_item, Qt.KeepAspectRatio)
+
+
+class UncertaintyRegionSelector:
+    def __init__(self, top_n=16, min_distance=32):
+        """
+        Initialize the region selector.
+
+        :param top_n: The number of top uncertain regions to return.
+        :param min_distance: The minimum distance between uncertain regions.
+        """
+        self.top_n = top_n
+        self.min_distance = min_distance
+
+    def select_regions(self, uncertainty_map):
+        """
+        Identify the top N uncertain regions in the given uncertainty map.
+
+        :param uncertainty_map: A 3D array representing uncertainty values for the image.
+        :return: A list of coordinates for the top uncertain regions.
+        """
+        # Reduce the 3D uncertainty map to a 2D uncertainty map using the mean across the last dimension
+        uncertainty_map_2d = np.mean(uncertainty_map, axis=-1)
+
+        # Normalize the uncertainty map
+        uncertainty_map_2d = self.normalize_uncertainty(uncertainty_map_2d)
+
+        # Identify the coordinates of the most uncertain regions
+        return self.identify_significant_coords(uncertainty_map_2d, self.top_n, self.min_distance)
+
+    @staticmethod
+    def normalize_uncertainty(uncertainty):
+        """
+        Normalize the uncertainty array to the range [0, 255].
+
+        :param uncertainty: A 2D array of uncertainty values.
+        :return: A normalized 2D array.
+        """
+        normalized_uncertainty = (uncertainty - np.min(uncertainty)) / (np.max(uncertainty) - np.min(uncertainty))
+        return (normalized_uncertainty * 255).astype(np.uint8)
+
+    @staticmethod
+    def identify_significant_coords(uncertainty_map, top_n, min_distance):
+        """
+        Identify the top uncertain regions based on the uncertainty map.
+
+        :param uncertainty_map: A 2D array representing normalized uncertainty values.
+        :param top_n: The number of top regions to return.
+        :param min_distance: The minimum distance between selected regions.
+        :return: A list of coordinates for the top uncertain regions.
+        """
+        # Apply a maximum filter to find local maxima
+        local_max = maximum_filter(uncertainty_map, size=min_distance) == uncertainty_map
+        coords = np.column_stack(np.nonzero(local_max))
+
+        # If no significant coordinates are found, return an empty list
+        if len(coords) == 0:
+            return []
+
+        # Cluster the coordinates to ensure minimum distance between them
+        clustering = DBSCAN(eps=min_distance, min_samples=1).fit(coords)
+        cluster_centers = [coords[clustering.labels_ == cluster_id].mean(axis=0).astype(int)
+                           for cluster_id in np.unique(clustering.labels_)]
+
+        # Ensure that each cluster center is a tuple of integer coordinates
+        cluster_centers = [tuple(map(int, coord)) for coord in cluster_centers]
+
+        # Sort the regions based on their uncertainty values (from highest to lowest)
+        cluster_centers = sorted(cluster_centers, key=lambda coord: -float(uncertainty_map[coord[0], coord[1]]))
+
+        return cluster_centers[:top_n]
+
+
+class ClickableArrowGroup(QGraphicsItemGroup):
+    def __init__(self, coord, arrow_color=QColor(57, 255, 20), arrow_size=24, parent=None):
+        super().__init__(parent)
+        x, y = coord
+
+        # Create the main arrow body and wings
+        arrow_tip = QPoint(x, y - arrow_size)
+        wing_left = QPoint(x - arrow_size // 2, y - arrow_size // 2)
+        wing_right = QPoint(x + arrow_size // 2, y - arrow_size // 2)
+
+        # Create the QGraphicsLineItem for the body and wings
+        pen = QPen(arrow_color, 2)
+        self.body_item = QGraphicsLineItem(QLineF(QPoint(x, y), arrow_tip))
+        self.body_item.setPen(pen)
+        self.wing_left_item = QGraphicsLineItem(QLineF(QPoint(x, y), wing_left))
+        self.wing_left_item.setPen(pen)
+        self.wing_right_item = QGraphicsLineItem(QLineF(QPoint(x, y), wing_right))
+        self.wing_right_item.setPen(pen)
+
+        # Add the lines to the group
+        self.addToGroup(self.body_item)
+        self.addToGroup(self.wing_left_item)
+        self.addToGroup(self.wing_right_item)
+
+        # Store default color for resetting later
+        self.default_color = arrow_color
+        self.setAcceptHoverEvents(True)  # Enable hover events
+
+        # Track if this arrow is selected
+        self.is_selected = False
+
+    def set_arrow_color(self, color):
+        """Set the color of the entire arrow group."""
+        pen = QPen(color, 2)
+        self.body_item.setPen(pen)
+        self.wing_left_item.setPen(pen)
+        self.wing_right_item.setPen(pen)
+
+    def reset_color(self):
+        """Reset the arrow color to its default."""
+        self.set_arrow_color(self.default_color)
+
+    def mousePressEvent(self, event):
+        """Handle mouse click on the arrow."""
+        self.set_arrow_color(QColor(255, 0, 0))  # Change color to red when selected
+        self.is_selected = True
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        """Handle mouse release."""
+        super().mouseReleaseEvent(event)
+
+    def hoverEnterEvent(self, event):
+        """Highlight the arrow when hovered."""
+        if not self.is_selected:
+            self.set_arrow_color(QColor(255, 165, 0))  # Orange color on hover
+        super().hoverEnterEvent(event)
+
+    def hoverLeaveEvent(self, event):
+        """Reset color when hover ends."""
+        if not self.is_selected:
+            self.reset_color()
+        super().hoverLeaveEvent(event)
+
+
 class ImageLoaderWorker(QObject):
-    finished = pyqtSignal()  # Signal to indicate processing is finished
-    imageLoaded = pyqtSignal(object, object, object, object, object, object)  # Signal to update UI with images
+    finished = pyqtSignal()
+    imageLoaded = pyqtSignal(object, object, object, object)
 
     def __init__(self):
         super().__init__()
@@ -43,178 +186,96 @@ class ImageLoaderWorker(QObject):
 
     @pyqtSlot(np.ndarray, np.ndarray, np.ndarray)
     def run(self, image, mask, uncertainty):
-        try:
-            # Convert numpy arrays to PIL Images
-            image_pil = self.convert_to_pil(image)
-            mask_pil = self.convert_to_pil(self.process_mask(mask))
-
-            # Process uncertainty and get images with arrows
-            (
-                image_with_arrows,
-                mask_with_arrows,
-                overlay_with_arrows,
-                uncertainty_with_arrows,
-                arrow_coords
-            ) = self.process_image(image_pil, mask_pil, uncertainty)
-
-            # Emit signal to update UI with processed images
-            self.imageLoaded.emit(image_pil, mask_pil, uncertainty, overlay_with_arrows, image_with_arrows,
-                                  uncertainty_with_arrows)
-            self.finished.emit()
-        except Exception as e:
-            logging.error(f"Error during image processing: {e}")
-
-    @staticmethod
-    def convert_to_pil(array):
-        """Convert a numpy array to a PIL Image."""
-        return Image.fromarray((array * 255).astype('uint8'))
+        pixmap_image, pixmap_mask, pixmap_overlay, pixmap_heatmap = self.process_image(image, mask, uncertainty)
+        self.imageLoaded.emit(pixmap_image, pixmap_mask, pixmap_overlay, pixmap_heatmap)
+        self.finished.emit()
 
     @staticmethod
     def process_mask(mask):
-        """Process the mask to create an RGB representation."""
-        try:
-            class_probs = softmax(mask, axis=-1)
-            class_labels = np.argmax(class_probs, axis=-1)
-            height, width = class_labels.shape
-            rgb_mask = np.zeros((height, width, 3), dtype=np.uint8)
-            cmap = plt.get_cmap('tab10')
+        class_probs = softmax(mask, axis=-1)
+        class_labels = np.argmax(class_probs, axis=-1)
+        height, width = class_labels.shape
+        rgb_mask = np.zeros((height, width, 3), dtype=np.uint8)
+        cmap = plt.get_cmap('tab10')
 
-            for class_label in np.unique(class_labels):
-                color = np.array(cmap(class_label)[:3]) * 255  # Convert to [0, 255] range
-                rgb_mask[class_labels == class_label] = color.astype(np.uint8)
+        for class_label in np.unique(class_labels):
+            color = np.array(cmap(class_label)[:3]) * 255
+            rgb_mask[class_labels == class_label] = color.astype(np.uint8)
 
-            return rgb_mask
-        except Exception as e:
-            logging.error(f"Error during mask processing: {e}")
-            return np.zeros((mask.shape[0], mask.shape[1], 3), dtype=np.uint8)  # Return a blank mask on error
+        return rgb_mask
 
     @staticmethod
     def create_overlay(image, mask, alpha=0.5):
-        """Create an overlay of the mask on the image."""
-        try:
-            # Ensure both images are in RGBA format
-            image_rgba = image.convert('RGBA')
-            mask_rgba = mask.convert('RGBA')
+        image_rgba = image.convert('RGBA')
+        mask_rgba = mask.convert('RGBA')
 
-            # Convert to numpy arrays for easier manipulation
-            image_np = np.array(image_rgba)
-            mask_np = np.array(mask_rgba)
+        image_np = np.array(image_rgba)
+        mask_np = np.array(mask_rgba)
 
-            # Blend the mask with the image using the alpha value
-            blended_np = image_np.copy()
-            for i in range(3):  # For RGB channels
-                blended_np[:, :, i] = (
-                        alpha * mask_np[:, :, i] + (1 - alpha) * image_np[:, :, i]
-                )
+        blended_np = image_np.copy()
+        for i in range(3):
+            blended_np[:, :, i] = alpha * mask_np[:, :, i] + (1 - alpha) * image_np[:, :, i]
 
-            # Combine alpha channels
-            blended_np[:, :, 3] = np.maximum(mask_np[:, :, 3] * alpha, image_np[:, :, 3])
+        blended_np[:, :, 3] = np.maximum(mask_np[:, :, 3] * alpha, image_np[:, :, 3])
 
-            # Convert back to an Image
-            blended_image = Image.fromarray(blended_np, 'RGBA')
-            return blended_image
-        except Exception as e:
-            logging.error(f"Error during overlay creation: {e}")
-            return image  # Return the original image on error
+        return Image.fromarray(blended_np, 'RGBA')
 
-    def process_image(self, image, mask, uncertainty, top_n=16, min_distance=16):
-        """Process the uncertainty and return images with and without arrows."""
+    def process_image(self, image, mask, uncertainty):
         uncertainty = self.normalize_uncertainty(uncertainty)
+        overlay = self.convert_pil_to_pixmap(self.create_overlay(image, mask))
+        image = self.convert_pil_to_pixmap(image)
+        mask = self.convert_pil_to_pixmap(mask)
+        heatmap_rgba = self.convert_pil_to_pixmap(self.create_heatmap(uncertainty))
+        return image, mask, overlay, heatmap_rgba
 
-        # Generate the heatmap from the uncertainty
-        heatmap_rgba = self.create_heatmap(uncertainty)
+    @staticmethod
+    def convert_pil_to_pixmap(pil_image):
+        if isinstance(pil_image, QPixmap):
+            return pil_image
 
-        # Identify significant coordinates based on uncertainty
-        selected_coords = self.identify_significant_coords(uncertainty, top_n, min_distance)
-        logging.info(f"Generated {len(selected_coords)} significant coordinates: {selected_coords}")
+        if pil_image.mode != 'RGBA':
+            pil_image = pil_image.convert('RGBA')
 
-        # Create images without arrows
-        overlay = self.create_overlay(image, mask)
+        image_np = np.array(pil_image)
+        if image_np.dtype != np.uint8:
+            image_np = (image_np * 255).astype(np.uint8)
 
-        # Draw arrows on the images
-        image_with_arrows = self.draw_arrows(image.copy(), selected_coords)
-        mask_with_arrows = self.draw_arrows(mask.copy(), selected_coords)
-        overlay_with_arrows = self.draw_arrows(overlay.copy(), selected_coords)
-        heatmap_with_arrows = self.draw_arrows(heatmap_rgba.copy(), selected_coords)
-
-        # Return images with and without arrows
-        return (
-            image,
-            mask,
-            overlay,
-            heatmap_rgba,
-            image_with_arrows,
-            mask_with_arrows,
-            overlay_with_arrows,
-            heatmap_with_arrows,
-            selected_coords
-        )
+        height, width, channels = image_np.shape
+        q_image = QImage(image_np.data, width, height, width * channels, QImage.Format_RGBA8888)
+        return QPixmap.fromImage(q_image)
 
     @staticmethod
     def normalize_uncertainty(uncertainty):
-        """Normalize the uncertainty array to the [0, 255] range."""
         uncertainty = np.mean(uncertainty, axis=-1)
         normalized_uncertainty = (uncertainty - np.min(uncertainty)) / (np.max(uncertainty) - np.min(uncertainty))
         return (normalized_uncertainty * 255).astype(np.uint8)
 
     @staticmethod
     def create_heatmap(normalized_uncertainty):
-        """Create a heatmap from normalized uncertainty."""
         colormap = plt.get_cmap('Spectral_r')
         heatmap = colormap(normalized_uncertainty / 255.0)
         return Image.fromarray((heatmap[:, :, :3] * 255).astype(np.uint8)).convert('RGBA')
 
-    @staticmethod
-    def identify_significant_coords(normalized_uncertainty, top_n, min_distance):
-        """Identify significant coordinates based on the uncertainty map."""
-        # Convert uncertainty to float32 to prevent overflow
-        normalized_uncertainty = normalized_uncertainty.astype(np.float32)
 
-        local_max = maximum_filter(normalized_uncertainty, size=min_distance) == normalized_uncertainty
-        coords = np.column_stack(np.nonzero(local_max))
+class CustomGraphicsScene(QGraphicsScene):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.selected_arrow = None  # Track the currently selected arrow
 
-        if len(coords) > 0:
-            clustering = DBSCAN(eps=min_distance, min_samples=1).fit(coords)
-            cluster_centers = [coords[clustering.labels_ == cluster_id].mean(axis=0).astype(int)
-                               for cluster_id in np.unique(clustering.labels_)]
-            cluster_centers = sorted(cluster_centers, key=lambda x: -float(normalized_uncertainty[x[0], x[1]]))
-            logging.info(f"Identified {len(cluster_centers)} cluster centers.")
-            return cluster_centers[:top_n]
-        logging.warning("No significant coordinates identified.")
-        return []
+    def mousePressEvent(self, event):
+        item = self.itemAt(event.scenePos(), QTransform())
+        if isinstance(item, ClickableArrowGroup):
+            logging.info(f"Arrow clicked at position: {item.childItems()[0].line().p1()}")
 
-    @staticmethod
-    def draw_arrows(image, arrow_coords, arrow_color=(57, 255, 20), arrow_size=24, selected_arrow=None):
-        if isinstance(image, QPixmap):
-            # Convert QPixmap to QImage and then to PIL Image
-            image = PatchImageViewer.pixmap_to_pil_image(image)
+            # If there's a previously selected arrow, reset its color
+            if self.selected_arrow:
+                self.selected_arrow.reset_color()
 
-        image_rgba = image  # Ensure it's RGBA for PIL
-        q_image = PatchImageViewer.convert_pil_to_pixmap(image_rgba)
-        painter = QPainter(q_image)
+            # Set the clicked arrow as selected and change its color to red
+            item.set_arrow_color(QColor(255, 0, 0))  # Set the color to red
+            self.selected_arrow = item  # Track the currently selected arrow
 
-        # Default pen for non-selected arrows
-        pen_color = QColor(*arrow_color)
-        pen = QPen(pen_color, 3)
-        painter.setPen(pen)
-
-        for y, x in arrow_coords:
-            if selected_arrow is not None and np.array_equal((y, x), selected_arrow):
-                painter.setPen(QPen(QColor(255, 0, 0), 4))  # Highlight the selected arrow in red
-            else:
-                painter.setPen(pen)
-
-            if 0 <= x < image_rgba.width and 0 <= y < image_rgba.height:
-                wing_left = QPoint(x - arrow_size // 2, y - arrow_size // 2)
-                wing_right = QPoint(x + arrow_size // 2, y - arrow_size // 2)
-                arrow_tip = QPoint(x, y - arrow_size)
-
-                painter.drawLine(QLine(QPoint(x, y), arrow_tip))
-                painter.drawLine(QLine(QPoint(x, y), wing_left))
-                painter.drawLine(QLine(QPoint(x, y), wing_right))
-
-        painter.end()
-        return q_image
+        super().mousePressEvent(event)
 
 
 class PatchImageViewer(QWidget):
@@ -223,25 +284,30 @@ class PatchImageViewer(QWidget):
         self.hdf5_file_path = hdf5_file_path
         self.hdf5_file = h5py.File(self.hdf5_file_path, 'r')
 
-        # Initialize attributes before setup_ui()
-        self.image_dataset = None
-        self.predicted_segmentation = None
-        self.uncertainty_dataset = None
+        self.labels = []
+        self.current_filename = None
+        self.selected_arrow_index = 0
+        self.selected_coords = []
 
-        self.initial_load = True
-        self.arrows_visible = True  # Flag to track arrow visibility
-        self.selected_arrow_index = 0  # Index to track the currently selected arrow
-        self.selected_coords = []  # To store the coordinates of selected arrows
+        self.label_radius = 8
+        self.current_class = 0
 
-        self.current_class = 1  # Default class for labelling
-        self.label_radius = 6  # Default label radius
+        self.class_components = {
+            0: 'Non-Informative',
+            1: 'Tumour',
+            2: 'Stroma',
+            3: 'Necrosis',
+            4: 'Vessel',
+            5: 'Inflammation',
+            6: 'Tumour-Lumen',
+            7: 'Mucin',
+            8: 'Muscle'
+        }
 
-        # Set focus policy to ensure key events are captured
-        self.setFocusPolicy(Qt.StrongFocus)
-        self.setFocus()
+        self.region_selector = UncertaintyRegionSelector(top_n=16, min_distance=32)
 
-        # Set up the UI components
         self.setup_ui()
+        self.resize(1200, 800)
 
         self.thread = QThread()
         self.worker = ImageLoaderWorker()
@@ -249,113 +315,87 @@ class PatchImageViewer(QWidget):
         self.worker.imageLoaded.connect(self.update_ui_with_images)
         self.thread.start()
 
+        self.annotation_manager = AnnotationManager(self.image_scene)
+
         self.load_hdf5_data()
-
-    def keyPressEvent(self, event):
-        if event.key() == Qt.Key_Space:
-            self.arrows_visible = not self.arrows_visible
-            logging.info(f"Arrows visibility toggled: {self.arrows_visible}")
-            self.update_ui_with_images(
-                self.current_image,
-                self.current_mask,
-                self.current_overlay,
-                self.current_uncertainty_heatmap,
-                self.current_image_with_arrows,
-                self.current_mask_with_arrows,
-                self.current_overlay_with_arrows,
-                self.current_uncertainty_with_arrows
-            )
-        elif event.key() in [Qt.Key_W, Qt.Key_S, Qt.Key_A, Qt.Key_D]:
-            logging.info(f"Arrow key pressed: {event.key()}")
-            if len(self.selected_coords) > 0:
-                if event.key() == Qt.Key_D or event.key() == Qt.Key_S:
-                    self.selected_arrow_index = (self.selected_arrow_index + 1) % len(self.selected_coords)
-                elif event.key() == Qt.Key_A or event.key() == Qt.Key_W:
-                    self.selected_arrow_index = (self.selected_arrow_index - 1) % len(self.selected_coords)
-
-                logging.info(f"Selected arrow index: {self.selected_arrow_index}")
-                self.highlight_selected_arrow()
-        else:
-            super(PatchImageViewer, self).keyPressEvent(event)
-
-    def highlight_selected_arrow(self):
-        if not self.selected_coords:
-            logging.warning("No arrow coordinates found to highlight.")
-            return
-
-        selected_coord = self.selected_coords[self.selected_arrow_index]
-        logging.info(f"Highlighting arrow at index {self.selected_arrow_index}, coordinate: {selected_coord}")
-
-        self.current_image_with_arrows = self.worker.draw_arrows(self.current_image, self.selected_coords,
-                                                                 selected_arrow=selected_coord)
-        self.current_mask_with_arrows = self.worker.draw_arrows(self.current_mask, self.selected_coords,
-                                                                selected_arrow=selected_coord)
-        self.current_overlay_with_arrows = self.worker.draw_arrows(self.current_overlay, self.selected_coords,
-                                                                   selected_arrow=selected_coord)
-        self.current_uncertainty_with_arrows = self.worker.draw_arrows(self.current_uncertainty_heatmap, self.selected_coords,
-                                                                       selected_arrow=selected_coord)
-
-        self.update_ui_with_images(
-            self.current_image,
-            self.current_mask,
-            self.current_overlay,
-            self.current_uncertainty_heatmap,
-            self.current_image_with_arrows,
-            self.current_mask_with_arrows,
-            self.current_overlay_with_arrows,
-            self.current_uncertainty_with_arrows
-        )
-
-    @staticmethod
-    def pixmap_to_pil_image(pixmap):
-        q_image = pixmap.toImage()
-        buffer = q_image.bits().asstring(q_image.byteCount())
-        image = Image.frombuffer("RGBA", (q_image.width(), q_image.height()), buffer, "raw", "RGBA", 0, 1)
-        return image
 
     def setup_ui(self):
         self.main_splitter = QSplitter(Qt.Horizontal, self)
+        self.content_splitter = QSplitter(Qt.Vertical, self)
         self.file_list_widget = QListWidget()
         self.file_list_widget.itemClicked.connect(self.on_file_selected)
-        self.main_splitter.addWidget(self.file_list_widget)
+        self.content_splitter.addWidget(self.file_list_widget)
 
-        self.setup_graphics_view()
+        # Setup individual views for each image type (image, overlay, uncertainty)
+        self.setup_individual_graphics_views()
 
+        self.main_splitter.addWidget(self.content_splitter)
         layout = QVBoxLayout(self)
         layout.addWidget(self.main_splitter)
         self.setLayout(layout)
 
+        # Connect splitter's resize signal to scaling
         self.main_splitter.splitterMoved.connect(self.scale_image_to_view)
+        self.content_splitter.splitterMoved.connect(self.scale_image_to_view)
 
-    def setup_graphics_view(self):
-        self.graphics_view = QGraphicsView(self)
-        self.graphics_view.setFocusPolicy(Qt.StrongFocus)  # Ensure QGraphicsView can take focus
+    def setup_individual_graphics_views(self):
+        # Create separate scenes and views for the image, overlay, and uncertainty heatmap
+        self.image_scene = QGraphicsScene(self)
+        self.image_view = QGraphicsView(self.image_scene, self)
+        self.image_item = QGraphicsPixmapItem()  # Initialize the QGraphicsPixmapItem for the image
+        self.image_scene.addItem(self.image_item)
 
-        # Initialize the scene before assigning it to the graphics view
-        self.scene = QGraphicsScene(self)
-        self.graphics_view.setScene(self.scene)
+        self.overlay_scene = QGraphicsScene(self)
+        self.overlay_view = QGraphicsView(self.overlay_scene, self)
+        self.overlay_item = QGraphicsPixmapItem()  # Initialize the QGraphicsPixmapItem for the overlay
+        self.overlay_scene.addItem(self.overlay_item)
 
-        self.image_item = QGraphicsPixmapItem()
-        self.mask_item = QGraphicsPixmapItem()
-        self.overlay_item = QGraphicsPixmapItem()
-        self.uncertainty_item = QGraphicsPixmapItem()
+        self.uncertainty_scene = QGraphicsScene(self)
+        self.uncertainty_view = QGraphicsView(self.uncertainty_scene, self)
+        self.uncertainty_item = QGraphicsPixmapItem()  # Initialize the QGraphicsPixmapItem for the uncertainty heatmap
+        self.uncertainty_scene.addItem(self.uncertainty_item)
 
-        self.scene.addItem(self.image_item)
-        self.scene.addItem(self.mask_item)
-        self.scene.addItem(self.overlay_item)
-        self.scene.addItem(self.uncertainty_item)
+        # Set layouts for the views in left-to-right order (image, overlay, uncertainty)
+        self.main_splitter.addWidget(self.image_view)
+        self.main_splitter.addWidget(self.overlay_view)
+        self.main_splitter.addWidget(self.uncertainty_view)
 
-        self.main_splitter.addWidget(self.graphics_view)
+    def update_ui_with_images(self, image, mask, overlay, uncertainty_heatmap):
+        self.current_image = image
+        self.current_overlay = overlay
+        self.current_uncertainty_heatmap = uncertainty_heatmap
 
-        self.graphics_view.setResizeAnchor(QGraphicsView.AnchorViewCenter)
-        self.graphics_view.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
+        # Set the processed images to the respective QGraphicsPixmapItem objects
+        self.image_item.setPixmap(image)
+        self.overlay_item.setPixmap(overlay)
+        self.uncertainty_item.setPixmap(uncertainty_heatmap)
 
-    def update_label_radius(self, value):
-        self.label_radius = value
-        logging.info(f"Label radius updated to {value}")
+        self.scale_image_to_view()  # Scale the view after updating the images
 
-    def calculate_global_uncertainty(self, i):
-        return np.mean(self.uncertainty_dataset[i])
+        # Draw the arrows after the images have been properly set
+        self.draw_arrows()
+
+    def draw_arrows(self):
+        """Draw arrows on the first scene over the image."""
+        if self.annotation_manager:
+            self.annotation_manager.clear_annotations()  # Clear previous annotations
+            # Ensure the arrows are drawn on the image scene
+            self.annotation_manager.draw_arrows(self.selected_coords, self.image_item)
+
+    def scale_image_to_view(self):
+        """Scale all views to fit the available space."""
+        for view in [self.image_view, self.overlay_view, self.uncertainty_view]:
+            view.resetTransform()
+            rect = view.scene().itemsBoundingRect()
+            if rect.width() == 0 or rect.height() == 0:
+                continue
+
+            scaleFactorX = view.width() / rect.width() if rect.width() > 0 else 1
+            scaleFactorY = view.height() / rect.height() if rect.height() > 0 else 1
+            scaleFactor = min(scaleFactorX, scaleFactorY)
+
+            view.scale(scaleFactor, scaleFactor)
+            view.centerOn(rect.center())
 
     def load_hdf5_data(self):
         self.image_dataset = self.hdf5_file['rgb_images']
@@ -375,142 +415,61 @@ class PatchImageViewer(QWidget):
 
     def on_file_selected(self, item):
         index = self.file_list_widget.row(item)
-        logging.info(f"Selected file: {item.text()} (index {index})")
-
         image = self.image_dataset[index]
         mask = self.predicted_segmentation[index]
         uncertainty = self.uncertainty_dataset[index]
 
-        # Convert to PIL images
         image_pil = Image.fromarray((image * 255).astype('uint8'))
         mask_pil = Image.fromarray(self.worker.process_mask(mask))
 
-        # Process the image, mask, and uncertainty to generate images with arrows
-        (
-            pixmap_image_without_arrows,
-            pixmap_mask_without_arrows,
-            pixmap_overlay_without_arrows,
-            pixmap_heatmap_without_arrows,
-            pixmap_image_with_arrows,
-            pixmap_mask_with_arrows,
-            pixmap_overlay_with_arrows,
-            pixmap_heatmap_with_arrows,
-            selected_coords
-        ) = self.worker.process_image(
-            image_pil,
-            mask_pil,
-            uncertainty
-        )
-        self.selected_coords = selected_coords
-        logging.info(f"Selected coordinates: {self.selected_coords}")
+        # Select top uncertain regions for labeling
+        self.selected_coords = self.region_selector.select_regions(uncertainty)
+        logging.info(f"Selected coordinates for labeling: {self.selected_coords}")
 
-        # Call the method to update the UI with the processed images
-        self.update_ui_with_images(
-            pixmap_image_without_arrows,  # Pass the image without arrows
-            pixmap_mask_without_arrows,  # Pass the mask without arrows
-            pixmap_overlay_without_arrows,  # Pass the overlay without arrows
-            pixmap_heatmap_without_arrows,  # Pass the heatmap without arrows
-            pixmap_image_with_arrows,  # Pass the image with arrows
-            pixmap_mask_with_arrows,  # Pass the mask with arrows
-            pixmap_overlay_with_arrows,  # Pass the overlay with arrows
-            pixmap_heatmap_with_arrows  # Pass the heatmap with arrows
-        )
-
-    def update_ui_with_images(
-            self,
-            image,
-            mask,
-            overlay,
-            uncertainty_heatmap,
-            image_with_arrows,
-            mask_with_arrows,
-            overlay_with_arrows,
-            uncertainty_with_arrows
-    ):
-        """
-        Update the UI with the images provided. The method will set the images for the corresponding
-        QGraphicsPixmapItem objects and adjust their positions within the scene.
-        """
-        self.current_image = image
-        self.current_mask = mask
-        self.current_overlay = overlay
-        self.current_uncertainty_heatmap = uncertainty_heatmap
-        self.current_image_with_arrows = image_with_arrows
-        self.current_mask_with_arrows = mask_with_arrows
-        self.current_overlay_with_arrows = overlay_with_arrows
-        self.current_uncertainty_with_arrows = uncertainty_with_arrows
-
-        # Determine if arrows are to be shown
-        if self.arrows_visible:
-            image_pixmap = image_with_arrows
-            mask_pixmap = mask_with_arrows
-            overlay_pixmap = overlay_with_arrows
-            uncertainty_pixmap = uncertainty_with_arrows
-        else:
-            image_pixmap = self.convert_pil_to_pixmap(image)
-            mask_pixmap = self.convert_pil_to_pixmap(mask)
-            overlay_pixmap = self.convert_pil_to_pixmap(overlay)
-            uncertainty_pixmap = self.convert_pil_to_pixmap(uncertainty_heatmap)
-
-        # Set pixmaps to the respective QGraphicsPixmapItem objects
-        self.image_item.setPixmap(image_pixmap)
-        self.mask_item.setPixmap(mask_pixmap)
-        self.overlay_item.setPixmap(overlay_pixmap)
-        self.uncertainty_item.setPixmap(uncertainty_pixmap)
-
-        # Position the items in the scene
-        self.mask_item.setPos(image_pixmap.width(), 0)
-        self.overlay_item.setPos(self.mask_item.pos().x() + mask_pixmap.width(), 0)
-        self.uncertainty_item.setPos(self.overlay_item.pos().x() + overlay_pixmap.width(), 0)
-
-        # Ensure the image fits within the view
-        self.scale_image_to_view()
-
-        # If it's the initial load, update the view
-        if self.initial_load:
-            self.graphics_view.update()
-            self.initial_load = False
-
-    def scale_image_to_view(self):
-        self.graphics_view.resetTransform()
-        rect = self.scene.itemsBoundingRect()
-        if rect.width() == 0 or rect.height() == 0:
-            return
-
-        scaleFactorX = self.graphics_view.width() / rect.width() if rect.width() > 0 else 1
-        scaleFactorY = self.graphics_view.height() / rect.height() if rect.height() > 0 else 1
-        scaleFactor = min(scaleFactorX, scaleFactorY)
-
-        self.graphics_view.scale(scaleFactor, scaleFactor)
-        self.graphics_view.centerOn(rect.center())
+        self.worker.run(image_pil, mask_pil, uncertainty)
 
     def resizeEvent(self, event):
+        """Handle window resize event to rescale images."""
         self.scale_image_to_view()
-        super().resizeEvent(event)
+        super(PatchImageViewer, self).resizeEvent(event)
 
-    @staticmethod
-    def convert_pil_to_pixmap(pil_image):
-        if isinstance(pil_image, QPixmap):
-            # If the input is already a QPixmap, return it directly
-            return pil_image
+    def closeEvent(self, event):
+        self.hdf5_file.close()
+        super(PatchImageViewer, self).closeEvent(event)
 
-        if pil_image.mode != 'RGBA':
-            pil_image = pil_image.convert('RGBA')
 
-        image_np = np.array(pil_image)
-        if image_np.dtype != np.uint8:
-            image_np = (image_np * 255).astype(np.uint8)
+class AnnotationManager:
+    def __init__(self, scene):
+        self.scene = scene
+        self.annotation_items = []
 
-        height, width, channels = image_np.shape
-        bytes_per_line = channels * width
-        q_image = QImage(image_np.data, width, height, bytes_per_line, QImage.Format_RGBA8888)
-        return QPixmap.fromImage(q_image)
+    def draw_arrows(self, arrow_coords, image_item, arrow_color=(57, 255, 20), arrow_size=24):
+        """Draw arrows on the scene at the given coordinates."""
+        for coord in arrow_coords:
+            y, x = coord  # Switch x and y coordinates here
+            scene_x = image_item.pos().x() + x  # x coordinate
+            scene_y = image_item.pos().y() + y  # y coordinate
+            arrow_group = ClickableArrowGroup((scene_x, scene_y), arrow_color=QColor(*arrow_color), arrow_size=arrow_size)
+            self.scene.addItem(arrow_group)
+            self.annotation_items.append(arrow_group)
+
+    def clear_annotations(self):
+        """Clear all annotations from the scene."""
+        # Safely remove all annotation items from the scene and empty the list
+        while self.annotation_items:
+            item = self.annotation_items.pop()  # Remove from the list first
+            if item.scene():  # Only remove the item if it's still in the scene
+                self.scene.removeItem(item)  # Then remove from the scene
+            item = None  # Explicitly dereference the item to avoid further access
+
+
+
 
 
 # Main entry for testing
 if __name__ == '__main__':
     app = QApplication(sys.argv)
-    hdf5_file_path = r"Z:\PathologyData\attention_unet_fl_f1.h5_COLLECTED_UNCERTAINTIES.h5"
+    hdf5_file_path = r"C:\Users\benja\OneDrive - University of Leeds\DATABACKUP\attention_unet_fl_f1.h5_COLLECTED_UNCERTAINTIES.h5"
     viewer = PatchImageViewer(hdf5_file_path=hdf5_file_path)
     viewer.show()
     logging.info("Application started")
