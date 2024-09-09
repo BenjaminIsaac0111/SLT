@@ -8,8 +8,8 @@ from scipy.special import softmax
 from scipy.ndimage import maximum_filter
 from sklearn.cluster import DBSCAN, HDBSCAN
 
-from PyQt5.QtCore import QObject, pyqtSignal, pyqtSlot, QThread, Qt, QTimer, QLineF, QRectF, QPoint, QEvent
-from PyQt5.QtGui import QImage, QPixmap, QPen, QColor, QTransform, QPainter, QPainterPath
+from PyQt5.QtCore import QObject, pyqtSignal, pyqtSlot, QThread, Qt, QTimer, QLineF, QRectF, QPoint, QEvent, QPointF
+from PyQt5.QtGui import QImage, QPixmap, QPen, QColor, QTransform, QPainter, QPainterPath, QBrush
 from PyQt5.QtWidgets import (
     QApplication, QGraphicsView, QGraphicsPixmapItem, QGraphicsScene,
     QVBoxLayout, QListWidget, QListWidgetItem, QWidget, QSplitter, QGraphicsLineItem, QGraphicsItemGroup, QHBoxLayout,
@@ -495,10 +495,34 @@ class PatchImageViewer(QWidget):
         self.uncertainty_scene.addItem(self.uncertainty_item)
 
     def keyPressEvent(self, event):
-        """Handle key press events for toggling the zoom viewer with 'Z'."""
+        """Handle key press events for toggling the zoom viewer and arrow selection."""
         if event.key() == Qt.Key_Z:
             self.toggle_zoom_viewer()
+        elif event.key() == Qt.Key_A:
+            self.cycle_arrows(-1)  # Move to the previous arrow
+        elif event.key() == Qt.Key_D:
+            self.cycle_arrows(1)  # Move to the next arrow
         super().keyPressEvent(event)
+
+    def cycle_arrows(self, direction):
+        """Cycle through arrows based on the direction (-1 for previous, 1 for next)."""
+        num_arrows = len(self.annotation_manager.synced_arrows)
+        if num_arrows == 0:
+            return  # No arrows to select
+
+        # Deselect the current arrow by resetting its color
+        current_arrow_group = self.annotation_manager.synced_arrows[self.selected_arrow_index][0]
+        current_arrow_group.deselect_arrow()
+
+        # Update the selected arrow index
+        self.selected_arrow_index = (self.selected_arrow_index + direction) % num_arrows
+        logging.info(f"Selected arrow index: {self.selected_arrow_index}")
+
+        # Get the new arrow to be selected
+        new_arrow_group = self.annotation_manager.synced_arrows[self.selected_arrow_index][0]
+
+        # Ask the annotation manager to select this arrow
+        self.annotation_manager.select_arrow(new_arrow_group)
 
     def toggle_zoom_viewer(self):
         """Toggle the visibility of the zoom viewer."""
@@ -600,6 +624,7 @@ class ArrowManager:
         self.synced_arrows = []  # List of synced arrows across scenes
         self.selected_arrow = None  # Track the currently selected arrow
         self.show_arrow_on_zoom = True  # Flag to toggle arrow visibility on the zoomed crop
+        self.initial_size_set = False  # Flag to track if the initial size was set
 
     def draw_arrows(self, arrow_coords, image_item, arrow_color=(57, 255, 20), arrow_size=24):
         """Draw arrows on all scenes at the given coordinates and sync their selection."""
@@ -640,6 +665,9 @@ class ArrowManager:
 
         # Set the new arrow as the selected one
         self.selected_arrow = arrow_group
+
+        # Set the selected arrow color to red
+        arrow_group.set_arrow_color(QColor(255, 0, 0))  # Red color for selected
 
         # Show the zoom viewer if hidden and zoom in on the selected arrow
         if not self.zoom_viewer.isVisible():
@@ -686,12 +714,12 @@ class ArrowManager:
             self.zoom_in_on_arrow(self.selected_arrow)  # Redraw the zoomed image with or without the arrow
 
     def zoom_in_on_arrow(self, arrow_group):
-        """Zoom in on the area around the selected arrow and optionally draw the arrow."""
+        """Zoom in on the area around the selected arrow and adjust zoomed view size."""
         # Get the position of the arrow (scene coordinates)
         arrow_position = arrow_group.body_item.line().p1()
 
-        # Define the size of the zoomed region (128x128 around the arrow)
-        crop_size = 128
+        # Define the initial size of the zoomed region
+        crop_size = 256
         x_center = int(arrow_position.x())
         y_center = int(arrow_position.y())
 
@@ -707,27 +735,39 @@ class ArrowManager:
         arrow_rel_x_scaled = arrow_rel_x * zoom_factor
         arrow_rel_y_scaled = arrow_rel_y * zoom_factor
 
-        # Draw the arrow on the zoomed pixmap if the flag is True
+        # Draw the point on the zoomed pixmap if the flag is True
         if self.show_arrow_on_zoom:
             zoomed_pixmap = self.draw_arrow_on_zoomed_crop(zoomed_pixmap, arrow_rel_x_scaled, arrow_rel_y_scaled)
+
+        # Set the initial size of the zoom view only if it hasn't been set yet
+        if not self.initial_size_set:
+            self.set_sensible_zoom_view_size()
 
         # Update the zoom viewer with the zoomed image
         if zoomed_pixmap:
             self.zoom_viewer.update_image(zoomed_pixmap)
 
+    def set_sensible_zoom_view_size(self):
+        """Set a sensible initial size for the zoom view window when opened, but allow resizing."""
+        # Define a sensible initial size for the zoomed view window (e.g., 400x400 pixels)
+        initial_width = 512
+        initial_height = 512
+
+        self.zoom_viewer.resize(initial_width, initial_height)
+        self.initial_size_set = True  # Mark that the initial size has been set
+        logging.info(f"Set zoom view to initial size: {initial_width}x{initial_height}")
+
     def draw_arrow_on_zoomed_crop(self, zoomed_pixmap, arrow_x, arrow_y):
-        """Draw an arrow on the zoomed pixmap centered at the given coordinates."""
+        """Draw a point at the arrow position on the zoomed pixmap."""
         painter = QPainter(zoomed_pixmap)
-        painter.setPen(QPen(Qt.red, 2))  # Customize the arrow appearance (red arrow)
+        painter.setPen(QPen(Qt.red, 2))  # Set red color for the point
+        painter.setBrush(QBrush(Qt.red))  # Fill the circle with red
 
-        # Define arrow size and offset relative to the zoomed crop center
-        arrow_length = 20
-        head_width = 10
+        # Define point size
+        point_radius = 5
 
-        # Offset the drawing position to center the arrow
-        painter.drawLine(arrow_x, arrow_y, arrow_x, arrow_y - arrow_length)  # Arrow body
-        painter.drawLine(arrow_x - head_width // 2, arrow_y - arrow_length + 5, arrow_x + head_width // 2,
-                         arrow_y - arrow_length + 5)  # Arrow head
+        # Draw a filled circle (point) at the given coordinates
+        painter.drawEllipse(QPointF(arrow_x, arrow_y), point_radius, point_radius)
 
         painter.end()  # Finish painting
 
