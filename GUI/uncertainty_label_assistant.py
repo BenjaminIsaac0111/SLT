@@ -6,13 +6,14 @@ from PIL import Image
 from matplotlib import pyplot as plt
 from scipy.special import softmax
 from scipy.ndimage import maximum_filter
-from sklearn.cluster import DBSCAN
+from sklearn.cluster import DBSCAN, HDBSCAN
 
 from PyQt5.QtCore import QObject, pyqtSignal, pyqtSlot, QThread, Qt, QTimer, QLineF, QRectF, QPoint, QEvent
-from PyQt5.QtGui import QImage, QPixmap, QPen, QColor, QTransform
+from PyQt5.QtGui import QImage, QPixmap, QPen, QColor, QTransform, QPainter, QPainterPath
 from PyQt5.QtWidgets import (
     QApplication, QGraphicsView, QGraphicsPixmapItem, QGraphicsScene,
-    QVBoxLayout, QListWidget, QListWidgetItem, QWidget, QSplitter, QGraphicsLineItem, QGraphicsItemGroup, QHBoxLayout
+    QVBoxLayout, QListWidget, QListWidgetItem, QWidget, QSplitter, QGraphicsLineItem, QGraphicsItemGroup, QHBoxLayout,
+    QPushButton
 )
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', stream=sys.stdout)
@@ -22,9 +23,20 @@ class ZoomedArrowViewer(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Zoomed Arrow Viewer")
+
+        # Set minimum size to avoid being resized too small
+        self.setMinimumSize(256, 256)
+
+        # Make it a floating window that stays on top
+        self.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint)
+
+        # Setup the graphics view and scene
         self.zoomed_view = QGraphicsView(self)
         self.zoomed_scene = QGraphicsScene(self)
         self.zoomed_view.setScene(self.zoomed_scene)
+
+        # Ensure the image resizes with the window
+        self.zoomed_view.setResizeAnchor(QGraphicsView.AnchorUnderMouse)
 
         layout = QVBoxLayout(self)
         layout.addWidget(self.zoomed_view)
@@ -33,23 +45,63 @@ class ZoomedArrowViewer(QWidget):
         self.zoomed_pixmap_item = QGraphicsPixmapItem()
         self.zoomed_scene.addItem(self.zoomed_pixmap_item)
 
+        # Store the geometry (size and position) of the window before hiding
+        self.saved_geometry = self.geometry()
+
     def update_image(self, zoomed_pixmap):
-        """Update the viewer with the zoomed image."""
+        """Update the viewer with the zoomed image and resize to fit."""
         self.zoomed_pixmap_item.setPixmap(zoomed_pixmap)
         self.zoomed_scene.setSceneRect(QRectF(zoomed_pixmap.rect()))
         self.zoomed_view.fitInView(self.zoomed_pixmap_item, Qt.KeepAspectRatio)
 
+    def toggle_visibility(self):
+        """Toggle the visibility of the widget without changing its size."""
+        if self.isVisible():
+            self.saved_geometry = self.geometry()  # Save the current size and position before hiding
+            self.hide()
+        else:
+            self.setGeometry(self.saved_geometry)  # Restore the size and position
+            self.show()
+
+    def resizeEvent(self, event):
+        """Ensure the image scales when the window is resized."""
+        self.zoomed_view.fitInView(self.zoomed_pixmap_item, Qt.KeepAspectRatio)
+        super().resizeEvent(event)
+
+    def keyPressEvent(self, event):
+        """Handle key press events for toggling the zoom viewer with 'Z' and arrow visibility with 'T'."""
+        if event.key() == Qt.Key_Z:
+            self.toggle_visibility()
+        elif event.key() == Qt.Key_T and self.arrow_manager:
+            self.arrow_manager.toggle_arrow_visibility_on_zoom()  # Toggle arrow visibility
+        super().keyPressEvent(event)
+
+
 
 class UncertaintyRegionSelector:
-    def __init__(self, top_n=16, min_distance=32):
+    def __init__(self, top_n=32, min_distance=24, aggregation_method='mean', clustering_eps=None):
         """
         Initialize the region selector.
 
         :param top_n: The number of top uncertain regions to return.
         :param min_distance: The minimum distance between uncertain regions.
+        :param aggregation_method: The method to reduce the 3D uncertainty map to 2D (mean, max, std).
+        :param clustering_eps: Optional custom epsilon for DBSCAN clustering.
         """
         self.top_n = top_n
         self.min_distance = min_distance
+        self.aggregation_method = aggregation_method
+        self.clustering_eps = clustering_eps if clustering_eps else min_distance  # Default to min_distance
+
+        # Validate parameters
+        self._validate_params()
+
+    def _validate_params(self):
+        """Validate the input parameters to ensure they are within acceptable ranges."""
+        if self.top_n <= 0:
+            raise ValueError("top_n must be a positive integer")
+        if self.min_distance <= 0:
+            raise ValueError("min_distance must be a positive integer")
 
     def select_regions(self, uncertainty_map):
         """
@@ -58,14 +110,30 @@ class UncertaintyRegionSelector:
         :param uncertainty_map: A 3D array representing uncertainty values for the image.
         :return: A list of coordinates for the top uncertain regions.
         """
-        # Reduce the 3D uncertainty map to a 2D uncertainty map using the mean across the last dimension
-        uncertainty_map_2d = np.mean(uncertainty_map, axis=-1)
+        # Reduce the 3D uncertainty map to a 2D uncertainty map using the chosen aggregation method
+        uncertainty_map_2d = self.aggregate_uncertainty(uncertainty_map)
 
         # Normalize the uncertainty map
         uncertainty_map_2d = self.normalize_uncertainty(uncertainty_map_2d)
 
         # Identify the coordinates of the most uncertain regions
         return self.identify_significant_coords(uncertainty_map_2d, self.top_n, self.min_distance)
+
+    def aggregate_uncertainty(self, uncertainty_map):
+        """
+        Aggregate the 3D uncertainty map into a 2D map using the specified method.
+
+        :param uncertainty_map: A 3D array of uncertainty values.
+        :return: A 2D array representing the aggregated uncertainty map.
+        """
+        if self.aggregation_method == 'mean':
+            return np.mean(uncertainty_map, axis=-1)
+        elif self.aggregation_method == 'max':
+            return np.max(uncertainty_map, axis=-1)
+        elif self.aggregation_method == 'std':
+            return np.std(uncertainty_map, axis=-1)
+        else:
+            raise ValueError(f"Unknown aggregation method: {self.aggregation_method}")
 
     @staticmethod
     def normalize_uncertainty(uncertainty):
@@ -78,8 +146,7 @@ class UncertaintyRegionSelector:
         normalized_uncertainty = (uncertainty - np.min(uncertainty)) / (np.max(uncertainty) - np.min(uncertainty))
         return (normalized_uncertainty * 255).astype(np.uint8)
 
-    @staticmethod
-    def identify_significant_coords(uncertainty_map, top_n, min_distance):
+    def identify_significant_coords(self, uncertainty_map, top_n, min_distance):
         """
         Identify the top uncertain regions based on the uncertainty map.
 
@@ -92,27 +159,21 @@ class UncertaintyRegionSelector:
         local_max = maximum_filter(uncertainty_map, size=min_distance) == uncertainty_map
         coords = np.column_stack(np.nonzero(local_max))
 
-        # If no significant coordinates are found, return an empty list
+        # If no significant coordinates are found, return an empty list or log a warning
         if len(coords) == 0:
+            print("Warning: No significant uncertainty regions found.")
             return []
 
         # Cluster the coordinates to ensure minimum distance between them
-        clustering = DBSCAN(eps=min_distance, min_samples=1).fit(coords)
-        cluster_centers = [coords[clustering.labels_ == cluster_id].mean(axis=0).astype(int)
-                           for cluster_id in np.unique(clustering.labels_)]
-
-        # Ensure that each cluster center is a tuple of integer coordinates
-        cluster_centers = [tuple(map(int, coord)) for coord in cluster_centers]
+        clustering = DBSCAN(eps=self.clustering_eps, min_samples=1).fit(coords)
+        cluster_centers = np.array([coords[clustering.labels_ == cluster_id].mean(axis=0).astype(int)
+                                    for cluster_id in np.unique(clustering.labels_)])
 
         # Sort the regions based on their uncertainty values (from highest to lowest)
-        cluster_centers = sorted(cluster_centers, key=lambda coord: -float(uncertainty_map[coord[0], coord[1]]))
+        sorted_centers = cluster_centers[np.argsort(-uncertainty_map[cluster_centers[:, 0], cluster_centers[:, 1]])]
 
-        return cluster_centers[:top_n]
-
-
-from PyQt5.QtCore import QPoint, QLineF, Qt
-from PyQt5.QtGui import QPen, QColor, QPainterPath
-from PyQt5.QtWidgets import QGraphicsItemGroup, QGraphicsLineItem
+        # Return the top N regions
+        return sorted_centers[:top_n]
 
 
 class ClickableArrowGroup(QGraphicsItemGroup):
@@ -333,6 +394,11 @@ class PatchImageViewer(QWidget):
         self.hdf5_file_path = hdf5_file_path
         self.hdf5_file = h5py.File(self.hdf5_file_path, 'r')
 
+        # Initialize the zoom viewer as a standalone floating window
+        self.zoom_viewer = ZoomedArrowViewer(self)
+        self.zoom_viewer.setWindowFlags(Qt.Window)  # Make it a floating window
+        self.zoom_viewer.hide()  # Start with it hidden
+
         self.labels = []
         self.current_filename = None
         self.selected_arrow_index = 0
@@ -353,7 +419,7 @@ class PatchImageViewer(QWidget):
             8: 'Muscle'
         }
 
-        self.region_selector = UncertaintyRegionSelector(top_n=16, min_distance=32)
+        self.region_selector = UncertaintyRegionSelector()
 
         self.setup_ui()
         self.resize(1200, 800)
@@ -364,8 +430,11 @@ class PatchImageViewer(QWidget):
         self.worker.imageLoaded.connect(self.update_ui_with_images)
         self.thread.start()
 
-        self.annotation_manager = ArrowManager(self.image_scene, self.overlay_scene, self.uncertainty_scene)
+        # Pass the zoom viewer and image pixmap item to the ArrowManager
+        self.annotation_manager = ArrowManager(self.image_scene, self.overlay_scene, self.uncertainty_scene,
+                                               self.image_item, self.zoom_viewer)
 
+        self.zoom_viewer.arrow_manager = self.annotation_manager
         self.load_hdf5_data()
 
         # Defer scaling until layout is initialized
@@ -394,13 +463,13 @@ class PatchImageViewer(QWidget):
         self.splitter.addWidget(image_container)  # Add the image views to the splitter
         self.splitter.addWidget(self.file_list_widget)  # Add the file selector to the splitter
 
-        # Connect the splitterMoved signal to resize the images when the splitter is moved
-        self.splitter.splitterMoved.connect(self.scale_image_to_view)
-
-        # Create the main layout and add the splitter
+        # Set up the main layout
         self.main_layout = QVBoxLayout(self)
         self.main_layout.addWidget(self.splitter)
         self.setLayout(self.main_layout)
+
+        # Connect the splitterMoved signal to resize the images when the splitter is moved
+        self.splitter.splitterMoved.connect(self.scale_image_to_view)
 
     def setup_individual_graphics_views(self):
         """Create the scenes and views for the image, overlay, and uncertainty heatmap."""
@@ -424,6 +493,19 @@ class PatchImageViewer(QWidget):
         self.uncertainty_view.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.uncertainty_item = QGraphicsPixmapItem()
         self.uncertainty_scene.addItem(self.uncertainty_item)
+
+    def keyPressEvent(self, event):
+        """Handle key press events for toggling the zoom viewer with 'Z'."""
+        if event.key() == Qt.Key_Z:
+            self.toggle_zoom_viewer()
+        super().keyPressEvent(event)
+
+    def toggle_zoom_viewer(self):
+        """Toggle the visibility of the zoom viewer."""
+        if self.zoom_viewer.isVisible():
+            self.zoom_viewer.hide()  # Hide if currently visible
+        else:
+            self.zoom_viewer.show()  # Show if currently hidden
 
     def update_ui_with_images(self, image, mask, overlay, uncertainty_heatmap):
         """Update the UI with the images and scale them properly on load."""
@@ -510,37 +592,14 @@ class PatchImageViewer(QWidget):
         super().changeEvent(event)
 
 
-class AnnotationManager:
-    def __init__(self, scene):
-        self.scene = scene
-        self.annotation_items = []
-
-    def draw_arrows(self, arrow_coords, image_item, arrow_color=(57, 255, 20), arrow_size=24):
-        """Draw arrows on the scene at the given coordinates."""
-        for coord in arrow_coords:
-            y, x = coord  # Switch x and y coordinates here
-            scene_x = image_item.pos().x() + x  # x coordinate
-            scene_y = image_item.pos().y() + y  # y coordinate
-            arrow_group = ClickableArrowGroup((scene_x, scene_y), arrow_color=QColor(*arrow_color),
-                                              arrow_size=arrow_size)
-            self.scene.addItem(arrow_group)
-            self.annotation_items.append(arrow_group)
-
-    def clear_annotations(self):
-        """Clear all annotations from the scene."""
-        # Safely remove all annotation items from the scene and empty the list
-        while self.annotation_items:
-            item = self.annotation_items.pop()  # Remove from the list first
-            if item.scene():  # Only remove the item if it's still in the scene
-                self.scene.removeItem(item)  # Then remove from the scene
-            item = None  # Explicitly dereference the item to avoid further access
-
-
 class ArrowManager:
-    def __init__(self, image_scene, overlay_scene, uncertainty_scene):
+    def __init__(self, image_scene, overlay_scene, uncertainty_scene, image_pixmap_item, zoom_viewer):
         self.scenes = [image_scene, overlay_scene, uncertainty_scene]
+        self.image_pixmap_item = image_pixmap_item  # Reference to the image pixmap item
+        self.zoom_viewer = zoom_viewer  # Reference to the zoom viewer
         self.synced_arrows = []  # List of synced arrows across scenes
         self.selected_arrow = None  # Track the currently selected arrow
+        self.show_arrow_on_zoom = True  # Flag to toggle arrow visibility on the zoomed crop
 
     def draw_arrows(self, arrow_coords, image_item, arrow_color=(57, 255, 20), arrow_size=24):
         """Draw arrows on all scenes at the given coordinates and sync their selection."""
@@ -565,7 +624,7 @@ class ArrowManager:
             self.synced_arrows.append(arrow_group_instances)
 
     def clear_annotations(self):
-        """Clear all annotations from all scenes."""
+        """Clear all arrows (annotations) from all scenes."""
         for scene in self.scenes:
             for arrow_group_instances in self.synced_arrows:
                 for arrow_group in arrow_group_instances:
@@ -581,6 +640,98 @@ class ArrowManager:
 
         # Set the new arrow as the selected one
         self.selected_arrow = arrow_group
+
+        # Show the zoom viewer if hidden and zoom in on the selected arrow
+        if not self.zoom_viewer.isVisible():
+            self.zoom_viewer.show()
+
+        self.zoom_in_on_arrow(arrow_group)
+
+    def create_zoomed_crop(self, x_center, y_center, crop_size):
+        """Create a zoomed crop from the current image using a fixed rectangle of 128x128."""
+        current_pixmap = self.image_pixmap_item.pixmap()
+
+        # Get the dimensions of the current image
+        img_width = current_pixmap.width()
+        img_height = current_pixmap.height()
+
+        # Calculate starting points, ensuring they don't go below 0
+        x_start = max(0, x_center - crop_size // 2)
+        y_start = max(0, y_center - crop_size // 2)
+
+        # Adjust the starting points if the crop exceeds image boundaries
+        if x_start + crop_size > img_width:
+            x_start = img_width - crop_size  # Shift left to fit the crop within the image
+        if y_start + crop_size > img_height:
+            y_start = img_height - crop_size  # Shift up to fit the crop within the image
+
+        # Make sure the width and height are valid and fit within the image
+        width = min(crop_size, img_width - x_start)
+        height = min(crop_size, img_height - y_start)
+
+        # Crop the specified area from the pixmap
+        cropped_pixmap = current_pixmap.copy(x_start, y_start, width, height)
+
+        # Scale the cropped area to fit the zoom window
+        zoom_factor = 2  # Adjust zoom factor for clarity
+        zoomed_pixmap = cropped_pixmap.scaled(crop_size * zoom_factor, crop_size * zoom_factor, Qt.KeepAspectRatio,
+                                              Qt.SmoothTransformation)
+
+        return zoomed_pixmap, x_start, y_start  # Return the start points to adjust the arrow position
+
+    def toggle_arrow_visibility_on_zoom(self):
+        """Toggle the visibility of the arrow on the zoomed image."""
+        self.show_arrow_on_zoom = not self.show_arrow_on_zoom
+        if self.selected_arrow:
+            self.zoom_in_on_arrow(self.selected_arrow)  # Redraw the zoomed image with or without the arrow
+
+    def zoom_in_on_arrow(self, arrow_group):
+        """Zoom in on the area around the selected arrow and optionally draw the arrow."""
+        # Get the position of the arrow (scene coordinates)
+        arrow_position = arrow_group.body_item.line().p1()
+
+        # Define the size of the zoomed region (128x128 around the arrow)
+        crop_size = 128
+        x_center = int(arrow_position.x())
+        y_center = int(arrow_position.y())
+
+        # Create the zoomed crop and get the adjusted crop boundaries
+        zoomed_pixmap, x_start, y_start = self.create_zoomed_crop(x_center, y_center, crop_size)
+
+        # Calculate the arrow's position relative to the zoomed crop
+        arrow_rel_x = x_center - x_start  # Relative to the crop's top-left corner
+        arrow_rel_y = y_center - y_start  # Relative to the crop's top-left corner
+
+        # Adjust the arrow position based on the zoom factor
+        zoom_factor = 2
+        arrow_rel_x_scaled = arrow_rel_x * zoom_factor
+        arrow_rel_y_scaled = arrow_rel_y * zoom_factor
+
+        # Draw the arrow on the zoomed pixmap if the flag is True
+        if self.show_arrow_on_zoom:
+            zoomed_pixmap = self.draw_arrow_on_zoomed_crop(zoomed_pixmap, arrow_rel_x_scaled, arrow_rel_y_scaled)
+
+        # Update the zoom viewer with the zoomed image
+        if zoomed_pixmap:
+            self.zoom_viewer.update_image(zoomed_pixmap)
+
+    def draw_arrow_on_zoomed_crop(self, zoomed_pixmap, arrow_x, arrow_y):
+        """Draw an arrow on the zoomed pixmap centered at the given coordinates."""
+        painter = QPainter(zoomed_pixmap)
+        painter.setPen(QPen(Qt.red, 2))  # Customize the arrow appearance (red arrow)
+
+        # Define arrow size and offset relative to the zoomed crop center
+        arrow_length = 20
+        head_width = 10
+
+        # Offset the drawing position to center the arrow
+        painter.drawLine(arrow_x, arrow_y, arrow_x, arrow_y - arrow_length)  # Arrow body
+        painter.drawLine(arrow_x - head_width // 2, arrow_y - arrow_length + 5, arrow_x + head_width // 2,
+                         arrow_y - arrow_length + 5)  # Arrow head
+
+        painter.end()  # Finish painting
+
+        return zoomed_pixmap
 
 
 # Main entry for testing
