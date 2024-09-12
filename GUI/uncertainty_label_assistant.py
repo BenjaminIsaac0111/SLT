@@ -9,6 +9,9 @@ from scipy.ndimage import maximum_filter, gaussian_filter
 from skimage.measure import regionprops
 from skimage.segmentation import slic
 from sklearn.cluster import DBSCAN, HDBSCAN, AgglomerativeClustering
+from sklearn.decomposition import PCA
+from sklearn.manifold import TSNE
+from sklearn.preprocessing import StandardScaler
 
 from PyQt5.QtCore import QObject, pyqtSignal, pyqtSlot, QThread, Qt, QTimer, QLineF, QRectF, QPoint, QEvent, QPointF
 from PyQt5.QtGui import QImage, QPixmap, QPen, QColor, QTransform, QPainter, QPainterPath, QBrush, QFont
@@ -17,7 +20,6 @@ from PyQt5.QtWidgets import (
     QVBoxLayout, QListWidget, QListWidgetItem, QWidget, QSplitter, QGraphicsLineItem, QGraphicsItemGroup, QHBoxLayout,
     QPushButton, QGraphicsTextItem
 )
-from sklearn.preprocessing import StandardScaler
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', stream=sys.stdout)
 
@@ -76,19 +78,19 @@ class UncertaintyRegionSelector:
     to ensure that the selected regions are diverse.
     """
 
-    def __init__(self, top_n=128, filter_size=64, aggregation_method='mean', clustering_eps=.8):
+    def __init__(self, filter_size=64, aggregation_method='max', clustering_eps=.8, gaussian_sigma=2):
         """
         Initialize the UncertaintyRegionSelector class.
 
-        :param top_n: Number of top uncertain regions to return.
         :param filter_size: Minimum distance between selected uncertain regions.
         :param aggregation_method: How to aggregate the 3D uncertainty map into 2D ('mean', 'max', 'std').
         :param clustering_eps: Epsilon parameter for DBSCAN clustering to cluster regions.
+        :param gaussian_sigma: Sigma parameter for the Gaussian filter (controls the amount of smoothing).
         """
-        self.top_n = top_n
         self.filter_size = filter_size
         self.aggregation_method = aggregation_method
         self.clustering_eps = clustering_eps if clustering_eps else filter_size
+        self.gaussian_sigma = gaussian_sigma
 
         # Validate input parameters
         self._validate_params()
@@ -97,14 +99,12 @@ class UncertaintyRegionSelector:
         """
         Ensure the parameters passed during initialization are within acceptable ranges.
         """
-        if self.top_n <= 0:
-            raise ValueError("top_n must be a positive integer")
         if self.filter_size <= 0:
-            raise ValueError("min_distance must be a positive integer")
+            raise ValueError("filter_size must be a positive integer")
 
     def select_regions(self, uncertainty_map, logits):
         """
-        Select the top N uncertain regions from the uncertainty map.
+        Select the top uncertain regions from the uncertainty map.
 
         :param uncertainty_map: A 3D array representing uncertainty values.
         :param logits: A 3D array of logit values (per pixel).
@@ -113,20 +113,23 @@ class UncertaintyRegionSelector:
         # Reduce the 3D uncertainty map to a 2D uncertainty map
         uncertainty_map_2d = self.aggregate_uncertainty(uncertainty_map)
 
+        # Apply Gaussian smoothing
+        uncertainty_map_2d = self.apply_gaussian_filter(uncertainty_map_2d)
+
         # Normalize the uncertainty map to [0, 255]
         uncertainty_map_2d = self.normalize_uncertainty(uncertainty_map_2d)
 
         # Identify the coordinates of the most uncertain regions
-        initial_coords = self.identify_significant_coords(uncertainty_map_2d, logits, self.top_n, self.filter_size)
+        initial_coords = self.identify_significant_coords(uncertainty_map_2d, logits, self.filter_size)
 
-        return initial_coords
+        # Apply post-processing to remove redundant centers
+        final_coords = self.filter_close_centers(initial_coords, 32)
+
+        return final_coords
 
     def aggregate_uncertainty(self, uncertainty_map):
         """
         Aggregate the 3D uncertainty map into a 2D map using the selected method.
-
-        :param uncertainty_map: 3D uncertainty values.
-        :return: Aggregated 2D uncertainty values.
         """
         if self.aggregation_method == 'mean':
             return np.mean(uncertainty_map, axis=-1)
@@ -137,29 +140,34 @@ class UncertaintyRegionSelector:
         else:
             raise ValueError(f"Unknown aggregation method: {self.aggregation_method}")
 
+    def apply_gaussian_filter(self, uncertainty_map):
+        """
+        Apply Gaussian smoothing to the 2D uncertainty map.
+
+        :param uncertainty_map: 2D uncertainty map.
+        :return: Smoothed uncertainty map.
+        """
+        return gaussian_filter(uncertainty_map, sigma=self.gaussian_sigma)
+
     @staticmethod
     def normalize_uncertainty(uncertainty):
         """
         Normalize the uncertainty array to the range [0, 255].
-
-        :param uncertainty: 2D uncertainty array.
-        :return: Normalized 2D array of uncertainty values.
         """
         normalized_uncertainty = (uncertainty - np.min(uncertainty)) / (np.max(uncertainty) - np.min(uncertainty))
         return (normalized_uncertainty * 255).astype(np.uint8)
 
-    def identify_significant_coords(self, uncertainty_map, logits, top_n, min_distance, edge_buffer=8):
+    def identify_significant_coords(self, uncertainty_map, logits, min_distance, edge_buffer=8):
         """
         Identify significant coordinates based on uncertainty and logits and apply clustering.
 
         :param uncertainty_map: 2D uncertainty values.
         :param logits: Logits per pixel.
-        :param top_n: Top N uncertain regions to identify.
         :param min_distance: Minimum distance between selected regions.
         :param edge_buffer: Buffer from image edges to exclude certain coordinates.
         :return: Top uncertain regions (coordinates).
         """
-        # Find local maxima in the uncertainty map
+        # Find local maxima in the smoothed uncertainty map
         local_max = maximum_filter(uncertainty_map, size=min_distance) == uncertainty_map
         coords = np.column_stack(np.nonzero(local_max))
 
@@ -191,11 +199,17 @@ class UncertaintyRegionSelector:
         cluster_centers = np.array([valid_coords[clustering.labels_ == cluster_id].mean(axis=0).astype(int)
                                     for cluster_id in np.unique(clustering.labels_)])
 
-        # Sort regions by uncertainty values (descending)
-        sorted_centers = cluster_centers[np.argsort(-uncertainty_map[cluster_centers[:, 0], cluster_centers[:, 1]])]
+        return cluster_centers
 
-        # Return top N regions
-        return sorted_centers[:top_n]
+    def filter_close_centers(self, centers, min_distance):
+        """
+        Filter out cluster centers that are too close to each other.
+        """
+        filtered_centers = []
+        for center in centers:
+            if all(np.linalg.norm(center - c) >= min_distance for c in filtered_centers):
+                filtered_centers.append(center)
+        return np.array(filtered_centers)
 
 
 class ClickableArrowGroup(QGraphicsItemGroup):
@@ -271,11 +285,9 @@ class ClickableArrowGroup(QGraphicsItemGroup):
         """Handle mouse click on the arrow and sync selection."""
         super().mousePressEvent(event)
         if not self.is_selected:
-            # Ask the manager to handle selection, which will deselect others
-            self.manager.select_arrow(self)
-            # Select the arrow and set it to red
-            self.is_selected = True
-            self.set_arrow_color(QColor(255, 0, 0))
+            # Get the current filename from the parent manager
+            current_filename = self.manager.current_filename
+            self.manager.select_arrow(current_filename, self)
 
     def deselect_arrow(self):
         """Deselect this arrow."""
@@ -648,9 +660,8 @@ class PatchImageViewer(QWidget):
     def keyPressEvent(self, event):
         """
         Handle key press events for interacting with the viewer. Supports toggling the zoom view (Z key),
-        cycling through arrows (A and D keys), and assigning labels to arrows using number keys (0-8).
-
-        :param event: The QKeyEvent triggered by a key press.
+        cycling through arrows (A and D keys), assigning labels to arrows using number keys (0-8),
+        and removing labels using the '-' key.
         """
         if event.key() == Qt.Key_Z:
             self.toggle_zoom_viewer()  # Toggle the visibility of the zoom viewer
@@ -664,6 +675,9 @@ class PatchImageViewer(QWidget):
             if self.annotation_manager.selected_arrow is not None:
                 # Assign the label to the selected arrow
                 self.annotation_manager.label_arrow(self.annotation_manager.selected_arrow, label)
+        elif event.key() == Qt.Key_Minus:  # Handle the '-' key to remove the label
+            if self.annotation_manager.selected_arrow is not None:
+                self.annotation_manager.remove_label_from_arrow(self.annotation_manager.selected_arrow)
         super().keyPressEvent(event)  # Call the parent class's keyPressEvent
 
     def toggle_zoom_viewer(self):
@@ -679,8 +693,6 @@ class PatchImageViewer(QWidget):
         """
         Cycles through the arrows on the images based on the given direction (-1 for previous, 1 for next).
         When an arrow is selected, the current one is deselected and the next one is highlighted.
-
-        :param direction: Integer representing the direction to cycle (-1 for previous, 1 for next).
         """
         num_arrows = len(self.annotation_manager.synced_arrows)
         if num_arrows == 0:
@@ -704,11 +716,6 @@ class PatchImageViewer(QWidget):
         """
         Updates the UI with the loaded image, mask, overlay, and uncertainty heatmap. Ensures that
         the images are properly scaled and arrows are drawn on the views.
-
-        :param image: QPixmap object for the main image.
-        :param mask: QPixmap object for the mask image.
-        :param overlay: QPixmap object for the overlay image.
-        :param uncertainty_heatmap: QPixmap object for the uncertainty heatmap.
         """
         self.current_image = image
         self.current_overlay = overlay
@@ -785,6 +792,9 @@ class PatchImageViewer(QWidget):
         logits = self.logits[index]
         uncertainty = self.uncertainty_dataset[index]
 
+        # Get the filename from the selected item
+        filename = item.text()
+
         # Convert the image and mask to PIL format
         image_pil = Image.fromarray((image * 255).astype('uint8'))
         mask_pil = Image.fromarray(self.worker.process_mask(logits))
@@ -793,8 +803,27 @@ class PatchImageViewer(QWidget):
         self.selected_coords = self.region_selector.select_regions(uncertainty_map=uncertainty, logits=logits)
         logging.info(f"Selected coordinates for labeling: {self.selected_coords}")
 
+        # Store the selected coordinates and initialize labels and clusters in arrow_data
+        self.annotation_manager.store_arrow_data(filename, self.selected_coords)
+
+        # Retrieve the feature matrix (logits) and uncertainty values for the selected coordinates
+        feature_matrix = np.array([logits[coord[0], coord[1], :] for coord in self.selected_coords])
+        uncertainty_values = np.array([uncertainty[coord[0], coord[1]] for coord in self.selected_coords])
+
+        # Multiply the logits by the uncertainty values to weight the logits by uncertainty
+        weighted_feature_matrix = feature_matrix * uncertainty_values
+
+        # Cluster the weighted logits
+        self.annotation_manager.cluster_arrows(filename, weighted_feature_matrix)
+
+        # Render the arrows for the selected image
+        self.annotation_manager.render_arrows_for_image(filename)
+
         # Run the worker to process and load the image, mask, and uncertainty
         self.worker.run(image_pil, mask_pil, uncertainty)
+
+        # Set the filename for the current session to track
+        self.annotation_manager.current_filename = filename
 
     def resizeEvent(self, event):
         """
@@ -840,9 +869,7 @@ class ArrowManager:
         self.zoom_viewer = zoom_viewer  # Reference to the zoomed image viewer
         self.synced_arrows = []  # List of arrows synced across all scenes
         self.selected_arrow = None  # Currently selected arrow
-        self.show_arrow_on_zoom = True  # Flag to toggle arrow visibility in the zoomed view
-        self.initial_size_set = False  # Track if initial zoom size has been set
-
+        self.arrow_data = {}
         # Default color for arrows before they are labeled
         self.default_arrow_color = QColor(0, 0, 0)  # Black
 
@@ -859,275 +886,311 @@ class ArrowManager:
             7: 'Mucin',
             8: 'Muscle'
         }
-        self.num_classes = len(self.class_components)  # Number of available classes
+        self.num_classes = len(self.class_components)
 
-    def get_color_for_label(self, label):
+    def set_arrow_data(self, filename, coords):
         """
-        Get the corresponding color for a given class label using the tab10 colormap.
-        The label should be an integer between 0 and the number of class components.
-
-        :param label: The class label.
-        :return: QColor instance with the corresponding color.
+        Initialize arrow data with coordinates and prepare empty labels and clusters for the specified filename.
         """
-        if label is None or label not in self.class_components:
-            return self.default_arrow_color  # Default to black if no valid label is given
+        self.arrow_data[filename] = {
+            'coords': coords,
+            'labels': [None] * len(coords),
+            'clusters': [None] * len(coords)
+        }
 
-        # Normalize the label to the range [0, 1] based on the number of classes
-        normalized_label = label / (self.num_classes - 1)
-        cmap_color = self.colormap(normalized_label)  # Get the color from the colormap
-        r, g, b, _ = [int(255 * x) for x in cmap_color]  # Convert to RGB with 255 scale
-
-        return QColor(r, g, b)
-
-    def assign_label_to_arrow(self, arrow_group, label):
+    def cluster_arrows(self, filename, feature_matrix, distance_threshold=2):
         """
-        Assign a class label to the arrow, update the arrow color based on the label, and display the class
-        label as text next to the arrow.
+        Clusters arrows based on the provided feature matrix (e.g., logits) and stores the cluster information in arrow_data.
 
-        :param arrow_group: The ClickableArrowGroup to be labeled.
-        :param label: The class label to assign.
+        :param filename: The current file being processed.
+        :param feature_matrix: Array of features for each arrow (e.g., logit values or coordinates).
+        :param distance_threshold: The linkage distance threshold above which clusters will not be merged.
         """
-        if label in self.class_components:
-            color = self.get_color_for_label(label)
-            class_text = self.class_components[label]
-            print(f"Label {label} ('{class_text}') assigned to arrow.")
-        else:
-            color = self.default_arrow_color  # Assign black if label is invalid
-            class_text = ""
+        # Standardize the feature matrix
+        scaler = StandardScaler()
+        feature_matrix_scaled = scaler.fit_transform(feature_matrix)
 
-        # Update the color of the arrow in all synchronized scenes
+        # Perform Agglomerative Clustering with dynamic number of clusters based on distance threshold
+        clustering = AgglomerativeClustering(distance_threshold=distance_threshold, n_clusters=None).fit(
+            feature_matrix_scaled)
+
+        # Get the cluster labels from the clustering result
+        cluster_labels = clustering.labels_
+
+        # Store clusters in arrow_data
+        for i, coords in enumerate(self.arrow_data[filename]['coords']):
+            self.arrow_data[filename]['clusters'][i] = cluster_labels[i]  # Save cluster for each arrow
+
+        logging.info(f"Clustered arrows for {filename} into {len(np.unique(cluster_labels))} clusters.")
+
+        # Optional: plot the clustering result in feature space
+        self.plot_clustering_result(feature_matrix_scaled, cluster_labels)
+
+    def plot_clustering_result(self, feature_matrix_scaled, cluster_labels):
+        """
+        Plots the clustering results in a 2D space for visualization.
+
+        :param feature_matrix_scaled: The standardized feature matrix.
+        :param cluster_labels: The cluster labels for each point.
+        """
+        # Reduce feature space to 2D for visualization using PCA
+        from sklearn.decomposition import PCA
+
+        pca = PCA(n_components=2)
+        feature_matrix_2d = pca.fit_transform(feature_matrix_scaled)
+
+        # Plot the results
+        plt.figure(figsize=(8, 6))
+        plt.scatter(feature_matrix_2d[:, 0], feature_matrix_2d[:, 1], c=cluster_labels, cmap='Spectral', s=50)
+        plt.title("Agglomerative Clustering Result")
+        plt.xlabel("PCA Component 1")
+        plt.ylabel("PCA Component 2")
+        plt.colorbar(label="Cluster")
+        plt.show()
+
+    def select_arrow(self, filename, arrow_group):
+        """
+        Handles arrow selection, ensuring only one arrow is selected at a time. If the selected arrow is part of a
+        cluster, select all arrows in the same cluster.
+        """
+        logging.info(f"Attempting to select arrow: {arrow_group}")
+
+        # Find the index of the selected arrow using coordinates comparison
+        selected_index = None
+        for i, group in enumerate(self.synced_arrows):
+            if group[0] == arrow_group or any(arrow == arrow_group for arrow in group):
+                selected_index = i
+                break
+
+        if selected_index is None:
+            logging.error(f"Arrow group not found in synced_arrows: {arrow_group}")
+            return
+
+        # Get the cluster ID of the selected arrow
+        cluster_id = self.arrow_data[filename]['clusters'][selected_index]
+
+        # Deselect the currently selected arrow, if any
+        if self.selected_arrow and self.selected_arrow != arrow_group:
+            self.selected_arrow.deselect_arrow()
+
+        # Select all arrows in the same cluster
+        for i, cluster in enumerate(self.arrow_data[filename]['clusters']):
+            if cluster == cluster_id:
+                self.synced_arrows[i][0].set_arrow_color(QColor(255, 0, 0))  # Select by changing color
+                self.selected_arrow = self.synced_arrows[i][0]  # Update selected arrow
+
+        # Update zoom view
+        self.zoom_in_on_arrow(self.selected_arrow)
+
+    def select_cluster(self, filename, cluster_id):
+        """
+        Selects all arrows that belong to the same cluster as the currently selected arrow.
+        """
+        for i, arrow_group_list in enumerate(self.synced_arrows):
+            if self.arrow_data[filename]['clusters'][i] == cluster_id:
+                arrow_group_list[0].set_arrow_color(QColor(255, 0, 0))  # Highlight arrows in the same cluster
+
+    def render_arrows_for_image(self, filename):
+        """
+        Render the arrows for the given filename based on the stored arrow data.
+        """
+        # Clear existing arrows
+        self.clear_annotations()
+
+        # Retrieve the arrow data for the current image
+        if filename not in self.arrow_data:
+            logging.warning(f"No arrow data found for {filename}.")
+            return
+
+        arrows_data = self.arrow_data[filename]
+
+        for i, coords in enumerate(arrows_data['coords']):
+            arrow_group = self.create_arrow_group_at_coords(coords)
+            label = arrows_data['labels'][i]
+            if label is not None:
+                self.assign_label_to_arrow(arrow_group, label)
+
+    def create_arrow_group_at_coords(self, coords):
+        """
+        Helper function to create and sync an arrow group at given coordinates across all scenes.
+        """
+        arrow_group_instances = []
+        for scene in self.scenes:
+            arrow_group = ClickableArrowGroup(coords, arrow_color=self.default_arrow_color, manager=self)
+            scene.addItem(arrow_group)
+            arrow_group_instances.append(arrow_group)
+
+        # Set sibling arrows across scenes for syncing behavior
+        for arrow_group in arrow_group_instances:
+            arrow_group.set_sibling_arrows(arrow_group_instances)
+
+        # Add the synced arrows to the list for reference
+        self.synced_arrows.append(arrow_group_instances)
+        logging.info(f"Added new arrow group at coords: {coords} to synced_arrows")
+
+        return arrow_group_instances[0]
+
+    def get_arrow_data(self, filename):
+        """Retrieve the arrow data for the given filename."""
+        return self.arrow_data.get(filename, {})
+
+    def remove_label_from_arrow(self, arrow_group):
+        """Remove the label text from the selected arrow and reset its color."""
+        if hasattr(arrow_group, 'label_text_items') and arrow_group.label_text_items:
+            for text_item in arrow_group.label_text_items:
+                for scene in self.scenes:
+                    scene.removeItem(text_item)
+
+        arrow_group.label_text_items.clear()
+
         for arrow in arrow_group.sibling_arrows:
-            arrow.set_arrow_color(color)
+            arrow.set_arrow_color(self.default_arrow_color)
 
-        # Optionally store the label in the arrow group (if needed)
-        arrow_group.label = label
-
-        # Add or update the label text next to the arrow
-        self.update_label_text_for_arrow(arrow_group, class_text)
+        arrow_group.label = None
 
     def update_label_text_for_arrow(self, arrow_group, class_text):
-        """
-        Adds or updates the QGraphicsTextItem next to the arrow to display the class label in all scenes.
-        If the arrow already has a text label, it will be removed and replaced with the new one.
-
-        :param arrow_group: The ClickableArrowGroup where the text will be added.
-        :param class_text: The class label text to be displayed.
-        """
-        # Remove the existing label if there is one
+        """Adds or updates the QGraphicsTextItem next to the arrow."""
         if hasattr(arrow_group, 'label_text_items') and arrow_group.label_text_items:
             for text_item in arrow_group.label_text_items:
                 for scene in self.scenes:
                     scene.removeItem(text_item)
 
         arrow_position = arrow_group.body_item.line().p1()
-
-        # List to store the label text items for each scene
         arrow_group.label_text_items = []
 
-        # Create the label text item in each scene
         for scene in self.scenes:
-            # Create a new QGraphicsTextItem for the label
             text_item = QGraphicsTextItem(class_text)
-
-            # Set font and appearance
-            font = QFont("Arial", 6)  # Adjust the font and size as needed
+            font = QFont("Arial", 12)
             text_item.setFont(font)
-            text_item.setDefaultTextColor(QColor(0, 0, 0))  # Set text color to white or any preferred color
-
-            # Set the position of the text next to the arrow (relative to the scene)
-            text_item.setPos(arrow_position.x() + 10,
-                             arrow_position.y() - 10)  # Offset the text slightly from the arrow
-
-            # Add the text item to the current scene
+            text_item.setDefaultTextColor(QColor(255, 255, 255))
+            text_item.setPos(arrow_position.x() + 10, arrow_position.y() - 10)
             scene.addItem(text_item)
-
-            # Store the text item in the arrow group for future updates/removals
             arrow_group.label_text_items.append(text_item)
 
     def label_arrow(self, arrow_group, label):
-        """
-        Assign a class label to the selected arrow and update its color.
-
-        :param arrow_group: The ClickableArrowGroup to be labeled.
-        :param label: The class label to assign.
-        """
-        self.assign_label_to_arrow(arrow_group, label)  # Change the arrow's color based on the label
-        print(f"Labeled Arrow with label {label}")
-
-        # Optionally store this in a dictionary or log for exporting later
+        """Assign a class label to the selected arrow and update its color."""
+        self.assign_label_to_arrow(arrow_group, label)
         self.selected_arrow = arrow_group
 
     def draw_arrows(self, arrow_coords, image_item, arrow_color=(0, 0, 0), arrow_size=24):
-        """
-        Draws arrows at the specified coordinates on all scenes, ensuring that the arrows are synchronized
-        across the scenes.
+        """Draw arrows at the specified coordinates on all scenes."""
+        self.synced_arrows.clear()
 
-        :param arrow_coords: List of coordinates where arrows will be drawn.
-        :param image_item: The QGraphicsPixmapItem representing the image.
-        :param arrow_color: The color of the arrows (default is green).
-        :param arrow_size: The size of the arrows (default is 32).
-        """
-        self.synced_arrows.clear()  # Clear previous arrows
-
-        # Loop through each coordinate to place arrows
         for coord in arrow_coords:
             y, x = coord
             scene_x = image_item.pos().x() + x
             scene_y = image_item.pos().y() + y
 
-            # Create an arrow group for each scene
             arrow_group_instances = []
             for scene in self.scenes:
                 arrow_group = ClickableArrowGroup((scene_x, scene_y), arrow_color=QColor(*arrow_color),
                                                   arrow_size=arrow_size, manager=self)
-                scene.addItem(arrow_group)  # Add the arrow to the scene
+                scene.addItem(arrow_group)
                 arrow_group_instances.append(arrow_group)
 
-            # Sync the color and selection of arrows across all scenes
             for arrow_group in arrow_group_instances:
-                arrow_group.set_sibling_arrows(arrow_group_instances)  # Sync arrows in all scenes
+                arrow_group.set_sibling_arrows(arrow_group_instances)
 
-            self.synced_arrows.append(arrow_group_instances)  # Store the synced arrows
+            self.synced_arrows.append(arrow_group_instances)
 
     def clear_annotations(self):
-        """
-        Clears all arrows from all scenes.
-        """
-        # Remove all arrows from the scenes
+        """Clears all arrows from all scenes."""
         for scene in self.scenes:
             for arrow_group_instances in self.synced_arrows:
                 for arrow_group in arrow_group_instances:
-                    if arrow_group.scene():
-                        scene.removeItem(arrow_group)
-        self.synced_arrows.clear()  # Clear the list of arrows
+                    scene.removeItem(arrow_group)
+        self.synced_arrows.clear()
 
-    def select_arrow(self, arrow_group):
+    def highlight_arrow(self, arrow_group):
         """
-        Handles arrow selection, ensuring only one arrow is selected at a time. The selected arrow is highlighted
-        in red, and the zoomed view is updated to focus on the selected arrow.
-
-        :param arrow_group: The ClickableArrowGroup to be selected.
+        Highlights the given arrow and all its sibling arrows.
         """
-        # Deselect the currently selected arrow if there is one
-        if self.selected_arrow and self.selected_arrow != arrow_group:
-            self.selected_arrow.deselect_arrow()
-
-        # Set the new arrow as the selected one
+        arrow_group.set_arrow_color(QColor(255, 0, 0))  # Highlight in red
         self.selected_arrow = arrow_group
 
-        # Change the selected arrow's color to red
-        arrow_group.set_arrow_color(QColor(255, 0, 0))  # Highlight the selected arrow in red
-
-        # Zoom in on the selected arrow in the zoom viewer
-        self.zoom_in_on_arrow(arrow_group)
-
     def zoom_in_on_arrow(self, arrow_group):
-        """
-        Zooms in on the area around the selected arrow in the zoom viewer and adjusts the zoom view to fit the
-        image size.
-
-        :param arrow_group: The ClickableArrowGroup to zoom in on.
-        """
-        # Get the position of the arrow in scene coordinates
+        """Zoom in on the selected arrow in the zoom viewer."""
         arrow_position = arrow_group.body_item.line().p1()
-
-        # Define the size of the zoomed region (the crop size around the arrow)
-        crop_size = 256  # Size of the crop
-
-        # Create a zoomed crop of the image around the selected arrow
+        crop_size = 256
         zoomed_pixmap, x_start, y_start = self.create_zoomed_crop(int(arrow_position.x()), int(arrow_position.y()),
                                                                   crop_size)
 
-        # Draw the arrow on the zoomed image at the correct relative position
         if zoomed_pixmap:
             zoomed_pixmap = self.draw_arrow_on_zoomed_crop(zoomed_pixmap, arrow_position, x_start, y_start)
-
-            # Update the zoom viewer with the zoomed image and arrow
             self.zoom_viewer.update_image(zoomed_pixmap)
 
-    def draw_arrow_on_zoomed_crop(self, zoomed_pixmap, arrow_position, x_start, y_start):
-        """
-        Draws the selected arrow on the zoomed-in pixmap at the appropriate position based on the crop.
-
-        :param zoomed_pixmap: The zoomed-in QPixmap.
-        :param arrow_position: The position of the arrow in the scene.
-        :param x_start: The x-coordinate of the top-left corner of the crop.
-        :param y_start: The y-coordinate of the top-left corner of the crop.
-        :return: The zoomed pixmap with the arrow drawn on it.
-        """
-        painter = QPainter(zoomed_pixmap)
-        painter.setPen(QPen(Qt.red, 2))  # Set the arrow color to red
-
-        # Calculate the relative position of the arrow within the zoomed crop
-        arrow_rel_x = arrow_position.x() - x_start
-        arrow_rel_y = arrow_position.y() - y_start
-
-        # Scale the position based on the zoom factor
-        zoom_factor = 2  # Zoom factor for clarity
-        arrow_rel_x_scaled = arrow_rel_x * zoom_factor
-        arrow_rel_y_scaled = arrow_rel_y * zoom_factor
-
-        # Draw the arrow as a red circle on the zoomed pixmap
-        arrow_size = 10  # Size of the drawn arrow
-        painter.drawEllipse(QPointF(arrow_rel_x_scaled, arrow_rel_y_scaled), arrow_size, arrow_size)
-
-        painter.end()  # End the painting
-        return zoomed_pixmap
-
     def create_zoomed_crop(self, x_center, y_center, crop_size):
-        """
-        Creates a zoomed crop of the current image around the given center point, ensuring that the crop
-        does not exceed the image boundaries.
-
-        :param x_center: The x-coordinate of the center of the crop.
-        :param y_center: The y-coordinate of the center of the crop.
-        :param crop_size: The size of the crop.
-        :return: The zoomed QPixmap and the top-left corner coordinates of the crop.
-        """
-        current_pixmap = self.image_pixmap_item.pixmap()  # Get the current image pixmap
-
-        # Get the image dimensions
+        """Creates a zoomed crop of the current image around the given center point."""
+        current_pixmap = self.image_pixmap_item.pixmap()
         img_width = current_pixmap.width()
         img_height = current_pixmap.height()
 
-        # Calculate the top-left corner of the crop, ensuring it doesn't go out of bounds
         x_start = max(0, x_center - crop_size // 2)
         y_start = max(0, y_center - crop_size // 2)
 
-        # Adjust the crop if it exceeds the image boundaries
         if x_start + crop_size > img_width:
-            x_start = img_width - crop_size  # Adjust to fit within the image width
+            x_start = img_width - crop_size
         if y_start + crop_size > img_height:
-            y_start = img_height - crop_size  # Adjust to fit within the image height
+            y_start = img_height - crop_size
 
-        # Ensure the crop size fits within the image
         width = min(crop_size, img_width - x_start)
         height = min(crop_size, img_height - y_start)
 
-        # Crop the specified area from the image pixmap
         cropped_pixmap = current_pixmap.copy(x_start, y_start, width, height)
+        zoom_factor = 2
+        zoomed_pixmap = cropped_pixmap.scaled(crop_size * zoom_factor, crop_size * zoom_factor, Qt.KeepAspectRatio,
+                                              Qt.SmoothTransformation)
 
-        # Scale the cropped area to fit the zoom window
-        zoom_factor = 2  # Adjust the zoom factor for clarity
-        zoomed_pixmap = cropped_pixmap.scaled(crop_size * zoom_factor, crop_size * zoom_factor,
-                                              Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        return zoomed_pixmap, x_start, y_start
 
-        return zoomed_pixmap, x_start, y_start  # Return the zoomed image and the crop coordinates
+    def draw_arrow_on_zoomed_crop(self, zoomed_pixmap, arrow_position, x_start, y_start):
+        """Draw the selected arrow on the zoomed-in pixmap."""
+        painter = QPainter(zoomed_pixmap)
+        painter.setPen(QPen(Qt.red, 2))
+        arrow_rel_x = arrow_position.x() - x_start
+        arrow_rel_y = arrow_position.y() - y_start
+        zoom_factor = 2
+        arrow_rel_x_scaled = arrow_rel_x * zoom_factor
+        arrow_rel_y_scaled = arrow_rel_y * zoom_factor
+        arrow_size = 10
+        painter.drawEllipse(QPointF(arrow_rel_x_scaled, arrow_rel_y_scaled), arrow_size, arrow_size)
+        painter.end()
 
-    def toggle_arrow_visibility_on_zoom(self):
-        """
-        Toggles the visibility of arrows in the zoomed view. If an arrow is selected, the zoom view is updated
-        to either show or hide the arrow.
-        """
-        self.show_arrow_on_zoom = not self.show_arrow_on_zoom  # Toggle the visibility flag
-        if self.selected_arrow:
-            self.zoom_in_on_arrow(self.selected_arrow)  # Redraw the zoomed view with or without the arrow
+        return zoomed_pixmap
+
+    def label_cluster(self, filename, arrow_group, label):
+        """Assign the same label to all arrows in the same cluster as the selected arrow."""
+        selected_index = next(i for i, arrows in enumerate(self.synced_arrows) if arrow_group in arrows)
+        cluster_id = self.arrow_data[filename]['clusters'][selected_index]
+
+        for i, cluster in enumerate(self.arrow_data[filename]['clusters']):
+            if cluster == cluster_id:
+                self.arrow_data[filename]['labels'][i] = label
+                arrow_group = self.synced_arrows[i][0]
+                self.assign_label_to_arrow(arrow_group, label)
+
+    def assign_label_to_arrow(self, arrow_group, label):
+        """Assign a class label to the arrow and update its color."""
+        color = self.get_color_for_label(label)
+        for arrow in arrow_group.sibling_arrows:
+            arrow.set_arrow_color(color)
+
+        arrow_group.label = label
+        self.update_label_text_for_arrow(arrow_group, self.class_components[label])
+
+    def store_arrow_data(self, filename, coords):
+        """Store the arrow data, including coordinates and empty labels and clusters."""
+        self.arrow_data[filename] = {
+            'coords': coords,
+            'labels': [None] * len(coords),
+            'clusters': [None] * len(coords)
+        }
 
 
 # Main entry for testing
 if __name__ == '__main__':
     app = QApplication(sys.argv)
-    hdf5_file_path = r"C:\Users\benja\OneDrive - University of Leeds\DATABACKUP\attention_unet_fl_f1.h5_COLLECTED_UNCERTAINTIES.h5"
+    hdf5_file_path = r"C:\Users\wispy\OneDrive - University of Leeds\DATABACKUP\attention_unet_fl_f1.h5_COLLECTED_UNCERTAINTIES_2.h5"
     viewer = PatchImageViewer(hdf5_file_path=hdf5_file_path)
     viewer.show()
     logging.info("Application started")
