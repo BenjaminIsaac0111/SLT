@@ -1,5 +1,5 @@
 # GUI/views/AnnotationView.py
-
+import math
 from PyQt5.QtWidgets import QGraphicsView, QGraphicsScene
 from PyQt5.QtCore import pyqtSignal, Qt
 from PyQt5.QtGui import QPixmap, QColor
@@ -24,6 +24,7 @@ class AnnotationView(QGraphicsView):
         self.image_item = None
         self.annotation_items = {}  # Dictionary to store arrow_id: ArrowAnnotationItem
         self.selected_annotation_id = -1  # No selection initially
+        self.clustered_coords = {}  # To store the cluster data
         self.setResizeAnchor(QGraphicsView.AnchorUnderMouse)
         self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
 
@@ -38,18 +39,30 @@ class AnnotationView(QGraphicsView):
         logging.debug("Image set in AnnotationView.")
 
     def set_annotations(self, annotations: list):
-        """
-        Adds annotations to the view.
-        :param annotations: List of dictionaries with 'id' and 'position' keys.
-        """
-        # Add new annotations
+        # Clear previous annotations safely
+        self.annotation_items.clear()
+
+        # Add new annotations and assign cluster labels
         for annotation in annotations:
-            arrow_item = self.create_arrow_item(annotation)
+            # Create the arrow item using the dictionary directly
+            arrow_item = ArrowAnnotationItem(annotation)
             arrow_item.clicked.connect(self.on_arrow_clicked)  # Connect the signal
             self.annotation_items[annotation['id']] = arrow_item
             self.scene.addItem(arrow_item)
-            logging.debug(f"Added ArrowAnnotationItem with ID {annotation['id']} at {annotation['position']}.")
-        logging.debug("All annotations set in AnnotationView.")
+
+            # Ensure the cluster ID is set correctly
+            arrow_item.cluster_id = annotation.get('cid', -1)  # Default to -1 if no cluster ID
+            logging.debug(
+                f"Added ArrowAnnotationItem with ID {annotation['id']} at {annotation['position']}, "
+                f"cluster {annotation['cid']}.")
+
+    def set_clusters(self, clustered_coords: dict):
+        """
+        Sets the clustered coordinates. This should be a dictionary where each cluster ID maps to a list of coordinates.
+        :param clustered_coords: Dictionary with cluster ID as keys and lists of coordinates as values.
+        """
+        self.clustered_coords = clustered_coords
+        logging.debug(f"Clusters set with {len(clustered_coords)} clusters.")
 
     def on_arrow_clicked(self, annotation_id: int):
         """
@@ -65,10 +78,9 @@ class AnnotationView(QGraphicsView):
         :param annotation: Dictionary containing annotation data ('id' and 'position').
         :return: ArrowAnnotationItem representing the arrow.
         """
-        coord = annotation['position']  # (row, column)
         arrow_item = ArrowAnnotationItem(
             annotation_id=annotation['id'],
-            color=QColor(255, 0, 0)  # Default color: Red
+            color=QColor(255, 0, 0),
         )
         # Set position in the scene (x, y)
         arrow_item.setPos(coord[1], coord[0])  # x = column, y = row
@@ -93,6 +105,18 @@ class AnnotationView(QGraphicsView):
             self.selected_annotation_id = -1
             logging.debug("No arrow highlighted.")
 
+    def highlight_cluster(self, cluster_id: int):
+        # Unhighlight all previously highlighted arrows
+        for arrow_item in self.annotation_items.values():
+            arrow_item.set_highlighted(False)
+
+        # Highlight all arrows that belong to the selected cluster
+        for arrow_id, arrow_item in self.annotation_items.items():
+            logging.debug(f"Checking arrow {arrow_id} with cluster {arrow_item.cluster_id} for cluster {cluster_id}.")
+            if arrow_item.cluster_id == cluster_id:
+                arrow_item.set_highlighted(True)
+                logging.debug(f"Arrow {arrow_id} in cluster {cluster_id} highlighted.")
+
     def get_selected_arrow_id(self) -> int:
         """
         Retrieves the currently selected arrow ID.
@@ -108,3 +132,4 @@ class AnnotationView(QGraphicsView):
         if self.image_item is not None:
             self.fitInView(self.image_item, Qt.KeepAspectRatio)
             logging.debug("AnnotationView resized and image re-fitted.")
+

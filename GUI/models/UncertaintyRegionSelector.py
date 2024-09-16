@@ -1,38 +1,40 @@
-# models/UncertaintyRegionSelector.py
-
 import logging
-from typing import List, Tuple
+from typing import List, Tuple, Dict
 
 import numpy as np
 from scipy.ndimage import gaussian_filter, maximum_filter
-from sklearn.cluster import DBSCAN
+from sklearn.cluster import DBSCAN, AgglomerativeClustering
 
 
 class UncertaintyRegionSelector:
     """
     The UncertaintyRegionSelector class identifies uncertain regions from an uncertainty map.
-    It uses image processing techniques to find significant points and then delegates clustering
-    to a density-based clustering algorithm to ensure selected regions are diverse.
+    It uses DBSCAN for spatial clustering of significant points and Agglomerative Clustering
+    for clustering the logit features to ensure selected regions are semantically diverse.
     """
 
     def __init__(
             self,
-            filter_size: int = 64,
-            aggregation_method: str = 'max',
-            gaussian_sigma: float = 2.0,
+            filter_size: int = 32,
+            aggregation_method: str = 'std',
+            gaussian_sigma: float = 3.0,
             edge_buffer: int = 8,
-            eps: float = 50.0,  # DBSCAN parameter: maximum distance between two samples
-            min_samples: int = 1,  # DBSCAN parameter: minimum number of samples in a neighborhood
+            eps: float = 0.75,  # DBSCAN parameter for spatial clustering
+            min_samples: int = 1,  # DBSCAN parameter for spatial clustering
+            distance_threshold: float = 2,  # Agglomerative Clustering parameter for logit features
+            linkage: str = 'ward'  # Linkage criteria for Agglomerative Clustering
     ):
         """
         Initializes the UncertaintyRegionSelector.
 
-        :param filter_size: Minimum distance between selected uncertain regions.
+        :param filter_size: Size for the maximum filter to identify local maxima.
         :param aggregation_method: Method to aggregate 3D uncertainty map into 2D ('mean', 'max', 'std').
         :param gaussian_sigma: Sigma parameter for the Gaussian filter.
         :param edge_buffer: Buffer from image edges to exclude certain coordinates.
-        :param eps: DBSCAN parameter for neighborhood size.
-        :param min_samples: DBSCAN parameter for minimum samples in a neighborhood.
+        :param eps: DBSCAN epsilon parameter for spatial clustering.
+        :param min_samples: DBSCAN minimum samples parameter for spatial clustering.
+        :param distance_threshold: The linkage distance threshold for Agglomerative Clustering.
+        :param linkage: The linkage criterion for Agglomerative Clustering ('ward', 'complete', 'average', 'single').
         """
         self.filter_size = filter_size
         self.aggregation_method = aggregation_method
@@ -40,11 +42,13 @@ class UncertaintyRegionSelector:
         self.edge_buffer = edge_buffer
         self.eps = eps
         self.min_samples = min_samples
+        self.distance_threshold = distance_threshold
+        self.linkage = linkage
         self._validate_params()
         logging.info(
             "UncertaintyRegionSelector initialized with filter_size=%d, aggregation_method='%s', "
-            "gaussian_sigma=%.2f, eps=%.2f, min_samples=%d.",
-            filter_size, aggregation_method, gaussian_sigma, eps, min_samples
+            "gaussian_sigma=%.2f, edge_buffer=%d, eps=%.2f, min_samples=%d, distance_threshold=%.2f, linkage='%s'.",
+            filter_size, aggregation_method, gaussian_sigma, edge_buffer, eps, min_samples, distance_threshold, linkage
         )
 
     def _validate_params(self):
@@ -59,18 +63,23 @@ class UncertaintyRegionSelector:
             raise ValueError("eps must be a positive float.")
         if self.min_samples <= 0:
             raise ValueError("min_samples must be a positive integer.")
+        if self.distance_threshold is None or self.distance_threshold <= 0:
+            raise ValueError("distance_threshold must be a positive float.")
+        if self.linkage not in ('ward', 'complete', 'average', 'single'):
+            raise ValueError("linkage must be one of 'ward', 'complete', 'average', or 'single'.")
 
     def select_regions(
             self,
             uncertainty_map: np.ndarray,
             logits: np.ndarray,
-    ) -> List[Tuple[int, int]]:
+    ) -> Dict[int, List[Tuple[int, int]]]:
         """
-        Selects the uncertain regions from the uncertainty map.
+        Selects the uncertain regions from the uncertainty map, clusters the coordinates using DBSCAN,
+        and clusters the logit features using Agglomerative Clustering.
 
         :param uncertainty_map: A 3D numpy array representing uncertainty values.
         :param logits: A 3D numpy array of logit values per pixel.
-        :return: A list of (row, column) tuples representing the coordinates of selected regions.
+        :return: A dictionary where keys are cluster labels and values are lists of (row, column) tuples.
         """
         # Step 1: Aggregate the 3D uncertainty map into a 2D map
         uncertainty_map_2d = self._aggregate_uncertainty(uncertainty_map)
@@ -88,20 +97,21 @@ class UncertaintyRegionSelector:
 
         if not initial_coords:
             logging.warning("No significant coordinates found.")
-            return []
+            return {}
 
-        # Step 5: Extract features for clustering (e.g., logits at the coordinates)
-        features = self._extract_features(logits, initial_coords)
+        # Step 5: Perform DBSCAN on spatial coordinates to group them
+        dbscan_coords = self._dbscan_cluster_coordinates(initial_coords)
+        logging.info("DBSCAN identified %d clusters in spatial domain.", len(dbscan_coords))
 
-        # Optional: Reduce feature dimensionality for faster clustering
-        # Uncomment if applicable
-        # features = self._reduce_feature_dimensionality(features, n_components=3)
+        # Step 6: Extract logit features at the DBSCAN-clustered coordinates
+        logit_features = self._extract_logit_features(np.concatenate([logits, uncertainty_map], axis=-1), dbscan_coords)
+        logging.debug("Extracted logit features for clustering.")
 
-        # Step 6: Cluster the coordinates to ensure diversity using DBSCAN
-        clustered_coords = self._cluster_regions(initial_coords, features)
-        logging.info("Selected %d clustered coordinates.", len(clustered_coords))
+        # Step 7: Cluster the logit features using Agglomerative Clustering
+        clusters = self._cluster_logit_features(logit_features, dbscan_coords)
+        logging.info("Clustered regions into %d clusters.", len(clusters))
 
-        return clustered_coords
+        return clusters
 
     def _aggregate_uncertainty(self, uncertainty_map: np.ndarray) -> np.ndarray:
         """
@@ -110,16 +120,14 @@ class UncertaintyRegionSelector:
         :param uncertainty_map: A 3D numpy array.
         :return: A 2D numpy array.
         """
-        if self.aggregation_method == 'mean':
-            aggregated = np.mean(uncertainty_map, axis=-1)
-        elif self.aggregation_method == 'max':
-            aggregated = np.max(uncertainty_map, axis=-1)
-        elif self.aggregation_method == 'std':
-            aggregated = np.std(uncertainty_map, axis=-1)
-        else:
-            raise ValueError(f"Unknown aggregation method: {self.aggregation_method}")
+        aggregation_methods = {
+            'mean': np.mean,
+            'max': np.max,
+            'std': np.std
+        }
+        aggregated = aggregation_methods[self.aggregation_method](uncertainty_map, axis=-1)
         logging.debug("Aggregated uncertainty map using method '%s'.", self.aggregation_method)
-        return aggregated
+        return aggregated.astype(np.float32)  # Use float32 for reduced memory usage
 
     @staticmethod
     def _normalize_uncertainty(uncertainty_map: np.ndarray) -> np.ndarray:
@@ -129,14 +137,14 @@ class UncertaintyRegionSelector:
         :param uncertainty_map: A 2D numpy array.
         :return: A normalized 2D numpy array.
         """
-        min_val = np.min(uncertainty_map)
-        max_val = np.max(uncertainty_map)
-        if max_val - min_val < 1e-8:
+        min_val = uncertainty_map.min()
+        max_val = uncertainty_map.max()
+        if np.isclose(max_val, min_val):
             logging.warning("Uncertainty map has zero variance.")
-            return np.zeros_like(uncertainty_map)
+            return np.zeros_like(uncertainty_map, dtype=np.float32)
         normalized = (uncertainty_map - min_val) / (max_val - min_val)
         logging.debug("Uncertainty map normalized to range [0, 1].")
-        return normalized
+        return normalized.astype(np.float32)
 
     def _identify_significant_coords(self, uncertainty_map: np.ndarray) -> List[Tuple[int, int]]:
         """
@@ -146,81 +154,108 @@ class UncertaintyRegionSelector:
         :return: A list of (row, column) tuples representing coordinates.
         """
         # Apply maximum filter to find local maxima
-        footprint = np.ones((self.filter_size, self.filter_size))
-        local_max = maximum_filter(uncertainty_map, footprint=footprint, mode='constant') == uncertainty_map
-        coords = np.column_stack(np.nonzero(local_max))
+        local_max = maximum_filter(uncertainty_map, size=self.filter_size, mode='constant') == uncertainty_map
+        coords = np.argwhere(local_max)
 
         # Filter out points near the edges
         rows, cols = uncertainty_map.shape
-        mask = (
+        valid_mask = (
                 (coords[:, 0] >= self.edge_buffer) &
                 (coords[:, 0] < rows - self.edge_buffer) &
                 (coords[:, 1] >= self.edge_buffer) &
                 (coords[:, 1] < cols - self.edge_buffer)
         )
-        valid_coords = coords[mask]
+        valid_coords = coords[valid_mask]
 
         # Convert to list of tuples
         valid_coords = [tuple(coord) for coord in valid_coords]
         logging.debug("Filtered out coordinates near edges, %d remaining.", len(valid_coords))
         return valid_coords
 
-    def _extract_features(self, logits: np.ndarray, coords: List[Tuple[int, int]]) -> np.ndarray:
+    def _dbscan_cluster_coordinates(self, coords: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
         """
-        Extracts features from logits at the specified coordinates.
+        Clusters the spatial coordinates using DBSCAN to ensure spatial diversity.
 
-        :param logits: A 3D numpy array of logit values per pixel.
-        :param coords: A list of (row, column) tuples.
-        :return: A 2D numpy array of features.
+        :param coords: A list of (row, column) tuples representing significant coordinates.
+        :return: A list of (row, column) tuples after spatial clustering.
         """
-        # Assuming logits shape is (height, width, channels)
-        # Flatten the features for clustering
-        features = np.array([logits[row, col, :] for row, col in coords])
-        logging.debug("Extracted features for clustering.")
-        return features
-
-    def _cluster_regions(
-            self,
-            coords: List[Tuple[int, int]],
-            features: np.ndarray
-    ) -> List[Tuple[int, int]]:
-        """
-        Clusters the coordinates to ensure diversity using DBSCAN.
-
-        :param coords: A list of (row, column) tuples.
-        :param features: A 2D numpy array of features.
-        :return: A list of (row, column) tuples representing clustered coordinates.
-        """
-        if len(coords) == 0:
+        if not coords:
             return []
+
+        # Convert list of tuples to NumPy array for DBSCAN
+        spatial_coords = np.array(coords)  # Shape: (n_samples, 2)
 
         # Initialize DBSCAN with the specified parameters
         dbscan = DBSCAN(eps=self.eps, min_samples=self.min_samples, metric='euclidean', n_jobs=-1)
 
-        # Fit DBSCAN on spatial coordinates (not on features)
-        spatial_features = np.array(coords)  # Shape: (n_samples, 2)
-        dbscan.fit(spatial_features)
+        # Fit DBSCAN on spatial coordinates
+        dbscan.fit(spatial_coords)
 
         labels = dbscan.labels_
         unique_labels = set(labels)
-        unique_labels.discard(-1)  # Remove noise label if present
 
         clustered_coords = []
+
+        # Add coordinates from each cluster
         for label in unique_labels:
-            class_member_mask = (labels == label)
-            cluster_coords = spatial_features[class_member_mask]
+            if label == -1:
+                # Skip noise points (DBSCAN label -1)
+                continue
+            cluster_indices = np.where(labels == label)[0]
+            clustered_coords.extend([coords[idx] for idx in cluster_indices])
 
-            # Select the point with the highest uncertainty within the cluster
-            # Assuming that higher uncertainty corresponds to higher values in the aggregated uncertainty map
-            # To implement this, you need to pass the aggregated uncertainty map or original uncertainty values
-            # For simplicity, we'll select the first point
-            selected_coord = tuple(cluster_coords[0])
-            clustered_coords.append(selected_coord)
-
-        # Handle noise points as individual regions
-        noise_mask = (labels == -1)
-        noise_coords = spatial_features[noise_mask]
-        for coord in noise_coords:
-            clustered_coords.append(tuple(coord))
-
+        logging.debug("DBSCAN clustering complete. Number of spatial clusters: %d.", len(unique_labels) - 1)
         return clustered_coords
+
+    def _extract_logit_features(self, logits: np.ndarray, coords: List[Tuple[int, int]]) -> np.ndarray:
+        """
+        Extracts logit features at the specified coordinates.
+
+        :param logits: A 3D numpy array of logit values per pixel.
+        :param coords: A list of (row, column) tuples.
+        :return: A 2D numpy array of logit features.
+        """
+        rows, cols = zip(*coords)
+        logit_features = logits[rows, cols, :]  # Shape: (n_coords, logit_channels)
+        return logit_features.astype(np.float32)  # Ensure float32 for consistency
+
+    def _cluster_logit_features(
+            self,
+            logit_features: np.ndarray,
+            coords: List[Tuple[int, int]]
+    ) -> Dict[int, List[Tuple[int, int]]]:
+        """
+        Clusters the logit features using Agglomerative Clustering and maps them back to coordinates.
+
+        :param logit_features: A 2D numpy array of logit features.
+        :param coords: A list of (row, column) tuples.
+        :return: A dictionary where keys are cluster labels and values are lists of (row, column) tuples.
+        """
+        if logit_features.size == 0:
+            logging.warning("No logit features to cluster.")
+            return {}
+
+        # Initialize Agglomerative Clustering
+        clustering = AgglomerativeClustering(
+            n_clusters=None,  # Do not specify number of clusters
+            distance_threshold=self.distance_threshold,  # Define the linkage distance threshold
+            linkage=self.linkage
+        )
+
+        # Fit Agglomerative Clustering on logit features
+        clustering.fit(logit_features)
+
+        labels = clustering.labels_
+        unique_labels = set(labels)
+
+        clusters: Dict[int, List[Tuple[int, int]]] = {}
+        for label in unique_labels:
+            if label not in clusters:
+                clusters[label] = []
+            # Retrieve all coordinates belonging to this cluster
+            cluster_indices = np.where(labels == label)[0]
+            for idx in cluster_indices:
+                clusters[label].append(coords[idx])
+
+        logging.debug("Agglomerative clustering complete. Number of clusters: %d.", len(clusters))
+        return clusters

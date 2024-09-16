@@ -12,6 +12,7 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QPixmap, QImage
 import io
 
+
 class ImageDataModel:
     """
     ImageDataModel is responsible for loading and providing access to image data, logits, uncertainties, and filenames

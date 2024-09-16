@@ -128,13 +128,12 @@ class PatchImageViewer(QWidget):
         self.setWindowTitle(f"Patch Image Viewer - {filename}")
         logging.info("Images updated for file '%s'.", filename)
 
-    def update_annotations(self, annotations: list):
+    def update_annotations(self, annotations: dict):
         """
         Updates the annotations (arrows) in all image views.
 
         :param annotations: List of annotations to display. Each annotation can be a dict containing 'id' and 'coord'.
         """
-        # Prepare a list of annotation dictionaries with unique IDs
         self.image_view.set_annotations(annotations)
         self.overlay_view.set_annotations(annotations)
         self.heatmap_view.set_annotations(annotations)

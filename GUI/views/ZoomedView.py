@@ -5,6 +5,7 @@ import logging
 
 from GUI.views.ArrowAnnotationItem import ArrowAnnotationItem  # Ensure correct import path
 
+
 class ZoomedView(QWidget):
     """
     Displays a zoomed-in view of a selected region.
@@ -61,12 +62,14 @@ class ZoomedView(QWidget):
         arrow_rel_x = col - x_start
         arrow_rel_y = row - y_start
 
-        logging.debug(f"Calculated crop bounds: x_start={x_start}, y_start={y_start}, width={width_crop}, height={height_crop}")
+        logging.debug(
+            f"Calculated crop bounds: x_start={x_start}, y_start={y_start}, width={width_crop}, height={height_crop}")
         logging.debug(f"Arrow relative position within crop: ({arrow_rel_x}, {arrow_rel_y})")
 
         return (x_start, y_start), (arrow_rel_x, arrow_rel_y)
 
-    def update_zoomed_image(self, pixmap: QPixmap, coord: tuple, original_image_size: tuple, crop_size: int = 256, zoom_factor: int = 2):
+    def update_zoomed_image(self, pixmap: QPixmap, coord: tuple, original_image_size: tuple, crop_size: int = 256,
+                            zoom_factor: int = 2):
         """
         Updates the zoomed view with the given pixmap and places an arrow at the correct position.
 
@@ -91,7 +94,8 @@ class ZoomedView(QWidget):
         self.image_item.setZValue(-1)  # Ensure the image is below the arrow
 
         # Calculate the relative position of the arrow within the zoomed image
-        (x_start, y_start), (arrow_rel_x, arrow_rel_y) = self.calculate_crop_bounds(coord, original_image_size, crop_size)
+        (x_start, y_start), (arrow_rel_x, arrow_rel_y) = self.calculate_crop_bounds(coord, original_image_size,
+                                                                                    crop_size)
 
         # Scale the arrow position according to the zoom factor
         arrow_rel_x_scaled = arrow_rel_x * zoom_factor

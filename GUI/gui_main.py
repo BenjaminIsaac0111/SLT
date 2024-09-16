@@ -14,7 +14,7 @@ def main():
     then starts the application event loop.
     """
     # Initialize logging
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
     # Start the PyQt application
     app = QApplication(sys.argv)

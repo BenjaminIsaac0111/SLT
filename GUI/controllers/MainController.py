@@ -7,8 +7,7 @@ from GUI.models.ImageProcessor import ImageProcessor
 from GUI.models.UncertaintyRegionSelector import UncertaintyRegionSelector
 from GUI.utils.ImageConversion import pil_image_to_qpixmap
 from GUI.views.PatchImageViewer import PatchImageViewer
-from PyQt5.QtGui import QPixmap
-
+from PyQt5.QtGui import QPixmap, QColor
 
 class MainController(QObject):
     """
@@ -24,20 +23,17 @@ class MainController(QObject):
         self.image_processor = ImageProcessor()
 
         # Initialize the selector with desired parameters
-        self.region_selector = UncertaintyRegionSelector(
-            filter_size=64,
-            aggregation_method='max',
-            gaussian_sigma=2.0,
-            edge_buffer=8,
-            eps=1,  # Adjust based on your data's scale
-            min_samples=1  # Minimum samples to form a cluster
-        )
+        self.region_selector = UncertaintyRegionSelector()
 
         # Current filename, index, and selected coordinates
         self.current_filename = None
-        self.current_index = -1  # Initialize to invalid index
+        self.current_index = -1
         self.selected_coords = []
         self.current_arrow_index = -1  # Initialize to no selection
+
+        # Initialize cluster tracking attributes
+        self.current_cluster_index = -1  # Initialize to no cluster selected
+        self.total_clusters = 0  # Total number of clusters
 
         # Connect signals from the view to controller methods
         self.connect_signals()
@@ -66,6 +62,62 @@ class MainController(QObject):
         except Exception as e:
             logging.error(f"Failed to populate file list: {e}")
 
+    def on_file_selected(self, index: int):
+        """
+        Handles the event when a file is selected from the list.
+        """
+        # Retrieve image data for the selected file
+        data = self.model.get_image_data(index)
+        self.current_filename = data['filename']
+        self.current_index = index
+
+        # Process the image data using the ImageProcessor
+        processed_images = self.image_processor.process_image_data(
+            image_array=data['image'],
+            logits=data['logits'],
+            uncertainty=data['uncertainty']
+        )
+
+        # Update the view with the processed images
+        self.view.update_images(processed_images, self.current_filename)
+
+        # Select regions based on uncertainty and logits
+        clustered_coords = self.region_selector.select_regions(
+            uncertainty_map=data['uncertainty'],
+            logits=data['logits'],
+        )
+
+        # Prepare annotations (clustered by DBSCAN and logit clustering)
+        # Initialize a global unique ID counter
+        unique_id_counter = 0
+
+        annotations = []
+        for cluster_id, cluster_coords in clustered_coords.items():
+            for coord in cluster_coords:
+                annotation_data = {
+                    'id': unique_id_counter,  # Assign unique ID
+                    'cid': cluster_id,
+                    'position': coord,
+                    'name': f"Annotation {unique_id_counter}",
+                    'class_label': None,
+                    'tags': ['clustered'],
+                    'color': QColor(255, 0, 0)  # Default color (red) for the arrow
+                }
+                annotations.append(annotation_data)
+                unique_id_counter += 1  # Increment the unique ID counter
+
+        # Log annotations to verify structure
+        logging.debug(f"Annotations being passed: {annotations}")
+
+        # Update the view with annotations (arrows)
+        self.view.update_annotations(annotations)
+
+        # Set total clusters and reset current cluster index
+        self.total_clusters = len(clustered_coords)  # Update total clusters
+        self.current_cluster_index = -1  # Reset the cluster index on new file selection
+
+        logging.info(f"File '{self.current_filename}' selected and processed with {self.total_clusters} clusters.")
+
     def on_arrow_clicked(self, arrow_id: int):
         """
         Handles the event when an arrow (annotation) is clicked in the view.
@@ -89,44 +141,6 @@ class MainController(QObject):
         logging.debug(f"Zooming into coordinate: {coord}")
         self.zoom_in_on_region(coord)
         logging.info(f"Arrow {arrow_id} clicked. Zooming in on region {coord}.")
-
-    def on_file_selected(self, index: int):
-        data = self.model.get_image_data(index)
-        self.current_filename = data['filename']
-        self.current_index = index
-
-        # Process the image data using the ImageProcessor
-        processed_images = self.image_processor.process_image_data(
-            image_array=data['image'],
-            logits=data['logits'],
-            uncertainty=data['uncertainty']
-        )
-
-        # Update the view with the processed images
-        self.view.update_images(processed_images, self.current_filename)
-
-        # Select regions based on uncertainty and logits
-        self.selected_coords = self.region_selector.select_regions(
-            uncertainty_map=data['uncertainty'],
-            logits=data['logits'],
-        )
-
-        logging.debug(f"Selected coordinates: {self.selected_coords}")
-
-        annotations = [{'id': idx, 'position': coord} for idx, coord in enumerate(self.selected_coords)]
-
-        # Log annotations to verify structure
-        logging.debug(f"Annotations being passed: {annotations}")
-
-        # Update the view with annotations (arrows representing selected regions)
-        self.view.update_annotations(annotations)
-        logging.info("File '%s' selected and processed.", self.current_filename)
-
-        # Reset current arrow selection
-        self.current_arrow_index = -1
-        self.view.image_view.highlight_arrow(-1)
-        self.view.overlay_view.highlight_arrow(-1)
-        self.view.heatmap_view.highlight_arrow(-1)
 
     def zoom_in_on_region(self, coord: Tuple[int, int]):
         """
@@ -166,87 +180,47 @@ class MainController(QObject):
 
     def on_key_pressed(self, key: int):
         """
-        Handles key press events in the view. For example, cycling through arrows or removing annotations.
-
-        :param key: The key that was pressed.
+        Handles key press events in the view. Cycles through clusters or arrows.
         """
         try:
             if key == Qt.Key_A:
-                self.cycle_through_arrows(-1)  # Move to the previous arrow
+                self.cycle_through_clusters(-1)  # Move to the previous cluster
             elif key == Qt.Key_D:
-                self.cycle_through_arrows(1)  # Move to the next arrow
-            elif key == Qt.Key_Delete:
-                self.delete_selected_arrow()
+                self.cycle_through_clusters(1)  # Move to the next cluster
             logging.info(f"Key {key} pressed.")
         except Exception as e:
             logging.error(f"Error handling key press: {e}")
 
     def cycle_through_arrows(self, direction: int):
         """
-        Cycles through arrows (annotations) based on the provided direction.
-
-        :param direction: -1 for previous, 1 for next.
+        Cycles through the list of arrows based on the direction (-1 for left, +1 for right).
         """
-        if not self.selected_coords:
-            logging.warning("No arrows to cycle through.")
+        total_arrows = len(self.selected_coords)
+        if total_arrows == 0:
+            logging.warning("No arrows available to cycle through.")
             return
 
-        # Calculate the next arrow index based on the direction
-        next_arrow_index = (self.current_arrow_index + direction) % len(self.selected_coords)
+        # Update the arrow index, cycling through the list
+        self.current_arrow_index = (self.current_arrow_index + direction) % total_arrows
 
-        # Update the view to reflect the selected arrow
-        self.view.image_view.highlight_arrow(next_arrow_index)
-        self.view.overlay_view.highlight_arrow(next_arrow_index)
-        self.view.heatmap_view.highlight_arrow(next_arrow_index)
+        # Highlight the newly selected arrow
+        selected_arrow_id = self.current_arrow_index
+        self.view.image_view.highlight_arrow(selected_arrow_id)
+        logging.info(f"Selected arrow ID: {selected_arrow_id}")
 
-        # Update the currently selected arrow index
-        self.current_arrow_index = next_arrow_index
-
-        # Retrieve the coordinate of the next arrow
-        coord = self.selected_coords[next_arrow_index]
-        logging.debug(f"Zooming into cycled coordinate: {coord}")
-        self.zoom_in_on_region(coord)
-
-        logging.info(f"Cycled to arrow {next_arrow_index}.")
-
-    def delete_selected_arrow(self):
+    def cycle_through_clusters(self, direction: int):
         """
-        Removes the currently selected arrow from the view and updates the annotations.
+        Cycles through the list of clusters based on the direction (-1 for previous, +1 for next).
         """
-        if self.current_arrow_index == -1:
-            logging.warning("No arrow selected to delete.")
+        if self.total_clusters == 0:
+            logging.warning("No clusters available to cycle through.")
             return
 
-        try:
-            # Remove the selected arrow from the list of coordinates
-            removed_coord = self.selected_coords.pop(self.current_arrow_index)
-            logging.info(f"Deleted arrow at index {self.current_arrow_index}, position {removed_coord}.")
+        # Update the cluster index, cycling through the list
+        self.current_cluster_index = (self.current_cluster_index + direction) % self.total_clusters
 
-            # Update the annotations in the view
-            annotations = [{'id': idx, 'position': coord} for idx, coord in enumerate(self.selected_coords)]
-            self.view.update_annotations(annotations)
+        # Highlight the newly selected cluster
+        selected_cluster_id = self.current_cluster_index
+        self.view.image_view.highlight_cluster(selected_cluster_id)
 
-            # Update the selected arrow index
-            if self.selected_coords:
-                self.current_arrow_index %= len(self.selected_coords)
-                selected_arrow_id = self.current_arrow_index
-                self.view.image_view.highlight_arrow(selected_arrow_id)
-                self.view.overlay_view.highlight_arrow(selected_arrow_id)
-                self.view.heatmap_view.highlight_arrow(selected_arrow_id)
-
-                # Retrieve the coordinate of the new selected arrow
-                coord = self.selected_coords[self.current_arrow_index]
-                logging.debug(f"Zooming into new selected coordinate after deletion: {coord}")
-                self.zoom_in_on_region(coord)
-                logging.info(f"After deletion, selected arrow {selected_arrow_id}.")
-            else:
-                # No annotations left
-                self.current_arrow_index = -1
-                self.view.image_view.highlight_arrow(-1)
-                self.view.overlay_view.highlight_arrow(-1)
-                self.view.heatmap_view.highlight_arrow(-1)
-                self.view.zoomed_viewer.update_zoomed_image(QPixmap(), coord=(0,0), original_image_size=(0,0), crop_size=256, zoom_factor=2)
-                logging.info("All arrows deleted. No selection remaining.")
-
-        except Exception as e:
-            logging.error(f"Error deleting selected arrow: {e}")
+        logging.info(f"Selected cluster ID: {selected_cluster_id}")
