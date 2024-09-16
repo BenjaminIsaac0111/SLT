@@ -1190,7 +1190,8 @@ class ArrowManager:
 # Main entry for testing
 if __name__ == '__main__':
     app = QApplication(sys.argv)
-    hdf5_file_path = r"C:\Users\wispy\OneDrive - University of Leeds\DATABACKUP\attention_unet_fl_f1.h5_COLLECTED_UNCERTAINTIES_2.h5"
+    hdf5_file_path = (r"C:\Users\benja\OneDrive - University of "
+                      r"Leeds\DATABACKUP\attention_unet_fl_f1.h5_COLLECTED_UNCERTAINTIES.h5")
     viewer = PatchImageViewer(hdf5_file_path=hdf5_file_path)
     viewer.show()
     logging.info("Application started")

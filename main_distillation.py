@@ -225,7 +225,7 @@ if __name__ == '__main__':
         else:
             tf.print('Building new model...')
             model = build_unet(
-                img_size=cfg['INPUT_SIZE'],
+                input_size=cfg['INPUT_SIZE'],
                 num_classes=cfg['OUT_CHANNELS'],
                 num_levels=cfg['N_MODEL_LEVELS'],
                 num_conv_per_level=cfg['N_CONV_PER_LAYER'],

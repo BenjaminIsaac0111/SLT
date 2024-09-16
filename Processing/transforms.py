@@ -1,9 +1,6 @@
-import numpy as np
 import tensorflow as tf
 from tensorflow.keras.layers.experimental import preprocessing
 from tensorflow.keras import mixed_precision
-
-import tensorflow_addons as tfa
 
 
 class Transforms(tf.keras.layers.Layer):
@@ -115,7 +112,6 @@ class DestructiveAugmentor(tf.keras.Model):
         super(DestructiveAugmentor, self).__init__()
         self.seed = seed
         self.random_color_jitter = RandomColorJitter(seed=self.seed)
-        self.random_blur = RandomBlur(seed=self.seed)
         self.random_greyscale = RandomGreyScale(seed=self.seed)
 
     @tf.function
@@ -130,7 +126,6 @@ class DestructiveAugmentor(tf.keras.Model):
             tf.Tensor: Transformed image tensor after applying the augmentation operations.
         """
         inputs = self.random_color_jitter(inputs)
-        inputs = self.random_blur(inputs)
         inputs = self.random_greyscale(inputs)
         inputs = tf.clip_by_value(inputs, 0, 1)
         return inputs
@@ -180,35 +175,6 @@ class RandomColorJitter(Augmentation):
 
             # Random hue adjustment
             x = tf.image.random_hue(x, max_delta=0.05)
-        return x
-
-
-class RandomBlur(Augmentation):
-    """RandomBlur class.
-
-    RandomBlur class. Randomly blurs an image.
-
-    Methods:
-        call: method that does random blur 20% of the time.
-    """
-
-    @tf.function
-    def call(self, x: tf.Tensor) -> tf.Tensor:
-        """call function.
-
-        Randomly solarizes the image.
-
-        Arguments:
-            x: a tf.Tensor representing the image.
-
-        Returns:
-            returns a blurred version of the image 20% of the time
-              and the original image 80% of the time.
-        """
-
-        if self.random_execute(0.2):
-            s = np.random.random()
-            return tfa.image.gaussian_filter2d(image=x, sigma=s)
         return x
 
 
