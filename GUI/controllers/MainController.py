@@ -1,13 +1,17 @@
 import logging
-from typing import Tuple
+from typing import Tuple, List, Dict
 
 from PyQt5.QtCore import QObject, Qt
+
+from GUI.controllers.GlobalClusterController import GlobalClusterController
 from GUI.models.ImageDataModel import ImageDataModel
 from GUI.models.ImageProcessor import ImageProcessor
 from GUI.models.UncertaintyRegionSelector import UncertaintyRegionSelector
 from GUI.utils.ImageConversion import pil_image_to_qpixmap
+from GUI.views.ClusteredCropsView import ClusteredCropsView
 from GUI.views.PatchImageViewer import PatchImageViewer
 from PyQt5.QtGui import QPixmap, QColor
+
 
 class MainController(QObject):
     """
@@ -35,6 +39,15 @@ class MainController(QObject):
         self.current_cluster_index = -1  # Initialize to no cluster selected
         self.total_clusters = 0  # Total number of clusters
 
+        # Store annotations for easy access
+        self.annotations = []  # Initialize annotations list
+
+        # Initialize and setup global clustering components
+        self.cluster_sample_view = ClusteredCropsView()
+        self.global_cluster_controller = GlobalClusterController(
+            model=self.model,
+            view=self.cluster_sample_view,
+        )
         # Connect signals from the view to controller methods
         self.connect_signals()
 
@@ -82,10 +95,14 @@ class MainController(QObject):
         self.view.update_images(processed_images, self.current_filename)
 
         # Select regions based on uncertainty and logits
-        clustered_coords = self.region_selector.select_regions(
+        logit_features, dbscan_coords = self.region_selector.select_regions(
             uncertainty_map=data['uncertainty'],
             logits=data['logits'],
         )
+
+        # Step 7: Cluster the logit features using Agglomerative Clustering
+        clustered_coords = self.region_selector.cluster_logit_features(logit_features, dbscan_coords)
+        logging.info("Clustered regions into %d clusters.", len(clustered_coords))
 
         # Prepare annotations (clustered by DBSCAN and logit clustering)
         # Initialize a global unique ID counter
@@ -96,18 +113,21 @@ class MainController(QObject):
             for coord in cluster_coords:
                 annotation_data = {
                     'id': unique_id_counter,  # Assign unique ID
-                    'cid': cluster_id,
+                    'cid': cluster_id,  # Cluster ID
                     'position': coord,
                     'name': f"Annotation {unique_id_counter}",
                     'class_label': None,
                     'tags': ['clustered'],
-                    'color': QColor(255, 0, 0)  # Default color (red) for the arrow
+                    'color': QColor(0, 0, 0)  # Default color (black) for the arrow
                 }
                 annotations.append(annotation_data)
                 unique_id_counter += 1  # Increment the unique ID counter
 
         # Log annotations to verify structure
         logging.debug(f"Annotations being passed: {annotations}")
+
+        # Store annotations in the controller for later access
+        self.annotations = annotations  # <-- Added line
 
         # Update the view with annotations (arrows)
         self.view.update_annotations(annotations)
@@ -124,22 +144,34 @@ class MainController(QObject):
 
         :param arrow_id: The ID of the clicked arrow.
         """
-        # Highlight the clicked arrow in all AnnotationViews
-        self.view.image_view.highlight_arrow(arrow_id)
-        self.view.overlay_view.highlight_arrow(arrow_id)
-        self.view.heatmap_view.highlight_arrow(arrow_id)
-
         # Update the currently selected arrow index
         self.current_arrow_index = arrow_id
 
-        # Retrieve the coordinate of the clicked arrow
-        if arrow_id < 0 or arrow_id >= len(self.selected_coords):
+        # Retrieve the annotation data for the clicked arrow
+        if arrow_id < 0 or arrow_id >= len(self.annotations):
             logging.warning(f"Arrow ID {arrow_id} is out of range.")
             return
 
-        coord = self.selected_coords[arrow_id]
+        clicked_annotation = self.annotations[arrow_id]
+        clicked_cid = clicked_annotation['cid']
+        logging.debug(f"Clicked arrow CID: {clicked_cid}")
+
+        # Find all arrows with the same cluster ID (cid)
+        same_cluster_ids = [anno['id'] for anno in self.annotations if anno['cid'] == clicked_cid]
+        logging.debug(f"Arrows in the same cluster ({clicked_cid}): {same_cluster_ids}")
+
+        # Highlight all arrows in the same cluster
+        self.view.image_view.highlight_cluster(cluster_id=clicked_cid)
+        self.view.overlay_view.highlight_cluster(cluster_id=clicked_cid)
+        self.view.heatmap_view.highlight_cluster(cluster_id=clicked_cid)
+
+        # Optionally, you can store the current cluster ID if needed
+        self.current_cluster_index = clicked_cid
+
+        # Retrieve the coordinate of the clicked arrow
+        coord = clicked_annotation['position']
         logging.debug(f"Zooming into coordinate: {coord}")
-        self.zoom_in_on_region(coord)
+        # self.zoom_in_on_region(coord)
         logging.info(f"Arrow {arrow_id} clicked. Zooming in on region {coord}.")
 
     def zoom_in_on_region(self, coord: Tuple[int, int]):
@@ -191,23 +223,6 @@ class MainController(QObject):
         except Exception as e:
             logging.error(f"Error handling key press: {e}")
 
-    def cycle_through_arrows(self, direction: int):
-        """
-        Cycles through the list of arrows based on the direction (-1 for left, +1 for right).
-        """
-        total_arrows = len(self.selected_coords)
-        if total_arrows == 0:
-            logging.warning("No arrows available to cycle through.")
-            return
-
-        # Update the arrow index, cycling through the list
-        self.current_arrow_index = (self.current_arrow_index + direction) % total_arrows
-
-        # Highlight the newly selected arrow
-        selected_arrow_id = self.current_arrow_index
-        self.view.image_view.highlight_arrow(selected_arrow_id)
-        logging.info(f"Selected arrow ID: {selected_arrow_id}")
-
     def cycle_through_clusters(self, direction: int):
         """
         Cycles through the list of clusters based on the direction (-1 for previous, +1 for next).
@@ -222,5 +237,24 @@ class MainController(QObject):
         # Highlight the newly selected cluster
         selected_cluster_id = self.current_cluster_index
         self.view.image_view.highlight_cluster(selected_cluster_id)
+        self.view.overlay_view.highlight_cluster(selected_cluster_id)
+        self.view.heatmap_view.highlight_cluster(selected_cluster_id)
 
         logging.info(f"Selected cluster ID: {selected_cluster_id}")
+
+    def on_cluster_sample_requested(self):
+        """
+        Handles the request to perform global clustering and display samples.
+        """
+        logging.info("Cluster sample request received.")
+        self.global_cluster_controller.perform_global_clustering()
+
+    def on_global_clustering_fininshed(self, clusters: Dict[int, List[Tuple[int, int, int]]]):
+        """
+        Handles the completion of global clustering by updating the ClusterSampleView.
+
+        :param clusters: Dictionary mapping cluster labels to lists of (image_index, row, col) tuples.
+        """
+        logging.info("Global clustering completed. Updating ClusterSampleView.")
+        self.cluster_sample_view.display_cluster_samples(clusters, self.model)
+        self.cluster_sample_view.show()

@@ -1,40 +1,43 @@
-# main.py
-
+from PyQt5.QtWidgets import QApplication, QMainWindow, QTabWidget
 import sys
 import logging
-from PyQt5.QtWidgets import QApplication
-from models.ImageDataModel import ImageDataModel
-from views.PatchImageViewer import PatchImageViewer
-from controllers.MainController import MainController
 
+from GUI.models.ImageDataModel import ImageDataModel
+from GUI.views.PatchImageViewer import PatchImageViewer
+from GUI.views.ClusteredCropsView import ClusteredCropsView
+from GUI.controllers.MainController import MainController
+from GUI.controllers.GlobalClusterController import GlobalClusterController
 
 def main():
-    """
-    Entry point for the application. Initializes the QApplication, Model, View, and Controller,
-    then starts the application event loop.
-    """
-    # Initialize logging
-    logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
-
-    # Start the PyQt application
+    logging.basicConfig(level=logging.INFO)
     app = QApplication(sys.argv)
 
     # Initialize the model (replace 'your_hdf5_file.h5' with the actual HDF5 file path)
-    hdf5_file_path = r"C:\Users\benja\OneDrive - University of Leeds\DATABACKUP\attention_unet_fl_f1.h5_COLLECTED_UNCERTAINTIES_2.h5"
+    hdf5_file_path = (r"C:\Users\benja\OneDrive - University of Leeds\PhD "
+                      r"Projects\Attention-UNET\cfg\unet_training_experiments\outputs\dropout_attention_unet_fl_f1.h5"
+                      r"\dropout_attention_unet_fl_f1_inference_output.h5")
     model = ImageDataModel(hdf5_file_path)
 
-    # Initialize the view
-    view = PatchImageViewer()
+    # Initialize views
+    patch_viewer = PatchImageViewer()
+    clustered_crops_view = ClusteredCropsView()
 
-    # Initialize the controller and connect the model and view
-    controller = MainController(model=model, view=view)
+    # Initialize controllers
+    main_controller = MainController(model=model, view=patch_viewer)
+    global_cluster_controller = GlobalClusterController(model=model, view=clustered_crops_view)
 
-    # Show the main window
-    view.show()
+    # Create a main window with tabs to switch between different views
+    main_window = QMainWindow()
+    tab_widget = QTabWidget()
+    tab_widget.addTab(patch_viewer, "Image Viewer")
+    tab_widget.addTab(clustered_crops_view, "Clustered Crops")
+    main_window.setCentralWidget(tab_widget)
+    main_window.setWindowTitle("Patch Image Analysis Tool")
+    main_window.resize(1600, 900)
+    main_window.show()
 
-    # Start the application event loop
     sys.exit(app.exec_())
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

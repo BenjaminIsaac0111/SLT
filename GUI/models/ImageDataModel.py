@@ -40,7 +40,8 @@ class ImageDataModel:
             self._hdf5_file: Optional[h5py.File] = None
             self._images: Optional[h5py.Dataset] = None
             self._logits: Optional[h5py.Dataset] = None
-            self._uncertainties: Optional[h5py.Dataset] = None
+            self._epistemic_uncertainties: Optional[h5py.Dataset] = None
+            self._aleatoric_uncertainties: Optional[h5py.Dataset] = None
             self._filenames: List[str] = []
             self._data_lock = threading.Lock()
             self._current_pixmap: Optional[QPixmap] = None  # To store the current QPixmap
@@ -70,9 +71,11 @@ class ImageDataModel:
             if not self._logits:
                 self._logits = self._hdf5_file['logits']
                 logging.info("Logits dataset loaded.")
-            if not self._uncertainties:
-                self._uncertainties = self._hdf5_file['epistemic_uncertainty']
-                logging.info("Uncertainties dataset loaded.")
+            if not self._epistemic_uncertainties:
+                self._epistemic_uncertainties = self._hdf5_file['epistemic_uncertainty']
+            if not self._aleatoric_uncertainties:
+                self._aleatoric_uncertainties = self._hdf5_file['aleatoric_uncertainty']
+                logging.info("Uncertainty datasets loaded.")
             if not self._filenames:
                 filenames_dataset = self._hdf5_file['filenames']
                 self._filenames = [name.decode('utf-8') for name in filenames_dataset]
@@ -95,13 +98,17 @@ class ImageDataModel:
         with self._data_lock:
             image = self._images[index]
             logits = self._logits[index]
-            uncertainty = self._uncertainties[index]
+            epistemic_uncertainties = self._epistemic_uncertainties[index]
+            aleatoric_uncertainties = self._aleatoric_uncertainties[index][..., np.newaxis]
+            uncertainties = epistemic_uncertainties - aleatoric_uncertainties
             filename = self._filenames[index]
 
         return {
             'image': image,
             'logits': logits,
-            'uncertainty': uncertainty,
+            'epistemic_uncertainty': epistemic_uncertainties,
+            'aleatoric_uncertainty': aleatoric_uncertainties,
+            'uncertainty': uncertainties,
             'filename': filename
         }
 
@@ -215,7 +222,7 @@ class ImageDataModel:
         logging.debug("Retrieving all filenames.")
         return self._filenames.copy()
 
-    def get_total_entries(self) -> int:
+    def get_number_of_images(self) -> int:
         """
         Returns the total number of entries in the dataset.
 

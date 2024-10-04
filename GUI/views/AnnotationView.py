@@ -38,7 +38,7 @@ class AnnotationView(QGraphicsView):
         self.fitInView(self.image_item, Qt.KeepAspectRatio)  # Ensure the image fits the view
         logging.debug("Image set in AnnotationView.")
 
-    def set_annotations(self, annotations: list):
+    def set_annotations(self, annotations: dict):
         # Clear previous annotations safely
         self.annotation_items.clear()
 
@@ -71,20 +71,6 @@ class AnnotationView(QGraphicsView):
         """
         logging.debug(f"Arrow {annotation_id} clicked in AnnotationView.")
         self.arrowClicked.emit(annotation_id)
-
-    def create_arrow_item(self, annotation: dict) -> ArrowAnnotationItem:
-        """
-        Creates an arrow item based on the annotation data.
-        :param annotation: Dictionary containing annotation data ('id' and 'position').
-        :return: ArrowAnnotationItem representing the arrow.
-        """
-        arrow_item = ArrowAnnotationItem(
-            annotation_id=annotation['id'],
-            color=QColor(255, 0, 0),
-        )
-        # Set position in the scene (x, y)
-        arrow_item.setPos(coord[1], coord[0])  # x = column, y = row
-        return arrow_item
 
     def highlight_arrow(self, annotation_id: int):
         """

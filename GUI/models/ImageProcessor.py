@@ -2,6 +2,7 @@
 
 import numpy as np
 from PIL import Image
+from PyQt5.QtGui import QImage
 from matplotlib import pyplot as plt
 from matplotlib.colors import Colormap
 from typing import Optional, Tuple, Dict
@@ -143,3 +144,72 @@ class ImageProcessor:
             'overlay': pil_image_to_qpixmap(overlay),
             'heatmap': pil_image_to_qpixmap(heatmap)
         }
+
+    def extract_crop(self, image: np.ndarray, coord: Tuple[int, int], crop_size: int = 256,
+                     zoom_factor: int = 2) -> QImage:
+        """
+        Extracts a zoomed-in crop from the image at the specified coordinate.
+
+        :param image: A numpy array representing the image.
+        :param coord: A tuple (row, column) indicating the center of the crop.
+        :param crop_size: Size of the crop in pixels.
+        :param zoom_factor: Factor by which to zoom the crop.
+        :return: A QImage object of the zoomed-in crop.
+        """
+        row, col = coord
+        half_size = crop_size // 2
+
+        # Define crop boundaries
+        start_row = max(row - half_size, 0)
+        end_row = min(row + half_size, image.shape[0])
+        start_col = max(col - half_size, 0)
+        end_col = min(col + half_size, image.shape[1])
+
+        # Extract the crop
+        crop = image[start_row:end_row, start_col:end_col]
+
+        # Resize the crop based on zoom_factor
+        resized_crop = self.resize_image(crop, zoom_factor)
+
+        # Convert to QImage
+        qimage = self.numpy_to_qimage(resized_crop)
+        return qimage
+
+    @staticmethod
+    def resize_image(image: np.ndarray, zoom_factor: int) -> np.ndarray:
+        """
+        Resizes the image by the specified zoom factor.
+
+        :param image: A numpy array representing the image.
+        :param zoom_factor: Factor by which to resize the image.
+        :return: Resized numpy array.
+        """
+        pil_image = Image.fromarray((image * 255).astype(np.uint8))
+        new_size = (pil_image.width * zoom_factor, pil_image.height * zoom_factor)
+        resized_pil = pil_image.resize(new_size)
+        resized_np = np.array(resized_pil)
+        return resized_np
+
+    @staticmethod
+    def numpy_to_qimage(image: np.ndarray) -> QImage:
+        """
+        Converts a numpy array to QImage.
+
+        :param image: A numpy array representing the image.
+        :return: QImage object.
+        """
+        if image.dtype != np.uint8:
+            image = (255 * (image - image.min()) / (image.max() - image.min())).astype(np.uint8)
+
+        if len(image.shape) == 2:
+            # Grayscale
+            qimage = QImage(image.data, image.shape[1], image.shape[0], QImage.Format_Grayscale8)
+        elif image.shape[2] == 3:
+            # RGB
+            qimage = QImage(image.data, image.shape[1], image.shape[0], QImage.Format_RGB888)
+        elif image.shape[2] == 4:
+            # RGBA
+            qimage = QImage(image.data, image.shape[1], image.shape[0], QImage.Format_RGBA8888)
+        else:
+            raise ValueError("Unsupported image format for conversion to QImage.")
+        return qimage

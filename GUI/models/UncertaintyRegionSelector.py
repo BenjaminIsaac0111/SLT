@@ -2,6 +2,7 @@ import logging
 from typing import List, Tuple, Dict
 
 import numpy as np
+from numpy import ndarray
 from scipy.ndimage import gaussian_filter, maximum_filter
 from sklearn.cluster import DBSCAN, AgglomerativeClustering
 
@@ -16,12 +17,12 @@ class UncertaintyRegionSelector:
     def __init__(
             self,
             filter_size: int = 32,
-            aggregation_method: str = 'std',
+            aggregation_method: str = 'mean',
             gaussian_sigma: float = 3.0,
             edge_buffer: int = 8,
-            eps: float = 0.75,  # DBSCAN parameter for spatial clustering
+            eps: float = 1.0,  # DBSCAN parameter for spatial clustering
             min_samples: int = 1,  # DBSCAN parameter for spatial clustering
-            distance_threshold: float = 2,  # Agglomerative Clustering parameter for logit features
+            distance_threshold: float = 2.5,  # Agglomerative Clustering parameter for logit features
             linkage: str = 'ward'  # Linkage criteria for Agglomerative Clustering
     ):
         """
@@ -72,7 +73,7 @@ class UncertaintyRegionSelector:
             self,
             uncertainty_map: np.ndarray,
             logits: np.ndarray,
-    ) -> Dict[int, List[Tuple[int, int]]]:
+    ) -> Tuple[ndarray, List[Tuple[int, int]]]:
         """
         Selects the uncertain regions from the uncertainty map, clusters the coordinates using DBSCAN,
         and clusters the logit features using Agglomerative Clustering.
@@ -105,13 +106,9 @@ class UncertaintyRegionSelector:
 
         # Step 6: Extract logit features at the DBSCAN-clustered coordinates
         logit_features = self._extract_logit_features(np.concatenate([logits, uncertainty_map], axis=-1), dbscan_coords)
-        logging.debug("Extracted logit features for clustering.")
+        logging.debug("Extracted logit features.")
 
-        # Step 7: Cluster the logit features using Agglomerative Clustering
-        clusters = self._cluster_logit_features(logit_features, dbscan_coords)
-        logging.info("Clustered regions into %d clusters.", len(clusters))
-
-        return clusters
+        return logit_features, dbscan_coords
 
     def _aggregate_uncertainty(self, uncertainty_map: np.ndarray) -> np.ndarray:
         """
@@ -127,7 +124,7 @@ class UncertaintyRegionSelector:
         }
         aggregated = aggregation_methods[self.aggregation_method](uncertainty_map, axis=-1)
         logging.debug("Aggregated uncertainty map using method '%s'.", self.aggregation_method)
-        return aggregated.astype(np.float32)  # Use float32 for reduced memory usage
+        return aggregated.astype(np.float32)
 
     @staticmethod
     def _normalize_uncertainty(uncertainty_map: np.ndarray) -> np.ndarray:
@@ -219,7 +216,7 @@ class UncertaintyRegionSelector:
         logit_features = logits[rows, cols, :]  # Shape: (n_coords, logit_channels)
         return logit_features.astype(np.float32)  # Ensure float32 for consistency
 
-    def _cluster_logit_features(
+    def cluster_logit_features(
             self,
             logit_features: np.ndarray,
             coords: List[Tuple[int, int]]
