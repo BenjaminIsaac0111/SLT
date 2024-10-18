@@ -69,7 +69,7 @@ class UncertaintyRegionSelector:
         if self.linkage not in ('ward', 'complete', 'average', 'single'):
             raise ValueError("linkage must be one of 'ward', 'complete', 'average', or 'single'.")
 
-    def select_regions(
+    def generate_point_labels(
             self,
             uncertainty_map: np.ndarray,
             logits: np.ndarray,
@@ -105,7 +105,8 @@ class UncertaintyRegionSelector:
         logging.info("DBSCAN identified %d clusters in spatial domain.", len(dbscan_coords))
 
         # Step 6: Extract logit features at the DBSCAN-clustered coordinates
-        logit_features = self._extract_logit_features(np.concatenate([logits, uncertainty_map], axis=-1), dbscan_coords)
+        logit_features = self._extract_logit_features(
+            np.concatenate([logits, uncertainty_normalized[..., np.newaxis]], axis=-1), dbscan_coords)
         logging.debug("Extracted logit features.")
 
         return logit_features, dbscan_coords

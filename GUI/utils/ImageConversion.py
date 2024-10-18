@@ -38,3 +38,33 @@ def pil_image_to_qpixmap(pil_image: Image.Image) -> QPixmap:
     except Exception as e:
         logging.error(f"Failed to convert PIL Image to QPixmap: {e}")
         raise e
+
+
+def numpy_to_qpixmap(np_img: np.ndarray) -> QPixmap:
+    """
+    Converts a NumPy array to QPixmap.
+
+    :param np_img: NumPy array representing the image. Expected shape is (height, width, channels).
+    :return: QPixmap object.
+    """
+    if np_img.ndim == 2:
+        # Grayscale image
+        height, width = np_img.shape
+        bytes_per_line = width
+        q_image = QImage(np_img.data, width, height, bytes_per_line, QImage.Format_Grayscale8)
+    elif np_img.ndim == 3:
+        height, width, channels = np_img.shape
+        if channels == 3:
+            # RGB image
+            bytes_per_line = 3 * width
+            q_image = QImage(np_img.data, width, height, bytes_per_line, QImage.Format_RGB888)
+        elif channels == 4:
+            # RGBA image
+            bytes_per_line = 4 * width
+            q_image = QImage(np_img.data, width, height, bytes_per_line, QImage.Format_RGBA8888)
+        else:
+            raise ValueError(f"Unsupported number of channels: {channels}")
+    else:
+        raise ValueError(f"Unsupported image shape: {np_img.shape}")
+
+    return QPixmap.fromImage(q_image)

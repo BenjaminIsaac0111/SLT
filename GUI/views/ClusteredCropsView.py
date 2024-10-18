@@ -1,143 +1,266 @@
-from typing import List, Dict
-
-from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QLabel, QScrollArea, QGridLayout, QGroupBox, QHBoxLayout,
-                             QPushButton, \
-    QProgressBar, QSpinBox)
-from PyQt5.QtGui import QPixmap
-from PyQt5.QtCore import Qt, pyqtSignal
 import logging
+from typing import List
+
+from PyQt5.QtWidgets import (
+    QWidget, QComboBox, QPushButton, QVBoxLayout, QLabel,
+    QProgressBar, QSpinBox, QHBoxLayout, QSlider, QGraphicsView,
+    QGraphicsScene, QGraphicsPixmapItem, QGraphicsItem, QScrollArea
+)
+from PyQt5.QtCore import pyqtSignal, Qt, QRectF, QPointF, QEvent
+from PyQt5.QtGui import QPixmap, QTransform, QWheelEvent, QMouseEvent, QPainter
 
 
 class ClusteredCropsView(QWidget):
-    """
-    ClusteredCropsView displays sampled zoomed-in crops from various clusters.
-    """
-
-    # Signals emitted by the view
+    # Define signals to communicate with the controller
     request_clustering = pyqtSignal()
     sample_cluster = pyqtSignal(int)
+    sampling_parameters_changed = pyqtSignal(int, int)  # Emits (cluster_id, crops_per_cluster)
 
     def __init__(self):
         super().__init__()
-        self.setup_ui()
+        self.zoom_level = 0  # Initial zoom level
+        self.sampled_crops = []  # Store sampled crops for dynamic rearrangement
+        self.init_ui()
 
-    def setup_ui(self):
-        """
-        Sets up the user interface layout for displaying clustered crops.
-        """
-        layout = QVBoxLayout()
+    def init_ui(self):
+        main_layout = QVBoxLayout()
 
-        # Header with a button to start clustering
-        header_layout = QHBoxLayout()
-        self.cluster_button = QPushButton("Start Global Clustering")
-        self.cluster_button.clicked.connect(self.on_cluster_button_clicked)
-        header_layout.addWidget(self.cluster_button)
-        header_layout.addStretch()
-        layout.addLayout(header_layout)
+        # Clustering Controls
+        clustering_layout = QHBoxLayout()
+        self.clustering_button = QPushButton("Start Clustering")
+        self.clustering_button.clicked.connect(self.request_clustering.emit)
+        clustering_layout.addWidget(self.clustering_button)
 
-        # Scroll area to hold clusters and their crops
-        self.scroll_area = QScrollArea()
-        self.scroll_area.setWidgetResizable(True)
-        self.scroll_content = QWidget()
-        self.scroll_layout = QVBoxLayout()
-        self.scroll_content.setLayout(self.scroll_layout)
-        self.scroll_area.setWidget(self.scroll_content)
-        layout.addWidget(self.scroll_area)
+        # Progress Bar
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setValue(0)
+        self.progress_bar.setVisible(False)  # Initially hidden
+        clustering_layout.addWidget(self.progress_bar)
 
-        # Sampling controls
+        main_layout.addLayout(clustering_layout)
+
+        # Cluster Selection
+        self.cluster_combo = QComboBox()
+        self.cluster_combo.currentIndexChanged.connect(self.on_cluster_selected)
+        main_layout.addWidget(QLabel("Select Cluster:"))
+        main_layout.addWidget(self.cluster_combo)
+
+        # Sampling Parameters
         sampling_layout = QHBoxLayout()
-        sampling_layout.addWidget(QLabel("Number of Clusters:"))
-        self.num_clusters_spinbox = QSpinBox()
-        self.num_clusters_spinbox.setRange(1, 100)
-        self.num_clusters_spinbox.setValue(10)
-        sampling_layout.addWidget(self.num_clusters_spinbox)
+        sampling_layout.addWidget(QLabel("Number of Crops per Cluster:"))
+        self.crops_spinbox = QSpinBox()
+        self.crops_spinbox.setRange(1, 100)
+        self.crops_spinbox.setValue(10)
+        self.crops_spinbox.valueChanged.connect(self.on_crops_changed)
+        sampling_layout.addWidget(self.crops_spinbox)
+        main_layout.addLayout(sampling_layout)
 
-        sampling_layout.addWidget(QLabel("Crops per Cluster:"))
-        self.crops_per_cluster_spinbox = QSpinBox()
-        self.crops_per_cluster_spinbox.setRange(1, 20)
-        self.crops_per_cluster_spinbox.setValue(5)
-        sampling_layout.addWidget(self.crops_per_cluster_spinbox)
+        # Zoom Slider
+        zoom_layout = QHBoxLayout()
+        zoom_layout.addWidget(QLabel("Zoom:"))
+        self.zoom_slider = QSlider(Qt.Horizontal)
+        self.zoom_slider.setMinimum(-10)
+        self.zoom_slider.setMaximum(10)
+        self.zoom_slider.setValue(self.zoom_level)
+        self.zoom_slider.valueChanged.connect(self.on_zoom_changed)
+        zoom_layout.addWidget(self.zoom_slider)
+        main_layout.addLayout(zoom_layout)
 
-        layout.addLayout(sampling_layout)
+        # Graphics View for Cropped Images
+        self.graphics_view = QGraphicsView()
+        self.graphics_view.setRenderHint(QPainter.Antialiasing)
+        self.graphics_view.setRenderHint(QPainter.SmoothPixmapTransform)
+        self.graphics_view.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.graphics_view.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.graphics_view.setDragMode(QGraphicsView.ScrollHandDrag)
+        self.graphics_view.setViewportUpdateMode(QGraphicsView.BoundingRectViewportUpdate)
+        self.graphics_view.viewport().installEventFilter(self)
+        self.graphics_view.setMouseTracking(True)
 
-        # Progress label
-        self.progress_label = QLabel("")
-        layout.addWidget(self.progress_label)
+        # Graphics Scene
+        self.scene = QGraphicsScene(self)
+        self.graphics_view.setScene(self.scene)
 
-        self.setLayout(layout)
+        main_layout.addWidget(QLabel("Sampled Crops:"))
+        main_layout.addWidget(self.graphics_view)
+
+        self.setLayout(main_layout)
         self.setWindowTitle("Clustered Crops Viewer")
         self.resize(800, 600)
 
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setValue(0)
-        layout.addWidget(self.progress_bar)
-
-    def on_cluster_button_clicked(self):
+    def populate_cluster_selection(self, cluster_ids):
         """
-        Handles the clustering button click.
+        Populates the cluster selection ComboBox with available cluster IDs.
         """
-        self.request_clustering.emit()
-        logging.info("Clustering button clicked.")
+        self.cluster_combo.blockSignals(True)  # Prevent triggering selection signal during population
+        self.cluster_combo.clear()
+        for cid in cluster_ids:
+            self.cluster_combo.addItem(f"Cluster {cid}", cid)
+        self.cluster_combo.blockSignals(False)
+        logging.debug(f"Populated cluster selection with IDs: {cluster_ids}")
 
-    def display_sampled_crops(self, sampled_crops: List[Dict]):
+    def on_cluster_selected(self, index):
         """
-        Displays the sampled crops in the view.
-
-        :param sampled_crops: List of dictionaries containing 'cluster_id', 'image_index', 'coord', and 'crop'.
+        Emits a signal to sample crops from the selected cluster.
         """
-        # Clear existing content
-        for i in reversed(range(self.scroll_layout.count())):
-            widget_to_remove = self.scroll_layout.itemAt(i).widget()
-            if widget_to_remove is not None:
-                widget_to_remove.setParent(None)
+        cluster_id = self.cluster_combo.itemData(index)
+        if cluster_id is not None:
+            logging.debug(f"Cluster selected: {cluster_id}")
+            self.sample_cluster.emit(cluster_id)
 
-        # Organize crops by cluster_id
-        clusters = {}
-        for crop in sampled_crops:
-            cluster_id = crop['cluster_id']
-            if cluster_id not in clusters:
-                clusters[cluster_id] = []
-            clusters[cluster_id].append(crop)
-
-        # Display each cluster
-        for cluster_id, crops in clusters.items():
-            group_box = QGroupBox(f"Cluster {cluster_id}")
-            group_layout = QHBoxLayout()
-
-            for crop in crops:
-                label = QLabel()
-                label.setPixmap(crop['crop'])
-                label.setToolTip(f"Image Index: {crop['image_index']}\nCoord: {crop['coord']}")
-                group_layout.addWidget(label)
-
-            group_box.setLayout(group_layout)
-            self.scroll_layout.addWidget(group_box)
-
-        self.scroll_layout.addStretch()
-        logging.info(f"Displayed {len(sampled_crops)} sampled crops.")
-
-    def update_progress(self, progress: int):
+    def on_crops_changed(self, value):
         """
-        Updates the progress bar with the current clustering progress.
-
-        :param progress: Progress percentage.
+        Emits a signal when the number of crops per cluster changes.
         """
+        current_cluster_id = self.get_selected_cluster_id()
+        if current_cluster_id is not None:
+            logging.debug(f"Number of crops per cluster changed to: {value}")
+            self.sampling_parameters_changed.emit(current_cluster_id, value)
+
+    def get_selected_cluster_id(self):
+        """
+        Retrieves the currently selected cluster ID.
+        """
+        return self.cluster_combo.currentData()
+
+    def display_sampled_crops(self, sampled_crops):
+        """
+        Displays the sampled crops in a grid layout within the graphics scene.
+        """
+        self.sampled_crops = sampled_crops
+        self.arrange_crops()
+
+    def arrange_crops(self):
+        """
+        Arranges the sampled crops in a grid layout that adapts to the window size
+        and supports zooming functionality. Images expand and contract to fill the space.
+        """
+        self.scene.clear()
+
+        if not self.sampled_crops:
+            logging.info("No sampled crops to display.")
+            return
+
+        # Get the viewport size
+        viewport_rect = self.graphics_view.viewport().rect()
+        viewport_width = viewport_rect.width()
+        viewport_height = viewport_rect.height()
+        logging.debug(f"Viewport size: {viewport_width}x{viewport_height}")
+
+        # Calculate the number of columns based on the zoom level
+        base_size = 200  # Base size for images at zoom level 0
+        scale_factor = pow(1.2, self.zoom_level)  # Exponential scale factor
+        image_size = base_size * scale_factor
+
+        # Ensure image_size is not zero
+        if image_size <= 0:
+            image_size = 1  # Set minimum image size to prevent division by zero
+
+        num_columns = max(1, int(viewport_width // (image_size + 10)))  # Include spacing in calculation
+
+        # Adjust image size to fill the width
+        total_spacing = 10 * (num_columns - 1)
+        if num_columns > 0:
+            image_size = (viewport_width - total_spacing) / num_columns
+        else:
+            num_columns = 1
+            image_size = viewport_width - total_spacing
+
+        logging.debug(f"Calculated image size: {image_size}, Number of columns: {num_columns}")
+
+        # Arrange images in the scene
+        row = 0
+        col = 0
+        x_offset = 0
+        y_offset = 0
+        max_row_height = 0
+
+        for crop in self.sampled_crops:
+            if crop['crop'].isNull():
+                logging.warning(f"Invalid QPixmap for image index {crop['image_index']}. Skipping.")
+                continue
+
+            pixmap_item = QGraphicsPixmapItem(crop['crop'])
+            pixmap_item.setTransformationMode(Qt.SmoothTransformation)
+            pixmap_item.setFlag(QGraphicsItem.ItemIsSelectable, True)
+
+            # Scale the pixmap item
+            original_width = crop['crop'].width()
+            if original_width == 0:
+                logging.warning("Crop width is zero, skipping this image to prevent division by zero.")
+                continue
+            scale = image_size / original_width
+            pixmap_item.setScale(scale)
+
+            # Position the item
+            pixmap_item.setPos(x_offset, y_offset)
+            self.scene.addItem(pixmap_item)
+
+            # Update offsets
+            x_offset += image_size + 10  # Add spacing
+            max_row_height = max(max_row_height, image_size)
+
+            col += 1
+            if col >= num_columns:
+                col = 0
+                row += 1
+                x_offset = 0
+                y_offset += max_row_height + 10  # Add spacing
+                max_row_height = 0
+
+        # Adjust the scene rect
+        self.scene.setSceneRect(self.scene.itemsBoundingRect())
+
+    def on_zoom_changed(self, value):
+        """
+        Handles the zoom level change from the slider.
+        """
+        self.zoom_level = max(-10, min(value, 10))  # Limit zoom_level between -10 and 10
+        logging.debug(f"Zoom level changed to: {self.zoom_level}")
+        self.arrange_crops()
+
+    def eventFilter(self, source, event):
+        """
+        Event filter to handle mouse wheel events for zooming.
+        """
+        if event.type() == QEvent.Wheel and isinstance(event, QWheelEvent):
+            modifiers = event.modifiers()
+            if modifiers == Qt.ControlModifier:
+                delta = event.angleDelta().y() / 120  # 120 is the standard step
+                self.zoom_level += delta
+                self.zoom_level = max(-10, min(self.zoom_level, 10))  # Limit zoom_level
+                self.zoom_slider.setValue(self.zoom_level)
+                return True
+        return super().eventFilter(source, event)
+
+    def resizeEvent(self, event):
+        """
+        Overrides the resize event to rearrange crops when the window size changes.
+        """
+        super().resizeEvent(event)
+        logging.debug("Window resized. Rearranging crops.")
+        self.arrange_crops()
+
+    def update_progress(self, progress):
+        """
+        Updates the progress bar with the current progress value.
+        """
+        if not self.progress_bar.isVisible():
+            self.progress_bar.setVisible(True)
         self.progress_bar.setValue(progress)
-        self.progress_label.setText(f"Clustering Progress: {progress}%")
-        logging.info(f"Clustering progress updated to {progress}%.")
+        logging.debug(f"Progress updated to: {progress}%")
 
     def reset_progress(self):
         """
-        Resets the progress bar and label.
+        Resets and shows the progress bar.
         """
         self.progress_bar.setValue(0)
-        self.progress_label.setText("Clustering Progress: 0%")
-        logging.info("Clustering progress reset.")
+        self.progress_bar.setVisible(True)
+        logging.debug("Progress bar reset.")
 
-    def display_clusters(self, clusters: Dict[int, List[Dict]]):
+    def hide_progress_bar(self):
         """
-        Placeholder method if needed to display clusters.
-
-        :param clusters: Dictionary of clusters.
+        Hides the progress bar.
         """
-        pass  # Implement as needed
+        self.progress_bar.setVisible(False)
+        logging.debug("Progress bar hidden.")

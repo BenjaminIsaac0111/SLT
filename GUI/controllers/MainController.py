@@ -95,7 +95,7 @@ class MainController(QObject):
         self.view.update_images(processed_images, self.current_filename)
 
         # Select regions based on uncertainty and logits
-        logit_features, dbscan_coords = self.region_selector.select_regions(
+        logit_features, dbscan_coords = self.region_selector.generate_point_labels(
             uncertainty_map=data['uncertainty'],
             logits=data['logits'],
         )
