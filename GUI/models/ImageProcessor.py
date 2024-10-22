@@ -1,13 +1,14 @@
 # models/ImageProcessor.py
 
+import logging
+from typing import Tuple, Dict
+
 import numpy as np
 from PIL import Image
 from PyQt5.QtCore import Qt, QPoint
 from PyQt5.QtGui import QImage, QPixmap, QPainter, QPen, QColor
 from matplotlib import pyplot as plt
 from matplotlib.colors import Colormap
-from typing import Optional, Tuple, Dict
-import logging
 
 from GUI.utils.ImageConversion import pil_image_to_qpixmap
 
@@ -249,7 +250,7 @@ class ImageProcessor:
         zoomed_qimage = q_image.scaled(
             width * zoom_factor,
             height * zoom_factor,
-            Qt.IgnoreAspectRatio,  # Ensure exact scaling without aspect ratio constraints
+            Qt.IgnoreAspectRatio,
             Qt.SmoothTransformation
         )
 

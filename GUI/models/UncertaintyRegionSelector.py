@@ -19,7 +19,7 @@ class UncertaintyRegionSelector:
             filter_size: int = 32,
             aggregation_method: str = 'mean',
             gaussian_sigma: float = 3.0,
-            edge_buffer: int = 8,
+            edge_buffer: int = 64,
             eps: float = 1.0,  # DBSCAN parameter for spatial clustering
             min_samples: int = 1,  # DBSCAN parameter for spatial clustering
             distance_threshold: float = 2.5,  # Agglomerative Clustering parameter for logit features
@@ -85,7 +85,7 @@ class UncertaintyRegionSelector:
         # Step 1: Aggregate the 3D uncertainty map into a 2D map
         uncertainty_map_2d = self._aggregate_uncertainty(uncertainty_map)
 
-        # Step 2: Apply Gaussian smoothing
+        # Step 2: Apply Gaussian smoothing. (Not sure how mu)
         uncertainty_map_smoothed = gaussian_filter(uncertainty_map_2d, sigma=self.gaussian_sigma)
         logging.debug("Applied Gaussian filter with sigma=%.2f.", self.gaussian_sigma)
 
@@ -102,11 +102,11 @@ class UncertaintyRegionSelector:
 
         # Step 5: Perform DBSCAN on spatial coordinates to group them
         dbscan_coords = self._dbscan_cluster_coordinates(initial_coords)
-        logging.info("DBSCAN identified %d clusters in spatial domain.", len(dbscan_coords))
+        logging.info("DBSCAN identified %d points in spatial domain.", len(dbscan_coords))
 
         # Step 6: Extract logit features at the DBSCAN-clustered coordinates
         logit_features = self._extract_logit_features(
-            np.concatenate([logits, uncertainty_normalized[..., np.newaxis]], axis=-1), dbscan_coords)
+            np.concatenate([logits, uncertainty_map_2d[..., np.newaxis]], axis=-1), dbscan_coords)
         logging.debug("Extracted logit features.")
 
         return logit_features, dbscan_coords

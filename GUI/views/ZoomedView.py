@@ -1,7 +1,8 @@
-from PyQt5.QtCore import Qt, QRectF
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QGraphicsView, QGraphicsScene
-from PyQt5.QtGui import QPixmap, QPainter, QColor, QImage, QPen
 import logging
+
+from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QPixmap, QPainter
+from PyQt5.QtWidgets import QWidget, QVBoxLayout, QGraphicsView, QGraphicsScene
 
 from GUI.views.ArrowAnnotationItem import ArrowAnnotationItem  # Ensure correct import path
 
@@ -104,10 +105,7 @@ class ZoomedView(QWidget):
         logging.debug(f"Arrow scaled position: ({arrow_rel_x_scaled}, {arrow_rel_y_scaled})")
 
         # Draw the arrow as an ellipse (you can customize this to use ArrowAnnotationItem if needed)
-        self.arrow_item = ArrowAnnotationItem(
-            annotation_id=0,  # Since it's a single arrow, ID can be arbitrary
-            color=QColor(255, 0, 0)  # Red color for visibility
-        )
+        self.arrow_item = ArrowAnnotationItem()
         self.arrow_item.setPos(arrow_rel_x_scaled, arrow_rel_y_scaled)
         self.scene.addItem(self.arrow_item)
 

@@ -2,15 +2,14 @@ import logging
 from typing import Tuple, List, Dict
 
 from PyQt5.QtCore import QObject, Qt
+from PyQt5.QtGui import QColor
 
 from GUI.controllers.GlobalClusterController import GlobalClusterController
 from GUI.models.ImageDataModel import ImageDataModel
 from GUI.models.ImageProcessor import ImageProcessor
 from GUI.models.UncertaintyRegionSelector import UncertaintyRegionSelector
-from GUI.utils.ImageConversion import pil_image_to_qpixmap
 from GUI.views.ClusteredCropsView import ClusteredCropsView
 from GUI.views.PatchImageViewer import PatchImageViewer
-from PyQt5.QtGui import QPixmap, QColor
 
 
 class MainController(QObject):

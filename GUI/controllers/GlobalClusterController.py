@@ -2,17 +2,29 @@
 
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Tuple, Dict
+from typing import List, Dict
 
-from PyQt5.QtCore import QObject, pyqtSignal, QThread, pyqtSlot, QTimer
 import numpy as np
-from PyQt5.QtGui import QPixmap, QImage
+from PyQt5.QtCore import QObject, pyqtSignal, QThread, pyqtSlot, QTimer
+from PyQt5.QtWidgets import QFileDialog, QMessageBox
 from sklearn.cluster import AgglomerativeClustering
 
 from GUI.models.ImageDataModel import ImageDataModel
 from GUI.models.ImageProcessor import ImageProcessor
 from GUI.models.UncertaintyRegionSelector import UncertaintyRegionSelector
 from GUI.views.ClusteredCropsView import ClusteredCropsView
+
+CLASS_COMPONENTS = {
+    0: 'Non-Informative',
+    1: 'Tumour',
+    2: 'Stroma',
+    3: 'Necrosis',
+    4: 'Vessel',
+    5: 'Inflammation',
+    6: 'Tumour-Lumen',
+    7: 'Mucin',
+    8: 'Muscle'
+}
 
 
 class ClusteringWorker(QThread):
@@ -27,40 +39,57 @@ class ClusteringWorker(QThread):
         self.model = model
         self.labels_acquirer = labels_acquirer
 
+    def process_image(self, idx):
+        """
+        Processes a single image and returns annotations.
+        """
+        data = self.model.get_image_data(idx)
+        uncertainty_map = data.get('uncertainty', None)
+        logits = data.get('logits', None)
+
+        if uncertainty_map is None or logits is None:
+            logging.warning(f"Missing data for image index {idx}. Skipping.")
+            return [], idx
+
+        logit_features, dbscan_coords = self.labels_acquirer.generate_point_labels(
+            uncertainty_map=uncertainty_map,
+            logits=logits
+        )
+
+        annotations = []
+        for coord, logit_feature in zip(dbscan_coords, logit_features):
+            annotation = {
+                'image_index': idx,
+                'coord': coord,
+                'logit_features': logit_feature
+            }
+            annotations.append(annotation)
+
+        return annotations, idx
+
     def run(self):
         """
-        Executes the clustering process.
+        Executes the clustering process with parallel image processing.
         """
         all_annotations = []  # List of dicts with image_index, coord, logit_features
-        total_images = self.model.get_number_of_images() // 16
+        total_images = self.model.get_number_of_images() // 8
         logging.info(f"Starting clustering on {total_images} images.")
 
-        for idx in range(total_images):
-            data = self.model.get_image_data(idx)
-            uncertainty_map = data.get('uncertainty', None)
-            logits = data.get('logits', None)
+        with ThreadPoolExecutor() as executor:
+            futures = {executor.submit(self.process_image, idx): idx for idx in range(total_images)}
 
-            if uncertainty_map is None or logits is None:
-                logging.warning(f"Missing data for image index {idx}. Skipping.")
-                continue
+            for i, future in enumerate(as_completed(futures)):
+                try:
+                    annotations, idx = future.result()
+                    all_annotations.extend(annotations)
+                except Exception as e:
+                    logging.error(f"Error processing image {futures[future]}: {e}")
+                    continue
 
-            logit_features, dbscan_coords = self.labels_acquirer.generate_point_labels(
-                uncertainty_map=uncertainty_map,
-                logits=logits
-            )
-
-            for coord, logit_feature in zip(dbscan_coords, logit_features):
-                annotation = {
-                    'image_index': idx,
-                    'coord': coord,
-                    'logit_features': logit_feature
-                }
-                all_annotations.append(annotation)
-
-            # Emit progress update
-            progress = int(((idx + 1) / total_images) * 100)
-            self.progress_updated.emit(progress)
-            logging.debug(f"Processed image {idx + 1}/{total_images}. Progress: {progress}%")
+                # Emit progress update
+                progress = int(((i + 1) / total_images) * 100)
+                self.progress_updated.emit(progress)
+                logging.debug(f"Processed image {idx + 1}/{total_images}. Progress: {progress}%")
 
         logging.info(f"Total annotations collected: {len(all_annotations)}")
 
@@ -78,6 +107,7 @@ class ClusteringWorker(QThread):
             self.clustering_finished.emit({})
             return
 
+        # Perform clustering
         try:
             clustering = AgglomerativeClustering(
                 n_clusters=None,
@@ -116,7 +146,7 @@ class ImageProcessingWorker(QObject):
     def process_images(self):
         sampled_crops = []
 
-        with ThreadPoolExecutor(max_workers=8) as executor:
+        with ThreadPoolExecutor() as executor:
             futures = {executor.submit(self.process_single_annotation, anno): anno for anno in self.sampled_annotations}
 
             for future in as_completed(futures):
@@ -134,7 +164,7 @@ class ImageProcessingWorker(QObject):
             return None
 
         q_crop, coord_pos = self.image_processor.extract_crop(
-            image_array, coord, crop_size=256, zoom_factor=2
+            image_array, coord, crop_size=512, zoom_factor=2
         )
         if q_crop is None:
             return None
@@ -166,6 +196,8 @@ class GlobalClusterController(QObject):
 
         # Cluster data structure: {cluster_id: [annotations]}
         self.clusters = {}
+        self.cluster_labels = {}  # Initialize cluster labels
+        self.cluster_class_labels = {}  # Initialize cluster class labels
 
         # Sampling parameters
         self.crops_per_cluster = 10  # Number of crops per selected cluster
@@ -186,9 +218,10 @@ class GlobalClusterController(QObject):
         self.view.request_clustering.connect(self.start_clustering)
         self.view.sample_cluster.connect(self.on_sample_cluster)
         self.view.sampling_parameters_changed.connect(self.on_sampling_parameters_changed)
+        self.view.class_selected.connect(self.on_class_selected)
+        self.view.save_annotations_requested.connect(self.on_save_annotations)
         self.clustering_progress.connect(self.view.update_progress)
         self.clusters_ready.connect(self.on_clusters_ready)
-
     @pyqtSlot()
     def start_clustering(self):
         """
@@ -211,10 +244,34 @@ class GlobalClusterController(QObject):
         """
         self.clusters = clusters
         logging.info(f"Clustering finished with {len(clusters)} clusters.")
-        # Populate the cluster selection ComboBox in the view
-        cluster_ids = list(self.clusters.keys())
-        self.view.populate_cluster_selection(cluster_ids)
-        self.view.hide_progress_bar()  # Hide the progress bar after clustering is done
+
+        # Prepare cluster_info dict
+        cluster_info = {}
+        for cluster_id, annotations in clusters.items():
+            image_indices = set(anno['image_index'] for anno in annotations)
+            num_annotations = len(annotations)
+            num_images = len(image_indices)
+            cluster_info[cluster_id] = {
+                'num_annotations': num_annotations,
+                'num_images': num_images
+            }
+        # Sort clusters by number of images in descending order
+        sorted_cluster_info = dict(sorted(cluster_info.items(), key=lambda item: item[1]['num_images'], reverse=True))
+        # Get the first cluster ID to display
+        first_cluster_id = list(sorted_cluster_info.keys())[0] if sorted_cluster_info else None
+        # Populate the cluster selection ComboBox
+        self.view.populate_cluster_selection(sorted_cluster_info, selected_cluster_id=first_cluster_id)
+        if first_cluster_id is not None:
+            self.sample_and_display_crops(cluster_id=first_cluster_id)
+        self.view.hide_progress_bar()
+
+    @pyqtSlot(str)
+    def on_cluster_file_selected(self, filename):
+        """
+        Handles loading of a cluster file.
+        """
+        self.load_cluster_labels(filename)
+
 
     @pyqtSlot(int, int)
     def on_sampling_parameters_changed(self, _, crops_per_cluster: int):
@@ -232,6 +289,97 @@ class GlobalClusterController(QObject):
         if self.debounce_timer.isActive():
             self.debounce_timer.stop()
         self.debounce_timer.start()
+
+    @pyqtSlot()
+    def on_save_annotations(self):
+        """
+        Handles the action of saving annotations to a file.
+        """
+        # Collect all annotations
+        all_annotations = []
+        annotations_without_class = False
+        for cluster_id, annotations in self.clusters.items():
+            for anno in annotations:
+                class_id = anno.get('class_id', None)
+                if class_id is not None:
+                    # Convert data types to native Python types
+                    image_index = int(anno['image_index'])
+                    cluster_id_int = int(cluster_id)
+                    class_id_int = int(class_id)
+                    coord = anno['coord']
+                    if isinstance(coord, np.ndarray):
+                        coord = coord.tolist()
+                    else:
+                        coord = [float(c) for c in coord]
+                    # Build the annotation dictionary
+                    all_annotations.append({
+                        'image_index': image_index,
+                        'coord': coord,
+                        'class_id': class_id_int,
+                        'cluster_id': cluster_id_int
+                    })
+                else:
+                    annotations_without_class = True
+
+        if annotations_without_class:
+            reply = QMessageBox.question(
+                self.view,
+                "Annotations Without Class Labels",
+                "Some annotations do not have class labels assigned. Do you want to proceed with saving?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            if reply == QMessageBox.No:
+                logging.info("User canceled saving due to missing class labels.")
+                return
+
+        if not all_annotations:
+            QMessageBox.warning(self.view, "No Annotations", "There are no annotations to save.")
+            return
+
+        # Ask the user for a file path
+        options = QFileDialog.Options()
+        filename, _ = QFileDialog.getSaveFileName(
+            self.view, "Save Annotations", "", "JSON Files (*.json);;All Files (*)", options=options
+        )
+        if filename:
+            # Save annotations to the selected file
+            try:
+                import json
+                with open(filename, 'w') as f:
+                    json.dump(all_annotations, f, indent=4)
+                logging.info(f"Annotations saved to {filename}")
+                QMessageBox.information(self.view, "Success", f"Annotations saved to {filename}")
+            except Exception as e:
+                logging.error(f"Error saving annotations: {e}")
+                QMessageBox.critical(self.view, "Error", f"Failed to save annotations: {e}")
+        else:
+            logging.debug("Save annotations action was canceled.")
+
+    @pyqtSlot(int, int)
+    def on_class_selected(self, cluster_id, class_id):
+        """
+        Handles the event when a class is selected for a cluster.
+        """
+        logging.info(f"Class {class_id} selected for cluster {cluster_id}.")
+        # Assign the class label to the cluster
+        if not hasattr(self, 'cluster_class_labels'):
+            self.cluster_class_labels = {}
+        self.cluster_class_labels[cluster_id] = class_id
+
+        # Update the cluster labels
+        class_name = CLASS_COMPONENTS.get(class_id, f"Class {class_id}")
+        if not hasattr(self, 'cluster_labels'):
+            self.cluster_labels = {}
+        self.cluster_labels[cluster_id] = class_name
+
+        # Update the cluster selection to reflect the class label
+        self.update_cluster_selection()
+
+        # Assign the class label to the annotations in the cluster
+        annotations = self.clusters.get(cluster_id, [])
+        for anno in annotations:
+            anno['class_id'] = class_id
 
     @pyqtSlot()
     def handle_sampling_parameters_changed(self):
@@ -316,3 +464,33 @@ class GlobalClusterController(QObject):
         """
         logging.info(f"Sampling crops from cluster {cluster_id}.")
         self.sample_and_display_crops(cluster_id)
+
+    def update_cluster_selection(self):
+        """
+        Updates the cluster selection ComboBox to include labels.
+        """
+        cluster_info = {}
+        for cluster_id, annotations in self.clusters.items():
+            image_indices = set(anno['image_index'] for anno in annotations)
+            num_annotations = len(annotations)
+            num_images = len(image_indices)
+            label = self.cluster_labels.get(cluster_id, '')
+            class_id = self.cluster_class_labels.get(cluster_id, None)
+            if class_id is not None:
+                class_name = CLASS_COMPONENTS.get(class_id, f"Class {class_id}")
+                label = f"{label} [{class_name}]"
+            if label:
+                display_text = (f"Cluster {cluster_id} - '{label}' ({num_annotations} annotations from {num_images} "
+                                f"images)")
+            else:
+                display_text = f"Cluster {cluster_id} ({num_annotations} annotations from {num_images} images)"
+            cluster_info[cluster_id] = {
+                'num_annotations': num_annotations,
+                'num_images': num_images,
+                'label': label
+            }
+        # Sort clusters by number of images in descending order
+        sorted_cluster_info = dict(sorted(cluster_info.items(), key=lambda item: item[1]['num_images'], reverse=True))
+        # Get current selected cluster ID
+        selected_cluster_id = self.view.get_selected_cluster_id()
+        self.view.populate_cluster_selection(sorted_cluster_info, selected_cluster_id)
