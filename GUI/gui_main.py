@@ -1,12 +1,14 @@
-from PyQt5.QtWidgets import QApplication, QMainWindow, QTabWidget
-import sys
 import logging
+import sys
 
-from GUI.models.ImageDataModel import ImageDataModel
-from GUI.views.PatchImageViewer import PatchImageViewer
-from GUI.views.ClusteredCropsView import ClusteredCropsView
-from GUI.controllers.MainController import MainController
+from PyQt5.QtWidgets import QApplication, QMainWindow, QTabWidget
+
 from GUI.controllers.GlobalClusterController import GlobalClusterController
+from GUI.controllers.MainController import MainController
+from GUI.models.ImageDataModel import ImageDataModel
+from GUI.views.ClusteredCropsView import ClusteredCropsView
+from GUI.views.PatchImageViewer import PatchImageViewer
+
 
 def main():
     logging.basicConfig(level=logging.INFO)

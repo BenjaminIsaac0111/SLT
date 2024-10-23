@@ -1,13 +1,16 @@
 import logging
+from functools import partial
 
-from PyQt5.QtCore import pyqtSignal, Qt, QRectF, QEvent
-from PyQt5.QtGui import QWheelEvent, QPainter, QPen
+from PyQt5.QtCore import QRectF
+from PyQt5.QtCore import pyqtSignal, Qt, QEvent
+from PyQt5.QtGui import QPen
+from PyQt5.QtGui import QWheelEvent, QPainter, QFont
+from PyQt5.QtWidgets import QGraphicsObject, QAction, QGraphicsItem
 from PyQt5.QtWidgets import (
     QWidget, QComboBox, QPushButton, QVBoxLayout, QLabel,
     QProgressBar, QSpinBox, QSlider, QGraphicsView,
-    QGraphicsScene, QGraphicsItem, QLineEdit, QMenu, QGridLayout, QFileDialog,
-    QGraphicsObject, QGroupBox, QAction, QSizePolicy,
-    QSplitter
+    QGraphicsScene, QLineEdit, QMenu, QGridLayout, QFileDialog,
+    QGroupBox, QSizePolicy, QSplitter, QGraphicsTextItem
 )
 
 CLASS_COMPONENTS = {
@@ -25,15 +28,33 @@ CLASS_COMPONENTS = {
 
 class ClickablePixmapItem(QGraphicsObject):
     class_label_changed = pyqtSignal(dict, int)  # Emits (crop_data, class_id)
-    crop_removed = pyqtSignal(dict)  # Emits crop_data
 
-    def __init__(self, crop_data, pixmap, *args, **kwargs):
+    def __init__(self, crop_data, pixmap, text_item=None, class_id=None, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.crop_data = crop_data
         self.pixmap = pixmap
+        self.class_id = class_id  # This will restore the label if the crop was already labelled
+        self.text_item = text_item  # Reference to the QGraphicsTextItem (label)
         self.setAcceptHoverEvents(True)
         self.hovered = False  # Track hover state
         self.selected = False  # Track selection state
+        self.update_text_label()  # Ensure the label is displayed correctly
+
+    def set_crop_class(self, class_id):
+        self.crop_data['class_id'] = class_id
+        self.class_id = class_id  # Update local class_id
+        self.class_label_changed.emit(self.crop_data, class_id)
+        self.update_text_label()  # Update the text label when the class is changed
+        self.update()
+
+    def update_text_label(self):
+        """
+        Updates the text item with the class label. If class_id is None, label it as "Unlabelled".
+        """
+        if self.text_item is not None:
+            label_text = CLASS_COMPONENTS.get(self.class_id,
+                                              "Unlabelled") if self.class_id is not None else "Unlabelled"
+            self.text_item.setPlainText(label_text)
 
     def boundingRect(self):
         return QRectF(0, 0, self.pixmap.width(), self.pixmap.height())
@@ -67,26 +88,20 @@ class ClickablePixmapItem(QGraphicsObject):
 
     def show_context_menu(self, event):
         menu = QMenu()
-        # Add actions for each class
+
+        # Add actions for each class using functools.partial
         for class_id, class_name in CLASS_COMPONENTS.items():
             action = QAction(class_name, self)
-            action.triggered.connect(lambda checked, cid=class_id: self.set_crop_class(cid))
+            action.triggered.connect(partial(self.set_crop_class, class_id))
             menu.addAction(action)
-        # Separator and Remove Option
-        menu.addSeparator()
-        remove_action = QAction("Remove from Cluster", self)
-        remove_action.triggered.connect(self.remove_crop)
-        menu.addAction(remove_action)
+
+        # Add Unlabel Option
+        unlabel_action = QAction("Unlabel", self)
+        unlabel_action.triggered.connect(partial(self.set_crop_class, None))
+        menu.addAction(unlabel_action)
+
         # Display the menu
         menu.exec_(event.screenPos())
-
-    def set_crop_class(self, class_id):
-        self.crop_data['class_id'] = class_id
-        self.class_label_changed.emit(self.crop_data, class_id)
-        self.update()
-
-    def remove_crop(self):
-        self.crop_removed.emit(self.crop_data)
 
 
 class ClusteredCropsView(QWidget):
@@ -95,11 +110,13 @@ class ClusteredCropsView(QWidget):
     sample_cluster = pyqtSignal(int)
     sampling_parameters_changed = pyqtSignal(int, int)  # Emits (cluster_id, crops_per_cluster)
     crop_clicked = pyqtSignal(dict)
-    crop_removed = pyqtSignal(dict)
     cluster_labeled = pyqtSignal(int, str)
     class_selected = pyqtSignal(int, int)  # Emits (cluster_id, class_id)
     cluster_file_selected = pyqtSignal(str)  # Emits the filename of the selected cluster file
     save_annotations_requested = pyqtSignal()
+    class_selected_for_all = pyqtSignal(object)  # Emits the class_id for all visible crops
+    resample_requested = pyqtSignal(int)  # Emits (cluster_id)
+    crop_label_changed = pyqtSignal(dict, int)  # Emits (crop_data, class_id)
 
     def __init__(self):
         super().__init__()
@@ -185,16 +202,25 @@ class ClusteredCropsView(QWidget):
         class_buttons_layout = QGridLayout()
         row = 0
         col = 0
+
+        # Add Unlabel Button
+        unlabel_button = QPushButton("Unlabel")
+        unlabel_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        unlabel_button.clicked.connect(partial(self.on_class_button_clicked, None))
+        class_buttons_layout.addWidget(unlabel_button, row, col)
+
+        col += 1
         for class_id, class_name in CLASS_COMPONENTS.items():
             button = QPushButton(class_name)
             button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-            button.clicked.connect(lambda checked, cid=class_id: self.on_class_button_clicked(cid))
+            button.clicked.connect(partial(self.on_class_button_clicked, class_id))
             class_buttons_layout.addWidget(button, row, col)
             col += 1
             if col >= 2:  # Adjust number of buttons per row
                 col = 0
                 row += 1
         class_buttons_group.setLayout(class_buttons_layout)
+
         control_panel_layout.addWidget(class_buttons_group)
 
         # Add a spacer to ensure dynamic resizing
@@ -209,6 +235,11 @@ class ClusteredCropsView(QWidget):
         self.save_annotations_button.clicked.connect(self.on_save_annotations)
         control_panel_layout.addWidget(self.load_button)
         control_panel_layout.addWidget(self.save_annotations_button)
+
+        self.resample_button = QPushButton("Resample Unlabelled")
+        self.resample_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.resample_button.clicked.connect(self.on_resample_requested)
+        control_panel_layout.addWidget(self.resample_button)
 
         # Add the control panel to the splitter
         splitter.addWidget(control_panel)
@@ -275,6 +306,17 @@ class ClusteredCropsView(QWidget):
             logging.debug(f"Cluster selected: {cluster_id}")
             self.sample_cluster.emit(cluster_id)
 
+    def on_resample_requested(self):
+        """
+        Emits a signal to resample unlabelled crops from the current cluster.
+        """
+        cluster_id = self.get_selected_cluster_id()
+        if cluster_id is not None:
+            logging.debug(f"Resample requested for cluster {cluster_id}")
+            self.resample_requested.emit(cluster_id)
+        else:
+            logging.warning("No cluster is currently selected.")
+
     def on_crops_changed(self, value):
         """
         Emits a signal when the number of crops per cluster changes.
@@ -286,14 +328,31 @@ class ClusteredCropsView(QWidget):
 
     def on_class_button_clicked(self, class_id):
         """
-        Handles the event when a class button is clicked.
+        Handles the event when a class button is clicked to label all visible crops, or unlabel them if class_id is
+        None.
         """
-        logging.debug(f"Class button clicked: {class_id}")
+        if class_id is None:
+            logging.info("Unlabeling all visible crops.")
+        else:
+            logging.info(f"Class button clicked: {class_id}")
+
         cluster_id = self.get_selected_cluster_id()
         if cluster_id is not None:
-            self.class_selected.emit(cluster_id, class_id)
+            self.class_selected_for_all.emit(class_id)
         else:
             logging.warning("No cluster is currently selected.")
+
+    def label_all_visible_crops(self, class_id):
+        """
+        Labels all the currently visible crops with the given class_id. If class_id is None, unlabel them.
+        """
+        for crop in self.sampled_crops:
+            # Update the crop's class_id
+            crop['class_id'] = class_id
+            # Find the corresponding ClickablePixmapItem and update its label
+            for item in self.scene.items():
+                if isinstance(item, ClickablePixmapItem) and item.crop_data == crop:
+                    item.set_crop_class(class_id)
 
     def get_selected_cluster_id(self):
         """
@@ -371,13 +430,24 @@ class ClusteredCropsView(QWidget):
                 logging.warning(f"Invalid QPixmap for image index {crop['image_index']}. Skipping.")
                 continue
 
-            pixmap_item = ClickablePixmapItem(crop, crop['crop'])
+            # Create a text item for the label name
+            class_id = crop.get('class_id')
+            label_text = CLASS_COMPONENTS.get(class_id, "Unlabelled") if class_id is not None else "Unlabelled"
+            text_item = QGraphicsTextItem(label_text)
+            text_item.setDefaultTextColor(Qt.black)
+            text_item.setFont(QFont("Arial", 12))  # Adjust font if needed
+
+            # Create pixmap item with reference to the text item
+            pixmap_item = ClickablePixmapItem(crop, crop['crop'], text_item=text_item, class_id=class_id)
             pixmap_item.setFlag(QGraphicsItem.ItemIsSelectable, True)
 
             # Connect the signals
             pixmap_item.class_label_changed.connect(self.on_crop_class_label_changed)
-            pixmap_item.crop_removed.connect(self.on_crop_removed)
 
+            # Position the text label above the crop
+            text_item.setPos(x_offset, y_offset - 20)  # 20 pixels above the crop
+
+            # Position the crop image
             original_width = crop['crop'].width()
             if original_width == 0:
                 logging.warning("Crop width is zero, skipping this image to prevent division by zero.")
@@ -387,13 +457,14 @@ class ClusteredCropsView(QWidget):
 
             pixmap_item.setPos(x_offset, y_offset)
             self.scene.addItem(pixmap_item)
+            self.scene.addItem(text_item)
 
             x_offset += image_size + 20
             max_row_height = max(max_row_height, image_size)
 
             if (idx + 1) % num_columns == 0:
                 x_offset = 20
-                y_offset += max_row_height + 20
+                y_offset += max_row_height + 40  # Adjust for both crop and label height
                 max_row_height = 0
 
         # Adjust the scene rect
@@ -404,18 +475,8 @@ class ClusteredCropsView(QWidget):
         Handles when a class label is set for an individual crop.
         """
         logging.debug(f"Crop {crop_data['image_index']} class label changed to {class_id}")
-        # Optionally, update the visual representation to reflect the new class label
-        # For example, you could change the border color based on the class
-
-    def on_crop_removed(self, crop_data):
-        """
-        Handles when a crop is removed from the cluster.
-        """
-        logging.debug(f"Crop {crop_data['image_index']} removed from cluster")
-        # Remove the crop from the sampled_crops list
-        self.sampled_crops.remove(crop_data)
-        # Rearrange crops
-        self.arrange_crops()
+        # Emit a signal to the controller
+        self.crop_label_changed.emit(crop_data, class_id)
 
     def on_zoom_changed(self, value):
         """

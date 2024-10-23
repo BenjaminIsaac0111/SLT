@@ -174,7 +174,8 @@ class ImageProcessingWorker(QObject):
             'image_index': anno['image_index'],
             'coord': coord,
             'crop': q_crop,
-            'coord_pos': coord_pos
+            'coord_pos': coord_pos,
+            'class_id': anno.get('class_id')  # Include class_id in the result
         }
 
 
@@ -197,7 +198,6 @@ class GlobalClusterController(QObject):
         # Cluster data structure: {cluster_id: [annotations]}
         self.clusters = {}
         self.cluster_labels = {}  # Initialize cluster labels
-        self.cluster_class_labels = {}  # Initialize cluster class labels
 
         # Sampling parameters
         self.crops_per_cluster = 10  # Number of crops per selected cluster
@@ -220,8 +220,13 @@ class GlobalClusterController(QObject):
         self.view.sampling_parameters_changed.connect(self.on_sampling_parameters_changed)
         self.view.class_selected.connect(self.on_class_selected)
         self.view.save_annotations_requested.connect(self.on_save_annotations)
+        self.view.class_selected_for_all.connect(self.on_class_selected_for_all)
+        self.view.resample_requested.connect(self.on_resample_requested)
+        self.view.crop_label_changed.connect(self.on_crop_label_changed)
+
         self.clustering_progress.connect(self.view.update_progress)
         self.clusters_ready.connect(self.on_clusters_ready)
+
     @pyqtSlot()
     def start_clustering(self):
         """
@@ -272,6 +277,31 @@ class GlobalClusterController(QObject):
         """
         self.load_cluster_labels(filename)
 
+    @pyqtSlot(object)
+    def on_class_selected_for_all(self, class_id):
+        """
+        Labels all visible crops with the selected class. If class_id is None, unlabel all visible crops.
+        """
+        if class_id is None:
+            logging.info("Unlabeling all visible crops.")
+        else:
+            logging.info(f"Class {class_id} selected for all visible crops.")
+
+        # Update the class_id for each visible crop
+        for crop in self.view.sampled_crops:
+            cluster_id = crop['cluster_id']
+            image_index = crop['image_index']
+            coord = tuple(crop['coord'])  # Ensure coord is a tuple
+
+            # Update the class_id for the corresponding annotation in self.clusters
+            for anno in self.clusters[cluster_id]:
+                if anno['image_index'] == image_index and tuple(anno['coord']) == coord:
+                    anno['class_id'] = class_id
+                    logging.debug(f"Annotation for image {image_index}, coord {coord} updated with class_id {class_id}")
+                    break
+
+        # Update the view to reflect these changes
+        self.view.label_all_visible_crops(class_id)
 
     @pyqtSlot(int, int)
     def on_sampling_parameters_changed(self, _, crops_per_cluster: int):
@@ -360,26 +390,37 @@ class GlobalClusterController(QObject):
     def on_class_selected(self, cluster_id, class_id):
         """
         Handles the event when a class is selected for a cluster.
+        Assigns the class label to every sample in the current view for the selected cluster.
         """
-        logging.info(f"Class {class_id} selected for cluster {cluster_id}.")
-        # Assign the class label to the cluster
-        if not hasattr(self, 'cluster_class_labels'):
-            self.cluster_class_labels = {}
-        self.cluster_class_labels[cluster_id] = class_id
+        logging.info(f"Class {class_id} selected for all samples in view for cluster {cluster_id}.")
 
-        # Update the cluster labels
-        class_name = CLASS_COMPONENTS.get(class_id, f"Class {class_id}")
-        if not hasattr(self, 'cluster_labels'):
-            self.cluster_labels = {}
-        self.cluster_labels[cluster_id] = class_name
-
-        # Update the cluster selection to reflect the class label
-        self.update_cluster_selection()
-
-        # Assign the class label to the annotations in the cluster
+        # Update the class label for each annotation in view (current cluster)
         annotations = self.clusters.get(cluster_id, [])
         for anno in annotations:
+            # Assign the class to all samples in the cluster
             anno['class_id'] = class_id
+            logging.debug(f"Annotation for image {anno['image_index']} updated with class_id {class_id}")
+
+        # Refresh the view to show updated labels
+        self.sample_and_display_crops(cluster_id)
+
+    @pyqtSlot(dict, int)
+    def on_crop_label_changed(self, crop_data, class_id):
+        """
+        Updates the annotation data structure when a crop is labelled via right-click or any other mechanism.
+        """
+        cluster_id = crop_data['cluster_id']
+        image_index = crop_data['image_index']
+        coord = tuple(crop_data['coord'])  # Ensure coord is a tuple
+
+        # Update the class_id for the corresponding annotation in self.clusters
+        for anno in self.clusters[cluster_id]:
+            if anno['image_index'] == image_index and tuple(anno['coord']) == coord:
+                anno['class_id'] = class_id
+                logging.debug(f"Annotation for image {image_index}, coord {coord} updated with class_id {class_id}")
+                break
+        else:
+            logging.warning(f"Annotation for image {image_index}, coord {coord} not found in cluster {cluster_id}")
 
     @pyqtSlot()
     def handle_sampling_parameters_changed(self):
@@ -395,11 +436,20 @@ class GlobalClusterController(QObject):
             logging.warning("No cluster is currently selected.")
             self.view.display_sampled_crops([])
 
+    @pyqtSlot(int)
+    def on_resample_requested(self, cluster_id: int):
+        """
+        Handles resample request from the view.
+        """
+        logging.info(f"Resampling unlabelled crops from cluster {cluster_id}")
+        self.sample_and_display_crops(cluster_id=cluster_id)
+
     def sample_and_display_crops(self, cluster_id: int):
         """
         Samples a subset of annotations from a single cluster to display as zoomed-in crops.
 
         :param cluster_id: The ID of the cluster to sample from.
+        :param resample_unlabelled: If True, sample both labelled and unlabelled annotations.
         """
         if cluster_id not in self.clusters:
             logging.warning(f"Cluster ID {cluster_id} does not exist.")
@@ -412,31 +462,35 @@ class GlobalClusterController(QObject):
             self.view.display_sampled_crops([])
             return
 
+        # Since we're displaying both labelled and unlabelled samples, no filtering needed.
+        annotations_to_sample = annotations
+
         # Sample annotations within the cluster
-        num_samples = min(self.crops_per_cluster, len(annotations))
+        num_samples = min(self.crops_per_cluster, len(annotations_to_sample))
         try:
-            sampled_annotations = np.random.choice(annotations, size=num_samples, replace=False)
+            sampled_annotations = np.random.choice(annotations_to_sample, size=num_samples, replace=False)
             logging.debug(f"Sampled {len(sampled_annotations)} annotations from cluster {cluster_id}.")
         except ValueError as e:
             logging.error(f"Error sampling annotations: {e}")
             self.view.display_sampled_crops([])
             return
 
-        # Prepare annotations for processing
         processed_annotations = []
         for anno in sampled_annotations:
             processed_annotations.append({
                 'cluster_id': cluster_id,
                 'image_index': anno['image_index'],
-                'coord': anno['coord']
+                'coord': anno['coord'],
+                'class_id': anno.get('class_id')  # Ensure class_id is included when displaying
             })
 
-        # Initialize Image Processing Worker
+        # Initialize Image Processing Worker (existing code)
         self.image_worker = ImageProcessingWorker(
             sampled_annotations=processed_annotations,
             model=self.model,
             image_processor=self.image_processor
         )
+
         self.image_thread = QThread()
         self.image_worker.moveToThread(self.image_thread)
         self.image_thread.started.connect(self.image_worker.process_images)
@@ -464,33 +518,3 @@ class GlobalClusterController(QObject):
         """
         logging.info(f"Sampling crops from cluster {cluster_id}.")
         self.sample_and_display_crops(cluster_id)
-
-    def update_cluster_selection(self):
-        """
-        Updates the cluster selection ComboBox to include labels.
-        """
-        cluster_info = {}
-        for cluster_id, annotations in self.clusters.items():
-            image_indices = set(anno['image_index'] for anno in annotations)
-            num_annotations = len(annotations)
-            num_images = len(image_indices)
-            label = self.cluster_labels.get(cluster_id, '')
-            class_id = self.cluster_class_labels.get(cluster_id, None)
-            if class_id is not None:
-                class_name = CLASS_COMPONENTS.get(class_id, f"Class {class_id}")
-                label = f"{label} [{class_name}]"
-            if label:
-                display_text = (f"Cluster {cluster_id} - '{label}' ({num_annotations} annotations from {num_images} "
-                                f"images)")
-            else:
-                display_text = f"Cluster {cluster_id} ({num_annotations} annotations from {num_images} images)"
-            cluster_info[cluster_id] = {
-                'num_annotations': num_annotations,
-                'num_images': num_images,
-                'label': label
-            }
-        # Sort clusters by number of images in descending order
-        sorted_cluster_info = dict(sorted(cluster_info.items(), key=lambda item: item[1]['num_images'], reverse=True))
-        # Get current selected cluster ID
-        selected_cluster_id = self.view.get_selected_cluster_id()
-        self.view.populate_cluster_selection(sorted_cluster_info, selected_cluster_id)
