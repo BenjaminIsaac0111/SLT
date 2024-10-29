@@ -1,12 +1,12 @@
 # models/ImageProcessor.py
-
+import hashlib
 import logging
 from typing import Tuple, Dict
 
 import numpy as np
 from PIL import Image
-from PyQt5.QtCore import Qt, QPoint
-from PyQt5.QtGui import QImage, QPixmap, QPainter, QPen, QColor
+from PyQt5.QtGui import QImage
+from cachetools import LRUCache
 from matplotlib import pyplot as plt
 from matplotlib.colors import Colormap
 
@@ -19,13 +19,15 @@ class ImageProcessor:
     uncertainty normalization, and heatmap generation.
     """
 
-    def __init__(self, colormap_name: str = 'tab10', heatmap_cmap_name: str = 'Spectral_r'):
+    def __init__(self, colormap_name: str = 'tab10', heatmap_cmap_name: str = 'Spectral_r', cache_size: int = 250):
         """
         Initializes the ImageProcessor with specified colormaps.
 
         :param colormap_name: Name of the matplotlib colormap to use for mask processing.
         :param heatmap_cmap_name: Name of the matplotlib colormap to use for heatmap generation.
         """
+
+        self.cache = LRUCache(maxsize=cache_size)
         self.colormap_name = colormap_name
         self.heatmap_cmap_name = heatmap_cmap_name
         self.colormap: Colormap = plt.get_cmap(self.colormap_name)
@@ -147,35 +149,53 @@ class ImageProcessor:
             'heatmap': pil_image_to_qpixmap(heatmap)
         }
 
-    def extract_crop(
+    def _generate_cache_key(self, image: np.ndarray, coord: Tuple[int, int], crop_size: int, zoom_factor: int) -> str:
+        """
+        Generates a cache key by hashing the image data and combining it with the other parameters.
+
+        :param image: A numpy array representing the image.
+        :param coord: A tuple (row, column) indicating the center of the crop.
+        :param crop_size: Size of the crop.
+        :param zoom_factor: Zoom factor for the crop.
+        :return: A unique cache key as a string.
+        """
+        # Use image data's hash (you can alternatively use image.tobytes() for larger data)
+        image_hash = hashlib.md5(image.tobytes()).hexdigest()
+        # Create a key with image hash, coordinates, crop size, and zoom factor
+        cache_key = f"{image_hash}_{coord[0]}_{coord[1]}_{crop_size}_{zoom_factor}"
+        return cache_key
+
+    def extract_crop_data(
             self,
             image: np.ndarray,
             coord: Tuple[int, int],
             crop_size: int = 256,
             zoom_factor: int = 2
-    ) -> Tuple[QPixmap, Tuple[int, int]]:
+    ) -> Tuple[np.ndarray, Tuple[int, int]]:
         """
         Extracts a zoomed-in crop from the RGB image at the specified coordinate without padding.
         Handles image data in float (0-1) or uint8 (0-255) formats.
-        Draws a red circle at the position of the coordinate within the zoomed crop.
 
         :param image: A numpy array representing the RGB image (H x W x 3).
-                      Data type can be float (0-1) or uint8 (0-255).
         :param coord: A tuple (row, column) indicating the center of the crop.
         :param crop_size: Desired size of the crop in pixels (crop_size x crop_size).
         :param zoom_factor: Factor by which to zoom the crop.
-        :return: A tuple containing the QPixmap object of the zoomed-in crop with annotation
+        :return: A tuple containing the processed image as a NumPy array
                  and the (x, y) position of the coordinate within the zoomed crop.
         """
-        row, col = coord
+        # Generate a cache key using a hash of the image and other parameters
+        cache_key = self._generate_cache_key(image, coord, crop_size, zoom_factor)
+
+        # Check if the result is in the cache
+        if cache_key in self.cache:
+            logging.debug("Cache hit for crop")
+            return self.cache[cache_key]
+
+        # Ensure row and col are integers
+        row, col = map(int, coord)
         original_height, original_width = image.shape[:-1]
         half_crop = crop_size // 2
 
-        # Validate coordinates
-        if not (0 <= row < original_height) or not (0 <= col < original_width):
-            raise ValueError("Coordinate is outside the image boundaries.")
-
-        # Calculate crop bounds
         x_start = max(0, col - half_crop)
         y_start = max(0, row - half_crop)
 
@@ -184,117 +204,41 @@ class ImageProcessor:
         if y_start + crop_size > original_height:
             y_start = original_height - crop_size
 
-        x_start = max(x_start, 0)
-        y_start = max(y_start, 0)
-
         width_crop = min(crop_size, original_width - x_start)
         height_crop = min(crop_size, original_height - y_start)
 
-        arrow_rel_x = col - x_start
-        arrow_rel_y = row - y_start
+        # Ensure indices are integers
+        x_start = int(x_start)
+        y_start = int(y_start)
+        width_crop = int(width_crop)
+        height_crop = int(height_crop)
 
-        logging.debug(
-            f"Calculated crop bounds: x_start={x_start}, y_start={y_start}, width={width_crop}, height={height_crop}")
-        logging.debug(f"Arrow relative position within crop: ({arrow_rel_x}, {arrow_rel_y})")
-
-        # Extract the crop
         crop = image[y_start:y_start + height_crop, x_start:x_start + width_crop]
 
-        # Handle data type and scaling
+        # Ensure crop is uint8 for further processing
         if np.issubdtype(crop.dtype, np.floating):
-            # Assuming the data is in [0, 1], scale to [0, 255]
-            crop = np.clip(crop, 0.0, 1.0)  # Ensure values are within [0,1]
             crop = (crop * 255).astype(np.uint8)
-        elif np.issubdtype(crop.dtype, np.integer):
-            # If already in integer type, ensure it's uint8
-            if crop.dtype != np.uint8:
-                # Convert to uint8, scaling if necessary
-                info = np.iinfo(crop.dtype)
-                if info.max > 255:
-                    # Scale down
-                    crop = (crop / info.max * 255).astype(np.uint8)
-                else:
-                    crop = crop.astype(np.uint8)
-        else:
-            raise ValueError("Unsupported image data type. Expected float or integer type.")
 
-        # Ensure the data is contiguous
-        if not crop.flags['C_CONTIGUOUS']:
-            crop = np.ascontiguousarray(crop)
+        pil_image = Image.fromarray(crop)
+        new_size = (crop.shape[1] * zoom_factor, crop.shape[0] * zoom_factor)
+        zoomed_pil = pil_image.resize(new_size, Image.BICUBIC)
+        zoomed_crop = np.array(zoomed_pil)
 
-        # Create QImage from the NumPy array
-        height, width, channels = crop.shape
-        bytes_per_line = 3 * width  # 3 bytes per pixel for RGB
+        # Calculate the position of the original coordinate within the zoomed crop
+        arrow_rel_x = col - x_start
+        arrow_rel_y = row - y_start
+        pos_x_zoomed = arrow_rel_x * zoom_factor
+        pos_y_zoomed = arrow_rel_y * zoom_factor
 
-        q_image = QImage(
-            crop.data,
-            width,
-            height,
-            bytes_per_line,
-            QImage.Format_RGB888
-        ).copy()  # Make a deep copy to ensure data integrity
+        result = (zoomed_crop, (int(pos_x_zoomed), int(pos_y_zoomed)))
 
-        # Calculate the position of the original coordinate within the crop
-        pos_x = arrow_rel_x
-        pos_y = arrow_rel_y
+        # Store the result in the cache
+        self.cache[cache_key] = result
+        logging.debug("Cache miss, crop processed and stored.")
 
-        # Scale the position by the zoom factor
-        pos_x_zoomed = pos_x * zoom_factor
-        pos_y_zoomed = pos_y * zoom_factor
+        return result
 
-        logging.debug(f"Arrow scaled position: ({pos_x_zoomed}, {pos_y_zoomed})")
-        logging.debug(f"Crop Size: ({width}, {height})")
-        logging.debug(f"Zoomed Image Size: ({width * zoom_factor}, {height * zoom_factor})")
-
-        # Apply zoom by scaling the QImage
-        zoomed_qimage = q_image.scaled(
-            width * zoom_factor,
-            height * zoom_factor,
-            Qt.IgnoreAspectRatio,
-            Qt.SmoothTransformation
-        )
-
-        # Draw the annotation directly on the zoomed image
-        painter = QPainter(zoomed_qimage)
-        pen = QPen(QColor(0, 255, 0))  # Red color for the circle
-        pen.setWidth(5)  # Thickness of the circle outline
-        painter.setPen(pen)
-        painter.setRenderHint(QPainter.Antialiasing)
-
-        # Ensure the position is within the zoomed image bounds
-        pos_x_zoomed = min(max(pos_x_zoomed, 0), zoomed_qimage.width() - 1)
-        pos_y_zoomed = min(max(pos_y_zoomed, 0), zoomed_qimage.height() - 1)
-
-        # Define a smaller radius for precise annotation
-        radius = max(8, min(zoomed_qimage.width(), zoomed_qimage.height()) // 40)
-
-        # Draw the unfilled circle
-        painter.drawEllipse(QPoint(int(pos_x_zoomed), int(pos_y_zoomed)), radius, radius)
-
-        painter.end()
-
-        # Convert QImage to QPixmap for display
-        zoomed_pixmap = QPixmap.fromImage(zoomed_qimage)
-
-        return zoomed_pixmap, (int(pos_x_zoomed), int(pos_y_zoomed))
-
-    @staticmethod
-    def resize_image(image: np.ndarray, zoom_factor: int) -> np.ndarray:
-        """
-        Resizes the image by the specified zoom factor.
-
-        :param image: A numpy array representing the image.
-        :param zoom_factor: Factor by which to resize the image.
-        :return: Resized numpy array.
-        """
-        pil_image = Image.fromarray((image * 255).astype(np.uint8))
-        new_size = (pil_image.width * zoom_factor, pil_image.height * zoom_factor)
-        resized_pil = pil_image.resize(new_size, Image.BICUBIC)
-        resized_np = np.array(resized_pil)
-        return resized_np
-
-    @staticmethod
-    def numpy_to_qimage(image: np.ndarray) -> QImage:
+    def numpy_to_qimage(self, image: np.ndarray) -> QImage:
         """
         Converts a numpy array to QImage.
 
@@ -306,13 +250,15 @@ class ImageProcessor:
 
         if len(image.shape) == 2:
             # Grayscale
-            qimage = QImage(image.data, image.shape[1], image.shape[0], QImage.Format_Grayscale8)
+            qimage = QImage(image.data, image.shape[1], image.shape[0], image.strides[0],
+                            QImage.Format_Grayscale8).copy()
         elif image.shape[2] == 3:
             # RGB
-            qimage = QImage(image.data, image.shape[1], image.shape[0], QImage.Format_RGB888)
+            qimage = QImage(image.data, image.shape[1], image.shape[0], image.strides[0], QImage.Format_RGB888).copy()
         elif image.shape[2] == 4:
             # RGBA
-            qimage = QImage(image.data, image.shape[1], image.shape[0], QImage.Format_RGBA8888)
+            qimage = QImage(image.data, image.shape[1], image.shape[0], image.strides[0], QImage.Format_RGBA8888).copy()
         else:
             raise ValueError("Unsupported image format for conversion to QImage.")
         return qimage
+

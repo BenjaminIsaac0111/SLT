@@ -22,7 +22,7 @@ class UncertaintyRegionSelector:
             edge_buffer: int = 64,
             eps: float = 1.0,  # DBSCAN parameter for spatial clustering
             min_samples: int = 1,  # DBSCAN parameter for spatial clustering
-            distance_threshold: float = 2.5,  # Agglomerative Clustering parameter for logit features
+            distance_threshold: float = 1.75,  # Agglomerative Clustering parameter for logit features
             linkage: str = 'ward'  # Linkage criteria for Agglomerative Clustering
     ):
         """

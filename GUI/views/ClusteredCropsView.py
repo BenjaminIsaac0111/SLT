@@ -9,7 +9,7 @@ from PyQt5.QtWidgets import QGraphicsObject, QAction, QGraphicsItem
 from PyQt5.QtWidgets import (
     QWidget, QComboBox, QPushButton, QVBoxLayout, QLabel,
     QProgressBar, QSpinBox, QSlider, QGraphicsView,
-    QGraphicsScene, QLineEdit, QMenu, QGridLayout, QFileDialog,
+    QGraphicsScene, QMenu, QGridLayout, QFileDialog,
     QGroupBox, QSizePolicy, QSplitter, QGraphicsTextItem
 )
 
@@ -41,9 +41,9 @@ class ClickablePixmapItem(QGraphicsObject):
         self.update_text_label()  # Ensure the label is displayed correctly
 
     def set_crop_class(self, class_id):
-        self.crop_data['class_id'] = class_id
-        self.class_id = class_id  # Update local class_id
-        self.class_label_changed.emit(self.crop_data, class_id)
+        self.crop_data['class_id'] = class_id if class_id is not None else -1
+        self.class_id = self.crop_data['class_id']  # Update local class_id
+        self.class_label_changed.emit(self.crop_data, self.class_id)
         self.update_text_label()  # Update the text label when the class is changed
         self.update()
 
@@ -97,7 +97,7 @@ class ClickablePixmapItem(QGraphicsObject):
 
         # Add Unlabel Option
         unlabel_action = QAction("Unlabel", self)
-        unlabel_action.triggered.connect(partial(self.set_crop_class, None))
+        unlabel_action.triggered.connect(partial(self.set_crop_class, -1))
         menu.addAction(unlabel_action)
 
         # Display the menu
@@ -112,16 +112,17 @@ class ClusteredCropsView(QWidget):
     crop_clicked = pyqtSignal(dict)
     cluster_labeled = pyqtSignal(int, str)
     class_selected = pyqtSignal(int, int)  # Emits (cluster_id, class_id)
-    cluster_file_selected = pyqtSignal(str)  # Emits the filename of the selected cluster file
-    save_annotations_requested = pyqtSignal()
     class_selected_for_all = pyqtSignal(object)  # Emits the class_id for all visible crops
-    resample_requested = pyqtSignal(int)  # Emits (cluster_id)
     crop_label_changed = pyqtSignal(dict, int)  # Emits (crop_data, class_id)
+    save_project_state_requested = pyqtSignal()
+    export_annotations_requested = pyqtSignal()
+    load_project_state_requested = pyqtSignal(str)  # Emits the filename of the project state to load
+    restore_autosave_requested = pyqtSignal()
 
     def __init__(self):
         super().__init__()
-        self.zoom_level = 0  # Initial zoom level
-        self.sampled_crops = []  # Store sampled crops for dynamic rearrangement
+        self.zoom_level = 5  # Initial zoom level
+        self.selected_crops = []  # Store sampled crops for dynamic rearrangement
         self.init_ui()
 
     def init_ui(self):
@@ -164,7 +165,7 @@ class ClusteredCropsView(QWidget):
         self.crops_spinbox = QSpinBox()
         self.crops_spinbox.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.crops_spinbox.setRange(1, 100)
-        self.crops_spinbox.setValue(10)
+        self.crops_spinbox.setValue(100)
         self.crops_spinbox.valueChanged.connect(self.on_crops_changed)
         sampling_layout.addWidget(self.crops_spinbox)
         sampling_group.setLayout(sampling_layout)
@@ -182,20 +183,6 @@ class ClusteredCropsView(QWidget):
         zoom_layout.addWidget(self.zoom_slider)
         zoom_group.setLayout(zoom_layout)
         control_panel_layout.addWidget(zoom_group)
-
-        # Cluster Labeling Group
-        labeling_group = QGroupBox("Cluster Labeling")
-        labeling_layout = QVBoxLayout()
-        self.cluster_label_edit = QLineEdit()
-        self.cluster_label_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        labeling_layout.addWidget(QLabel("Cluster Label:"))
-        labeling_layout.addWidget(self.cluster_label_edit)
-        self.label_cluster_button = QPushButton("Set Label")
-        self.label_cluster_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.label_cluster_button.clicked.connect(self.on_label_cluster)
-        labeling_layout.addWidget(self.label_cluster_button)
-        labeling_group.setLayout(labeling_layout)
-        control_panel_layout.addWidget(labeling_group)
 
         # Class Selection Buttons Group
         class_buttons_group = QGroupBox("Class Labels")
@@ -227,19 +214,28 @@ class ClusteredCropsView(QWidget):
         control_panel_layout.addStretch()
 
         # Save and Load Buttons
-        self.load_button = QPushButton("Load Cluster File")
-        self.load_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.load_button.clicked.connect(self.on_load_cluster_file)
-        self.save_annotations_button = QPushButton("Save Annotations")
-        self.save_annotations_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.save_annotations_button.clicked.connect(self.on_save_annotations)
-        control_panel_layout.addWidget(self.load_button)
-        control_panel_layout.addWidget(self.save_annotations_button)
+        self.load_project_button = QPushButton("Load Project")
+        self.load_project_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.load_project_button.clicked.connect(self.on_load_project_state)
 
-        self.resample_button = QPushButton("Resample Unlabelled")
-        self.resample_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.resample_button.clicked.connect(self.on_resample_requested)
-        control_panel_layout.addWidget(self.resample_button)
+        self.save_project_button = QPushButton("Save Project")
+        self.save_project_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.save_project_button.clicked.connect(self.on_save_project_state)
+
+        self.export_annotations_button = QPushButton("Export Annotations")
+        self.export_annotations_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.export_annotations_button.clicked.connect(self.on_export_annotations)
+
+        self.restore_autosave_button = QPushButton("Restore Autosave")
+        self.restore_autosave_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.restore_autosave_button.clicked.connect(self.on_restore_autosave)
+
+        control_panel_layout.addWidget(self.load_project_button)
+        control_panel_layout.addWidget(self.save_project_button)
+        control_panel_layout.addWidget(self.export_annotations_button)
+        control_panel_layout.addWidget(self.restore_autosave_button)
+
+        control_panel_layout.addStretch()
 
         # Add the control panel to the splitter
         splitter.addWidget(control_panel)
@@ -276,20 +272,27 @@ class ClusteredCropsView(QWidget):
     def populate_cluster_selection(self, cluster_info, selected_cluster_id=None):
         """
         Populates the cluster selection ComboBox with available cluster IDs and their info.
+        Displays the percentage of labeled data for each cluster.
         """
         self.cluster_combo.blockSignals(True)  # Prevent triggering selection signal during population
         if selected_cluster_id is None:
             selected_cluster_id = self.get_selected_cluster_id()
         self.cluster_combo.clear()
+
         for cid, info in cluster_info.items():
             num_annotations = info['num_annotations']
             num_images = info['num_images']
+            labeled_percentage = info['labeled_percentage']
             label = info.get('label', '')
+
             if label:
-                display_text = f"Cluster {cid} - '{label}' ({num_annotations} annotations from {num_images} images)"
+                display_text = (f"Cluster {cid} - '{label}' ({num_annotations} annotations, {labeled_percentage:.1f}% "
+                                f"labeled)")
             else:
-                display_text = f"Cluster {cid} ({num_annotations} annotations from {num_images} images)"
+                display_text = f"Cluster {cid} ({num_annotations} annotations, {labeled_percentage:.1f}% labeled)"
+
             self.cluster_combo.addItem(display_text, cid)
+
         # After populating, set the current index to the one matching selected_cluster_id
         index = self.cluster_combo.findData(selected_cluster_id)
         if index != -1:
@@ -305,17 +308,6 @@ class ClusteredCropsView(QWidget):
         if cluster_id is not None:
             logging.debug(f"Cluster selected: {cluster_id}")
             self.sample_cluster.emit(cluster_id)
-
-    def on_resample_requested(self):
-        """
-        Emits a signal to resample unlabelled crops from the current cluster.
-        """
-        cluster_id = self.get_selected_cluster_id()
-        if cluster_id is not None:
-            logging.debug(f"Resample requested for cluster {cluster_id}")
-            self.resample_requested.emit(cluster_id)
-        else:
-            logging.warning("No cluster is currently selected.")
 
     def on_crops_changed(self, value):
         """
@@ -342,11 +334,17 @@ class ClusteredCropsView(QWidget):
         else:
             logging.warning("No cluster is currently selected.")
 
+    def on_restore_autosave(self):
+        """
+        Emits a signal when the 'Restore Autosave' button is clicked.
+        """
+        self.restore_autosave_requested.emit()
+
     def label_all_visible_crops(self, class_id):
         """
         Labels all the currently visible crops with the given class_id. If class_id is None, unlabel them.
         """
-        for crop in self.sampled_crops:
+        for crop in self.selected_crops:
             # Update the crop's class_id
             crop['class_id'] = class_id
             # Find the corresponding ClickablePixmapItem and update its label
@@ -364,7 +362,7 @@ class ClusteredCropsView(QWidget):
         """
         Displays the sampled crops in a grid layout within the graphics scene.
         """
-        self.sampled_crops = sampled_crops
+        self.selected_crops = sampled_crops
         self.arrange_crops()
 
     def update_progress(self, progress):
@@ -398,7 +396,7 @@ class ClusteredCropsView(QWidget):
         """
         self.scene.clear()
 
-        if not self.sampled_crops:
+        if not self.selected_crops:
             logging.info("No sampled crops to display.")
             return
 
@@ -425,7 +423,7 @@ class ClusteredCropsView(QWidget):
         y_offset = 20
         max_row_height = 0
 
-        for idx, crop in enumerate(self.sampled_crops):
+        for idx, crop in enumerate(self.selected_crops):
             if crop['crop'].isNull():
                 logging.warning(f"Invalid QPixmap for image index {crop['image_index']}. Skipping.")
                 continue
@@ -486,24 +484,32 @@ class ClusteredCropsView(QWidget):
         logging.debug(f"Zoom level changed to: {self.zoom_level}")
         self.arrange_crops()
 
-    def on_load_cluster_file(self):
+    def on_load_project_state(self):
         """
-        Opens a file dialog to select a cluster file to load.
+        Opens a file dialog to select a project state file to load.
         """
         options = QFileDialog.Options()
-        filename, _ = QFileDialog.getOpenFileName(self, "Open Cluster File", "", "JSON Files (*.json);;All Files (*)",
-                                                  options=options)
+        filename, _ = QFileDialog.getOpenFileName(
+            self, "Load Project State", "", "JSON Files (*.json);;All Files (*)",
+            options=options
+        )
         if filename:
-            logging.debug(f"Selected cluster file: {filename}")
-            self.cluster_file_selected.emit(filename)
+            logging.debug(f"Selected project state file: {filename}")
+            self.load_project_state_requested.emit(filename)
         else:
-            logging.debug("No cluster file selected.")
+            logging.debug("No project state file selected.")
 
-    def on_save_annotations(self):
+    def on_save_project_state(self):
         """
-        Handles the event when the 'Save Annotations' button is clicked.
+        Emits a signal when the 'Save Project' button is clicked.
         """
-        self.save_annotations_requested.emit()
+        self.save_project_state_requested.emit()
+
+    def on_export_annotations(self):
+        """
+        Emits a signal when the 'Export Annotations' button is clicked.
+        """
+        self.export_annotations_requested.emit()
 
     def eventFilter(self, source, event):
         """
@@ -532,14 +538,3 @@ class ClusteredCropsView(QWidget):
         Handles the event when a crop is clicked.
         """
         pass
-
-    def on_label_cluster(self):
-        """
-        Handles the event when the 'Set Label' button is clicked.
-        """
-        label = self.cluster_label_edit.text()
-        cluster_id = self.get_selected_cluster_id()
-        if cluster_id is not None and label:
-            self.cluster_labeled.emit(cluster_id, label)
-        else:
-            logging.warning("Cluster ID or label is missing.")
