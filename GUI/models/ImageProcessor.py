@@ -5,12 +5,10 @@ from typing import Tuple, Dict
 
 import numpy as np
 from PIL import Image
-from PyQt5.QtGui import QImage
+from PyQt5.QtGui import QImage, QPixmap
 from cachetools import LRUCache
 from matplotlib import pyplot as plt
 from matplotlib.colors import Colormap
-
-from GUI.utils.ImageConversion import pil_image_to_qpixmap
 
 
 class ImageProcessor:
@@ -127,7 +125,8 @@ class ImageProcessor:
         softmax_probs = e_logits / np.sum(e_logits, axis=-1, keepdims=True)
         return softmax_probs
 
-    def process_image_data(self, image_array: np.ndarray, logits: np.ndarray, uncertainty: np.ndarray) -> Dict[str, Image.Image]:
+    def process_image_data(self, image_array: np.ndarray, logits: np.ndarray, uncertainty: np.ndarray) -> Dict[
+        str, Image.Image]:
         """
         Processes image data and returns a dictionary of processed images.
 
@@ -143,10 +142,10 @@ class ImageProcessor:
         heatmap = self.create_heatmap(normalized_uncertainty)
         logging.info("Image data processed.")
         return {
-            'image': pil_image_to_qpixmap(image),
-            'mask': pil_image_to_qpixmap(mask),
-            'overlay': pil_image_to_qpixmap(overlay),
-            'heatmap': pil_image_to_qpixmap(heatmap)
+            'image': self.pil_image_to_qpixmap(image),
+            'mask': self.pil_image_to_qpixmap(mask),
+            'overlay': self.pil_image_to_qpixmap(overlay),
+            'heatmap': self.pil_image_to_qpixmap(heatmap)
         }
 
     def _generate_cache_key(self, image: np.ndarray, coord: Tuple[int, int], crop_size: int, zoom_factor: int) -> str:
@@ -262,3 +261,35 @@ class ImageProcessor:
             raise ValueError("Unsupported image format for conversion to QImage.")
         return qimage
 
+    def pil_image_to_qpixmap(self, pil_image: Image.Image) -> QPixmap:
+        """
+        Converts a PIL Image to QPixmap.
+
+        :param pil_image: PIL Image to convert.
+        :return: QPixmap representation of the image.
+        """
+        try:
+            if pil_image.mode == "RGB":
+                r, g, b = pil_image.split()
+                image = Image.merge("RGB", (r, g, b))
+                data = image.tobytes("raw", "RGB")
+                qimage = QImage(data, image.width, image.height, QImage.Format_RGB888)
+            elif pil_image.mode == "RGBA":
+                r, g, b, a = pil_image.split()
+                image = Image.merge("RGBA", (r, g, b, a))
+                data = image.tobytes("raw", "RGBA")
+                qimage = QImage(data, image.width, image.height, QImage.Format_RGBA8888)
+            else:
+                # Convert to RGB if in a different mode
+                image = pil_image.convert("RGB")
+                r, g, b = image.split()
+                image = Image.merge("RGB", (r, g, b))
+                data = image.tobytes("raw", "RGB")
+                qimage = QImage(data, image.width, image.height, QImage.Format_RGB888)
+
+            qpixmap = QPixmap.fromImage(qimage)
+            logging.debug("Converted PIL Image to QPixmap successfully.")
+            return qpixmap
+        except Exception as e:
+            logging.error(f"Failed to convert PIL Image to QPixmap: {e}")
+            raise e
