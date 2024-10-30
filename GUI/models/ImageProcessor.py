@@ -6,9 +6,10 @@ from typing import Tuple, Dict
 import numpy as np
 from PIL import Image
 from PyQt5.QtGui import QImage, QPixmap
-from cachetools import LRUCache
 from matplotlib import pyplot as plt
 from matplotlib.colors import Colormap
+
+from GUI.models.CacheManager import CacheManager
 
 
 class ImageProcessor:
@@ -24,8 +25,7 @@ class ImageProcessor:
         :param colormap_name: Name of the matplotlib colormap to use for mask processing.
         :param heatmap_cmap_name: Name of the matplotlib colormap to use for heatmap generation.
         """
-
-        self.cache = LRUCache(maxsize=cache_size)
+        self.cache = CacheManager(cache_size=cache_size)  # Use CacheManager instead of LRUCache
         self.colormap_name = colormap_name
         self.heatmap_cmap_name = heatmap_cmap_name
         self.colormap: Colormap = plt.get_cmap(self.colormap_name)
@@ -125,15 +125,16 @@ class ImageProcessor:
         softmax_probs = e_logits / np.sum(e_logits, axis=-1, keepdims=True)
         return softmax_probs
 
-    def process_image_data(self, image_array: np.ndarray, logits: np.ndarray, uncertainty: np.ndarray) -> Dict[
-        str, Image.Image]:
+    def process_image_data(
+            self, image_array: np.ndarray, logits: np.ndarray, uncertainty: np.ndarray
+    ) -> Dict[str, QPixmap]:
         """
         Processes image data and returns a dictionary of processed images.
 
         :param image_array: A numpy array of the original image.
         :param logits: A numpy array of logits.
         :param uncertainty: A numpy array of uncertainty values.
-        :return: A dictionary containing 'image', 'mask', 'overlay', 'heatmap' as PIL Images.
+        :return: A dictionary containing 'image', 'mask', 'overlay', 'heatmap' as QPixmaps.
         """
         image = Image.fromarray((image_array * 255).astype(np.uint8)).convert('RGB')
         mask = self.process_mask(logits)
@@ -148,7 +149,9 @@ class ImageProcessor:
             'heatmap': self.pil_image_to_qpixmap(heatmap)
         }
 
-    def _generate_cache_key(self, image: np.ndarray, coord: Tuple[int, int], crop_size: int, zoom_factor: int) -> str:
+    def _generate_cache_key(
+            self, image: np.ndarray, coord: Tuple[int, int], crop_size: int, zoom_factor: int
+    ) -> str:
         """
         Generates a cache key by hashing the image data and combining it with the other parameters.
 
@@ -186,9 +189,10 @@ class ImageProcessor:
         cache_key = self._generate_cache_key(image, coord, crop_size, zoom_factor)
 
         # Check if the result is in the cache
-        if cache_key in self.cache:
+        cached_result = self.cache.get(cache_key)
+        if cached_result is not None:
             logging.debug("Cache hit for crop")
-            return self.cache[cache_key]
+            return cached_result
 
         # Ensure row and col are integers
         row, col = map(int, coord)
@@ -232,7 +236,7 @@ class ImageProcessor:
         result = (zoomed_crop, (int(pos_x_zoomed), int(pos_y_zoomed)))
 
         # Store the result in the cache
-        self.cache[cache_key] = result
+        self.cache.set(cache_key, result)
         logging.debug("Cache miss, crop processed and stored.")
 
         return result
@@ -253,10 +257,12 @@ class ImageProcessor:
                             QImage.Format_Grayscale8).copy()
         elif image.shape[2] == 3:
             # RGB
-            qimage = QImage(image.data, image.shape[1], image.shape[0], image.strides[0], QImage.Format_RGB888).copy()
+            qimage = QImage(image.data, image.shape[1], image.shape[0], image.strides[0],
+                            QImage.Format_RGB888).copy()
         elif image.shape[2] == 4:
             # RGBA
-            qimage = QImage(image.data, image.shape[1], image.shape[0], image.strides[0], QImage.Format_RGBA8888).copy()
+            qimage = QImage(image.data, image.shape[1], image.shape[0], image.strides[0],
+                            QImage.Format_RGBA8888).copy()
         else:
             raise ValueError("Unsupported image format for conversion to QImage.")
         return qimage
@@ -282,8 +288,6 @@ class ImageProcessor:
             else:
                 # Convert to RGB if in a different mode
                 image = pil_image.convert("RGB")
-                r, g, b = image.split()
-                image = Image.merge("RGB", (r, g, b))
                 data = image.tobytes("raw", "RGB")
                 qimage = QImage(data, image.width, image.height, QImage.Format_RGB888)
 

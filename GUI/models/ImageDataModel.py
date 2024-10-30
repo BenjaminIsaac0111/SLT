@@ -1,12 +1,14 @@
+# models/image_data_model.py
 import logging
 import threading
-from collections import OrderedDict
 from typing import Dict, Any, List, Optional, Tuple
 
 import h5py
 import numpy as np
-from PyQt5.QtCore import Qt, QObject, pyqtSignal
+from PyQt5.QtCore import QObject, pyqtSignal, Qt
 from PyQt5.QtGui import QPixmap, QImage
+
+from GUI.models.CacheManager import CacheManager  # Import the CacheManager
 
 
 class ImageDataModel(QObject):
@@ -42,9 +44,7 @@ class ImageDataModel(QObject):
                 self._aleatoric_uncertainties = None
                 self._filenames = []
                 self._data_lock = threading.Lock()
-                self._cache_lock = threading.Lock()
-                self._cache_size = 256
-                self._data_cache = OrderedDict()
+                self.cache = CacheManager(cache_size=256)  # Use CacheManager instead of OrderedDict
                 self._current_pixmap: Optional[QPixmap] = None
                 self._initialized = True
                 logging.info("ImageDataModel initialized.")
@@ -82,7 +82,7 @@ class ImageDataModel(QObject):
                     raise
 
     def get_image_data(self, index: int) -> Dict[str, Any]:
-        """Fetches image data, using a cache to minimize I/O."""
+        """Fetches image data, using CacheManager to minimize I/O."""
         self._load_hdf5_file()
         self._load_datasets()
 
@@ -90,12 +90,10 @@ class ImageDataModel(QObject):
             logging.error("Index out of range.")
             raise IndexError("Index out of range.")
 
-        # Cache access
-        with self._cache_lock:
-            if index in self._data_cache:
-                logging.debug(f"Cache hit for index {index}.")
-                self._data_cache.move_to_end(index)
-                return self._data_cache[index]
+        # Cache access using CacheManager
+        cached_data = self.cache.get(index)
+        if cached_data is not None:
+            return cached_data
 
         # Data retrieval and caching
         with self._data_lock:
@@ -106,17 +104,14 @@ class ImageDataModel(QObject):
                     ..., np.newaxis],
                 'filename': self._filenames[index]
             }
-            with self._cache_lock:
-                if len(self._data_cache) >= self._cache_size:
-                    removed_index = self._data_cache.popitem(last=False)
-                    logging.debug(f"Removed index {removed_index[0]} from cache.")
-                self._data_cache[index] = data
-                logging.debug(f"Added index {index} to cache.")
-
+            # Store data in cache
+            self.cache.set(index, data)
+            logging.debug(f"Data for index {index} cached.")
         return data
 
-    def create_zoomed_crop(self, image_array: np.ndarray, coord: Tuple[int, int], crop_size: int = 256,
-                           zoom_factor: int = 2) -> Tuple[QPixmap, int, int]:
+    def create_zoomed_crop(
+            self, image_array: np.ndarray, coord: Tuple[int, int], crop_size: int = 256, zoom_factor: int = 2
+    ) -> Tuple[QPixmap, int, int]:
         """
         Creates a zoomed crop of the given image around the specified coordinate.
         """
@@ -141,8 +136,10 @@ class ImageDataModel(QObject):
         y_start = max(0, min(height - crop_size, y_center - crop_size // 2))
 
         cropped_pixmap = original_pixmap.copy(x_start, y_start, crop_size, crop_size)
-        zoomed_pixmap = cropped_pixmap.scaled(crop_size * zoom_factor, crop_size * zoom_factor,
-                                              Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        zoomed_pixmap = cropped_pixmap.scaled(
+            crop_size * zoom_factor, crop_size * zoom_factor,
+            Qt.KeepAspectRatio, Qt.SmoothTransformation
+        )
         logging.debug("Zoomed crop created successfully.")
         return zoomed_pixmap, x_start, y_start
 

@@ -733,7 +733,6 @@ class GlobalClusterController(QObject):
 
     @pyqtSlot(dict, int)
     def on_crop_label_changed(self, crop_data, class_id):
-        logging.debug(f"Received class_id: {class_id} for crop_data: {crop_data}")
         if not isinstance(class_id, int):
             logging.error("class_id is not an integer. Received:", type(class_id))
 
