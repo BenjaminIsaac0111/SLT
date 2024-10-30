@@ -323,15 +323,15 @@ class GlobalClusterController(QObject):
         Initiates the global clustering process.
         """
         logging.info("Clustering process initiated by user.")
-        self.clustering_started.emit()
-        self.view.reset_progress()
+        self.clustering_started.emit()  # This signals the start in the GUI
+        self.view.reset_progress()  # Ensure the progress bar is reset
 
-        # Clustering worker setup (one-off task)
+        # Initialize and configure the ClusteringWorker
         self.clustering_worker = ClusteringWorker(model=self.model, labels_acquirer=self.region_selector)
         self.clustering_worker.progress_updated.connect(self.clustering_progress.emit)
         self.clustering_worker.clustering_finished.connect(self.on_clustering_finished)
-        self.clustering_worker.finished.connect(self.clustering_worker.deleteLater)
-        self.clustering_worker.start()
+        self.clustering_worker.finished.connect(self.clustering_worker.deleteLater)  # Clean up thread
+        self.clustering_worker.start()  # Starts the worker
 
     @pyqtSlot(dict)
     def on_clusters_ready(self, clusters: Dict[int, List[Dict]]):
