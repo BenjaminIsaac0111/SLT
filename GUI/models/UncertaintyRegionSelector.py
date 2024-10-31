@@ -1,10 +1,11 @@
+# models/UncertaintyRegionSelector.py
+
 import logging
-from typing import List, Tuple, Dict
+from typing import List, Tuple
 
 import numpy as np
-from numpy import ndarray
 from scipy.ndimage import gaussian_filter, maximum_filter
-from sklearn.cluster import DBSCAN, AgglomerativeClustering
+from sklearn.cluster import DBSCAN
 
 
 class UncertaintyRegionSelector:
@@ -56,15 +57,19 @@ class UncertaintyRegionSelector:
         """
         Validates input parameters.
         """
-        if self.filter_size <= 0:
+        if not isinstance(self.filter_size, int) or self.filter_size <= 0:
             raise ValueError("filter_size must be a positive integer.")
         if self.aggregation_method not in ('mean', 'max', 'std'):
             raise ValueError("aggregation_method must be 'mean', 'max', or 'std'.")
-        if self.eps <= 0:
+        if not isinstance(self.gaussian_sigma, (int, float)) or self.gaussian_sigma <= 0:
+            raise ValueError("gaussian_sigma must be a positive float.")
+        if not isinstance(self.edge_buffer, int) or self.edge_buffer < 0:
+            raise ValueError("edge_buffer must be a non-negative integer.")
+        if not isinstance(self.eps, float) or self.eps <= 0:
             raise ValueError("eps must be a positive float.")
-        if self.min_samples <= 0:
+        if not isinstance(self.min_samples, int) or self.min_samples <= 0:
             raise ValueError("min_samples must be a positive integer.")
-        if self.distance_threshold is None or self.distance_threshold <= 0:
+        if not isinstance(self.distance_threshold, float) or self.distance_threshold <= 0:
             raise ValueError("distance_threshold must be a positive float.")
         if self.linkage not in ('ward', 'complete', 'average', 'single'):
             raise ValueError("linkage must be one of 'ward', 'complete', 'average', or 'single'.")
@@ -73,19 +78,19 @@ class UncertaintyRegionSelector:
             self,
             uncertainty_map: np.ndarray,
             logits: np.ndarray,
-    ) -> Tuple[ndarray, List[Tuple[int, int]]]:
+    ) -> Tuple[np.ndarray, List[Tuple[int, int]]]:
         """
         Selects the uncertain regions from the uncertainty map, clusters the coordinates using DBSCAN,
         and clusters the logit features using Agglomerative Clustering.
 
         :param uncertainty_map: A 3D numpy array representing uncertainty values.
         :param logits: A 3D numpy array of logit values per pixel.
-        :return: A dictionary where keys are cluster labels and values are lists of (row, column) tuples.
+        :return: A tuple containing logit features (numpy array) and list of (row, column) tuples.
         """
         # Step 1: Aggregate the 3D uncertainty map into a 2D map
         uncertainty_map_2d = self._aggregate_uncertainty(uncertainty_map)
 
-        # Step 2: Apply Gaussian smoothing. (Not sure how mu)
+        # Step 2: Apply Gaussian smoothing
         uncertainty_map_smoothed = gaussian_filter(uncertainty_map_2d, sigma=self.gaussian_sigma)
         logging.debug("Applied Gaussian filter with sigma=%.2f.", self.gaussian_sigma)
 
@@ -98,16 +103,22 @@ class UncertaintyRegionSelector:
 
         if not initial_coords:
             logging.warning("No significant coordinates found.")
-            return {}
+            return np.array([]), []
 
         # Step 5: Perform DBSCAN on spatial coordinates to group them
         dbscan_coords = self._dbscan_cluster_coordinates(initial_coords)
         logging.info("DBSCAN identified %d points in spatial domain.", len(dbscan_coords))
 
+        if not dbscan_coords:
+            logging.warning("No coordinates left after DBSCAN clustering.")
+            return np.array([]), []
+
         # Step 6: Extract logit features at the DBSCAN-clustered coordinates
         logit_features = self._extract_logit_features(
-            np.concatenate([logits, uncertainty_map_2d[..., np.newaxis]], axis=-1), dbscan_coords)
-        logging.debug("Extracted logit features.")
+            logits=logits,
+            coords=dbscan_coords
+        )
+        logging.debug("Extracted logit features with shape %s.", logit_features.shape)
 
         return logit_features, dbscan_coords
 
@@ -213,47 +224,10 @@ class UncertaintyRegionSelector:
         :param coords: A list of (row, column) tuples.
         :return: A 2D numpy array of logit features.
         """
+        if not coords:
+            logging.warning("No coordinates provided for logit feature extraction.")
+            return np.array([])
+
         rows, cols = zip(*coords)
         logit_features = logits[rows, cols, :]  # Shape: (n_coords, logit_channels)
         return logit_features.astype(np.float32)  # Ensure float32 for consistency
-
-    def cluster_logit_features(
-            self,
-            logit_features: np.ndarray,
-            coords: List[Tuple[int, int]]
-    ) -> Dict[int, List[Tuple[int, int]]]:
-        """
-        Clusters the logit features using Agglomerative Clustering and maps them back to coordinates.
-
-        :param logit_features: A 2D numpy array of logit features.
-        :param coords: A list of (row, column) tuples.
-        :return: A dictionary where keys are cluster labels and values are lists of (row, column) tuples.
-        """
-        if logit_features.size == 0:
-            logging.warning("No logit features to cluster.")
-            return {}
-
-        # Initialize Agglomerative Clustering
-        clustering = AgglomerativeClustering(
-            n_clusters=None,  # Do not specify number of clusters
-            distance_threshold=self.distance_threshold,  # Define the linkage distance threshold
-            linkage=self.linkage
-        )
-
-        # Fit Agglomerative Clustering on logit features
-        clustering.fit(logit_features)
-
-        labels = clustering.labels_
-        unique_labels = set(labels)
-
-        clusters: Dict[int, List[Tuple[int, int]]] = {}
-        for label in unique_labels:
-            if label not in clusters:
-                clusters[label] = []
-            # Retrieve all coordinates belonging to this cluster
-            cluster_indices = np.where(labels == label)[0]
-            for idx in cluster_indices:
-                clusters[label].append(coords[idx])
-
-        logging.debug("Agglomerative clustering complete. Number of clusters: %d.", len(clusters))
-        return clusters

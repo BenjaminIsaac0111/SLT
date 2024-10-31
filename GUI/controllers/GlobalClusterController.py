@@ -4,7 +4,7 @@ import os
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
-from typing import List, Dict, Tuple
+from typing import List, Dict, Optional
 
 import numpy as np
 from PyQt5.QtCore import QObject, pyqtSignal, QThread, pyqtSlot, QTimer, QPoint, QCoreApplication
@@ -12,6 +12,7 @@ from PyQt5.QtGui import QImage, QPainter, QPen, QColor, QPixmap
 from PyQt5.QtWidgets import QFileDialog, QMessageBox
 from sklearn.cluster import AgglomerativeClustering
 
+from GUI.models.Annotation import Annotation
 from GUI.models.ImageDataModel import ImageDataModel
 from GUI.models.ImageProcessor import ImageProcessor
 from GUI.models.UncertaintyRegionSelector import UncertaintyRegionSelector
@@ -64,7 +65,7 @@ class ClusteringWorker(QThread):
     """
     Worker thread for performing global clustering to keep the UI responsive.
     """
-    clustering_finished = pyqtSignal(dict)
+    clustering_finished = pyqtSignal(list)
     progress_updated = pyqtSignal(int)
 
     def __init__(self, model: ImageDataModel, labels_acquirer: UncertaintyRegionSelector, parent=None):
@@ -74,7 +75,7 @@ class ClusteringWorker(QThread):
 
     def process_image(self, idx):
         """
-        Processes a single image and returns annotations, initializing each with class_id = -1.
+        Processes a single image and assigns a cluster_id to each Annotation.
         """
         data = self.model.get_image_data(idx)
         uncertainty_map = data.get('uncertainty', None)
@@ -90,16 +91,18 @@ class ClusteringWorker(QThread):
             logits=logits
         )
 
-        annotations = []
-        for coord, logit_feature in zip(dbscan_coords, logit_features):
-            annotation = {
-                'image_index': idx,
-                'filename': filename,
-                'coord': coord,
-                'logit_features': logit_feature,
-                'class_id': -1  # Set default as unlabelled
-            }
-            annotations.append(annotation)
+        annotations = [
+            Annotation(
+                filename=filename,
+                coord=coord,
+                logit_features=logit_feature,
+                class_id=-1,  # Default to -1 (unlabelled)
+                image_index=idx,
+                uncertainty=uncertainty_map[coord[0], coord[1]],
+                cluster_id=None  # Assign the cluster ID here
+            )
+            for coord, logit_feature in zip(dbscan_coords, logit_features)
+        ]
 
         return annotations, idx
 
@@ -107,7 +110,7 @@ class ClusteringWorker(QThread):
         """
         Executes the clustering process with parallel image processing.
         """
-        all_annotations = []  # List of dicts with image_index, coord, logit_features
+        all_annotations = []  # List to collect annotations with image_index, coord, logit_features, etc.
         total_images = self.model.get_number_of_images()
         logging.info(f"Starting clustering on {total_images} images.")
 
@@ -136,7 +139,7 @@ class ClusteringWorker(QThread):
 
         # Extract logit features for clustering
         try:
-            logit_matrix = np.array([anno['logit_features'] for anno in all_annotations])
+            logit_matrix = np.array([anno.logit_features for anno in all_annotations])
             logging.debug(f"Logit matrix shape: {logit_matrix.shape}")
         except Exception as e:
             logging.error(f"Error creating logit matrix: {e}")
@@ -158,16 +161,12 @@ class ClusteringWorker(QThread):
             self.clustering_finished.emit({})
             return
 
-        # Map clusters to annotations
-        clusters = {}
+        # Assign cluster IDs to each annotation
         for label, annotation in zip(labels, all_annotations):
-            label = int(label)  # Ensure label is an integer
-            if label not in clusters:
-                clusters[label] = []
-            clusters[label].append(annotation)
+            annotation.cluster_id = int(label)  # Directly assign cluster_id
 
-        logging.info(f"Global clustering complete. Number of clusters: {len(clusters)}")
-        self.clustering_finished.emit(clusters)
+        logging.info(f"Global clustering complete. Number of clusters: {len(set(clustering.labels_))}")
+        self.clustering_finished.emit(all_annotations)
 
 
 class ImageProcessingWorker(QObject):
@@ -194,9 +193,10 @@ class ImageProcessingWorker(QObject):
         self.processing_finished.emit(sampled_crops)
 
     def process_single_annotation(self, anno):
-        image_data = self.model.get_image_data(anno['image_index'])
+        # Access Annotation attributes directly using dot notation
+        image_data = self.model.get_image_data(anno.image_index)
         image_array = image_data.get('image', None)
-        coord = anno['coord']
+        coord = anno.coord
         if image_array is None:
             return None
 
@@ -207,16 +207,12 @@ class ImageProcessingWorker(QObject):
         if processed_crop is None:
             return None
 
-        # Return data needed to create QPixmap in the main thread
         return {
-            'cluster_id': anno['cluster_id'],
-            'image_index': anno['image_index'],
-            'coord': coord,
+            'annotation': anno,
             'processed_crop': processed_crop,
-            'coord_pos': coord_pos,
-            'class_id': anno.get('class_id'),
-            'filename': anno.get('filename')
+            'coord_pos': coord_pos
         }
+
 
 
 class GlobalClusterController(QObject):
@@ -237,8 +233,8 @@ class GlobalClusterController(QObject):
         self.is_saving = False
 
         # Initialize attributes before restoring project state
-        self.clusters = {}
-        self.cluster_labels = {}
+        self.clusters: Dict[int, List[Annotation]] = {}
+        self.cluster_labels: Dict[int, str] = {}
 
         self.crops_per_cluster = 100
         self.debounce_timer = QTimer()
@@ -265,8 +261,8 @@ class GlobalClusterController(QObject):
         self.autosave_timer.start()
 
         # Initialize threads to None
-        self.image_thread = None
-        self.worker = None
+        self.image_thread: Optional[QThread] = None
+        self.worker: Optional[ClusteringWorker] = None
 
         # Now, attempt to load the last autosave
         latest_autosave_file = self.get_latest_autosave_file()
@@ -305,7 +301,7 @@ class GlobalClusterController(QObject):
         self.view.save_project_state_requested.connect(self.on_save_project_state)
         self.view.export_annotations_requested.connect(self.on_export_annotations)
         self.view.load_project_state_requested.connect(self.on_load_project_state)
-        self.view.restore_autosave_requested.connect(self.on_restore_autosave_requested)  # <-- Add this line
+        self.view.restore_autosave_requested.connect(self.on_restore_autosave_requested)
 
         self.clustering_progress.connect(self.view.update_progress)
         self.clusters_ready.connect(self.on_clusters_ready)
@@ -334,7 +330,7 @@ class GlobalClusterController(QObject):
         self.clustering_worker.start()  # Starts the worker
 
     @pyqtSlot(dict)
-    def on_clusters_ready(self, clusters: Dict[int, List[Dict]]):
+    def on_clusters_ready(self, clusters: Dict[int, List[Annotation]]):
         """
         Handles the completion of the clustering process.
         """
@@ -343,8 +339,9 @@ class GlobalClusterController(QObject):
 
         # Prepare cluster_info dict
         cluster_info = self.generate_cluster_info()
-        # Sort clusters by number of images in descending order
-        sorted_cluster_info = dict(sorted(cluster_info.items(), key=lambda item: item[1]['num_images'], reverse=True))
+        # Sort clusters by number of annotations in descending order
+        sorted_cluster_info = dict(
+            sorted(cluster_info.items(), key=lambda item: item[1]['num_annotations'], reverse=True))
         # Get the first cluster ID to display
         first_cluster_id = list(sorted_cluster_info.keys())[0] if sorted_cluster_info else None
         # Populate the cluster selection ComboBox
@@ -353,23 +350,39 @@ class GlobalClusterController(QObject):
             self.display_crops(cluster_id=first_cluster_id)
         self.view.hide_progress_bar()
 
-    @pyqtSlot(dict)
-    def on_clustering_finished(self, clusters: dict):
-        self.clusters_ready.emit(clusters)
-        logging.info(f"Clustering finished with {len(clusters)} clusters.")
+    @pyqtSlot(list)
+    def on_clustering_finished(self, annotations: list):
+        """
+        Organizes annotations by cluster_id and stores them in self.clusters.
+        """
+        self.clusters = {}
 
-    def generate_cluster_info(self):
+        # Group annotations by cluster_id
+        for annotation in annotations:
+            if not isinstance(annotation, Annotation):
+                annotation = Annotation.from_dict(annotation)  # Ensure conversion to Annotation instance
+            cluster_id = annotation.cluster_id
+
+            if cluster_id not in self.clusters:
+                self.clusters[cluster_id] = []
+
+            self.clusters[cluster_id].append(annotation)
+
+        logging.info(f"Clustering finished with {len(self.clusters)} clusters.")
+        self.clusters_ready.emit(self.clusters)
+
+    def generate_cluster_info(self) -> Dict[int, dict]:
         """
         Generates a dictionary containing cluster information for populating the GUI's cluster selection.
         """
         cluster_info = {}
         for cluster_id, annotations in self.clusters.items():
-            image_indices = set(anno['filename'] for anno in annotations)
+            image_filenames = set(anno.filename for anno in annotations)
             num_annotations = len(annotations)
-            num_images = len(image_indices)
+            num_images = len(image_filenames)
 
             # Count labeled annotations (class_id != -1)
-            num_labeled = sum(1 for anno in annotations if anno.get('class_id', -1) != -1)
+            num_labeled = sum(1 for anno in annotations if anno.class_id != -1)
             labeled_percentage = (num_labeled / num_annotations) * 100 if num_annotations > 0 else 0
 
             cluster_info[cluster_id] = {
@@ -380,8 +393,109 @@ class GlobalClusterController(QObject):
             }
         return cluster_info
 
+    @pyqtSlot(int)
+    def on_sample_cluster(self, cluster_id: int):
+        """
+        Handles requests to display crops from a specific cluster.
+        """
+        logging.info(f"Sampling crops from cluster {cluster_id}.")
+        self.display_crops(cluster_id)
+
+    def display_crops(self, cluster_id: int):
+        """
+        Selects the top 'n' annotations from a single cluster to display as zoomed-in crops.
+        """
+        cluster_id = int(cluster_id)
+        if cluster_id not in self.clusters:
+            logging.warning(f"Cluster ID {cluster_id} does not exist.")
+            self.view.display_sampled_crops([])
+            return
+
+        annotations = self.clusters[cluster_id]
+        if not annotations:
+            logging.warning(f"No annotations found in cluster {cluster_id}.")
+            self.view.display_sampled_crops([])
+            return
+
+        # Select the top 'n' annotations within the cluster
+        num_samples = min(self.crops_per_cluster, len(annotations))
+        selected = annotations[:num_samples]
+        logging.debug(f"Selected top {len(selected)} annotations from cluster {cluster_id}.")
+
+        # Pass the Annotation instances directly
+        processed_annotations = selected  # This is now a list of Annotation instances
+
+        # Initialize ImageProcessingWorker
+        self.image_worker = ImageProcessingWorker(
+            sampled_annotations=processed_annotations,
+            model=self.model,
+            image_processor=self.image_processor
+        )
+
+        # Image worker setup (one-off task)
+        self.image_thread = QThread()
+        self.image_worker.moveToThread(self.image_thread)
+        self.image_thread.started.connect(self.image_worker.process_images)
+        self.image_worker.processing_finished.connect(self.on_image_processing_finished)
+        self.image_worker.processing_finished.connect(self.image_thread.quit)
+        self.image_worker.processing_finished.connect(self.image_worker.deleteLater)
+        self.image_thread.finished.connect(self.image_thread.deleteLater)
+        self.image_thread.start()
+
+    @pyqtSlot(list)
+    def on_image_processing_finished(self, processed_annotations: List[dict]):
+        """
+        Handles the processed crops from the ImageProcessingWorker.
+        """
+        logging.info(f"Received {len(processed_annotations)} processed crops from worker.")
+        sampled_crops = []
+        for data in processed_annotations:
+            annotation = data['annotation']
+            processed_crop = data['processed_crop']
+            coord_pos = data['coord_pos']
+            if processed_crop is None or coord_pos is None:
+                logging.warning(f"Processed crop or coord_pos is None for annotation: {annotation}")
+                continue
+            q_image = self.image_processor.numpy_to_qimage(processed_crop)
+            q_image = self.draw_annotation_on_image(q_image, coord_pos)
+            q_pixmap = QPixmap.fromImage(q_image)
+            sampled_crops.append({
+                'annotation': annotation,
+                'processed_crop': q_pixmap,
+                'coord_pos': coord_pos
+            })
+        self.view.display_sampled_crops(sampled_crops)
+        logging.info(f"Displayed {len(sampled_crops)} sampled crops.")
+
+    def draw_annotation_on_image(self, q_image: QImage, coord_pos: tuple) -> QImage:
+        """
+        Draws an annotation (circle) on the provided QImage at the specified position.
+        """
+        zoomed_qimage = q_image.copy()  # Make a copy to ensure data integrity
+        painter = QPainter(zoomed_qimage)
+        pen = QPen(QColor(0, 255, 0))  # Green color for the circle
+        pen.setWidth(5)  # Thickness of the circle outline
+        painter.setPen(pen)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        pos_x_zoomed, pos_y_zoomed = coord_pos
+
+        # Ensure the position is within the image bounds
+        pos_x_zoomed = min(max(pos_x_zoomed, 0), zoomed_qimage.width() - 1)
+        pos_y_zoomed = min(max(pos_y_zoomed, 0), zoomed_qimage.height() - 1)
+
+        # Define a radius for the circle
+        radius = max(8, min(zoomed_qimage.width(), zoomed_qimage.height()) // 40)
+
+        # Draw the unfilled circle
+        painter.drawEllipse(QPoint(int(pos_x_zoomed), int(pos_y_zoomed)), radius, radius)
+
+        painter.end()
+
+        return zoomed_qimage
+
     @pyqtSlot(object)
-    def on_class_selected_for_all(self, class_id):
+    def on_class_selected_for_all(self, class_id: Optional[int]):
         """
         Labels all visible crops with the selected class. If class_id is None, unlabel all visible crops.
         """
@@ -392,14 +506,14 @@ class GlobalClusterController(QObject):
 
         # Update the class_id for each visible crop
         for crop in self.view.selected_crops:
-            cluster_id = int(crop['cluster_id'])
-            image_index = int(crop['image_index'])
-            coord = tuple(crop['coord'])  # Ensure coord is a tuple
+            cluster_id = int(crop['annotation'].cluster_id)
+            image_index = int(crop['annotation'].image_index)
+            coord = tuple(crop['annotation'].coord)  # Ensure coord is a tuple
 
-            # Update the class_id for the corresponding annotation in self.clusters
-            for anno in self.clusters[cluster_id]:
-                if int(anno['image_index']) == image_index and tuple(anno['coord']) == coord:
-                    anno['class_id'] = class_id
+            # Update the class_id for the corresponding Annotation in self.clusters
+            for anno in self.clusters.get(cluster_id, []):
+                if anno.image_index == image_index and anno.coord == coord:
+                    anno.class_id = class_id if class_id is not None else -1
                     logging.debug(f"Annotation for image {image_index}, coord {coord} updated with class_id {class_id}")
                     break
 
@@ -407,7 +521,50 @@ class GlobalClusterController(QObject):
         self.view.label_all_visible_crops(class_id)
 
     @pyqtSlot(int, int)
-    def on_selection_parameters_changed(self, _, crops_per_cluster: int):
+    def on_class_selected(self, cluster_id: int, class_id: int):
+        """
+        Handles the event when a class is selected for a cluster.
+        Assigns the class label to every sample in the current view for the selected cluster.
+        """
+        logging.info(f"Class {class_id} selected for all samples in cluster {cluster_id}.")
+        annotations = self.clusters.get(cluster_id, [])
+        for anno in annotations:
+            anno.class_id = class_id
+            logging.debug(f"Annotation for image {anno.image_index} updated with class_id {class_id}")
+
+        # Refresh the view to show updated labels
+        self.display_crops(cluster_id)
+
+    @pyqtSlot(dict, int)
+    def on_crop_label_changed(self, crop_data: dict, class_id: int):
+        """
+        Handles when a class label is set for an individual crop.
+        """
+        if not isinstance(class_id, int):
+            logging.error(f"class_id is not an integer. Received: {type(class_id)}")
+            return
+
+        cluster_id = int(crop_data['cluster_id'])
+        image_index = int(crop_data['image_index'])
+        coord = tuple(crop_data['coord'])  # Ensure coord is a tuple
+
+        # Update the class_id for the corresponding Annotation instance
+        for anno in self.clusters.get(cluster_id, []):
+            if anno.image_index == image_index and anno.coord == coord:
+                anno.class_id = class_id
+                label_action = "unlabeled" if class_id == -1 else "labeled"
+                logging.debug(
+                    f"Annotation for image {image_index}, coord {coord} {label_action} with class_id {class_id}")
+                break
+        else:
+            logging.warning(f"Annotation for image {image_index}, coord {coord} not found in cluster {cluster_id}")
+
+        # Refresh the cluster info and UI
+        cluster_info = self.generate_cluster_info()
+        self.view.populate_cluster_selection(cluster_info, selected_cluster_id=cluster_id)
+
+    @pyqtSlot(int, int)
+    def on_selection_parameters_changed(self, cluster_id: int, crops_per_cluster: int):
         """
         Handles changes in selection parameters (number of crops per cluster).
         Implements debouncing to prevent excessive sampling.
@@ -424,29 +581,18 @@ class GlobalClusterController(QObject):
         """
         Exports the labeled annotations in a final format for downstream use.
         """
-        grouped_annotations = {}
+        grouped_annotations: Dict[str, List[dict]] = {}
         annotations_without_class = False
 
         for cluster_id, annotations in self.clusters.items():
             for anno in annotations:
-                if anno.get('class_id') is not None:  # Include only labeled samples
-                    filename = anno['filename']
-                    coord = anno['coord']
-                    class_id = int(anno['class_id'])  # Ensure native Python int
-                    cluster_id_int = int(cluster_id)
-
-                    # Convert coordinates to float
-                    coord = [float(c) for c in coord]
-
+                if anno.class_id is not None and anno.class_id != -1:
                     annotation_data = {
-                        'coord': coord,
-                        'class_id': class_id,
-                        'cluster_id': cluster_id_int
+                        'coord': list(anno.coord),
+                        'class_id': anno.class_id,
+                        'cluster_id': cluster_id
                     }
-
-                    if filename not in grouped_annotations:
-                        grouped_annotations[filename] = []
-                    grouped_annotations[filename].append(annotation_data)
+                    grouped_annotations.setdefault(anno.filename, []).append(annotation_data)
                 else:
                     annotations_without_class = True
 
@@ -483,21 +629,7 @@ class GlobalClusterController(QObject):
         else:
             logging.debug("Export annotations action was canceled.")
 
-    @pyqtSlot()
-    def on_save_project_state(self):
-        """
-        Manually saves the current project state when the user clicks the 'Save Project' button.
-        """
-        options = QFileDialog.Options()
-        project_file, _ = QFileDialog.getSaveFileName(
-            self.view, "Save Project State", "", "JSON Files (*.json);;All Files (*)", options=options
-        )
-        if project_file:
-            self.save_project_state(project_file)
-        else:
-            logging.debug("Save project state action was canceled.")
-
-    def save_project_state(self, project_file_path=None, show_popup=True):
+    def save_project_state(self, project_file_path: Optional[str] = None, show_popup: bool = True):
         """
         Saves the current project state, including in-progress annotations and settings.
         The `show_popup` parameter controls whether a success message is displayed.
@@ -517,7 +649,7 @@ class GlobalClusterController(QObject):
             logging.error(f"Failed to save project state: {e}")
             QMessageBox.critical(self.view, "Error", f"Failed to save project state: {e}")
 
-    def get_current_state(self):
+    def get_current_state(self) -> dict:
         """
         Extracts the current project state, organizing clusters and annotations in a dictionary format.
         """
@@ -525,26 +657,12 @@ class GlobalClusterController(QObject):
 
         for cluster_id, annotations in self.clusters.items():
             for anno in annotations:
-                filename = anno['filename']
-                coord = [float(c) for c in anno['coord']]
-                class_id = int(anno.get('class_id')) if anno.get('class_id') is not None else None
-                image_index = int(anno['image_index'])
-                cluster_id_int = int(cluster_id)
-
-                annotation_data = {
-                    'coord': coord,
-                    'class_id': class_id,
-                    'cluster_id': cluster_id_int,
-                    'image_index': image_index
-                }
-
-                if filename not in project_state:
-                    project_state[filename] = []
-                project_state[filename].append(annotation_data)
+                annotation_data = anno.to_dict()
+                project_state.setdefault(anno.filename, []).append(annotation_data)
 
         return project_state
 
-    def get_versioned_backup_path(self, base_path, max_backups=5):
+    def get_versioned_backup_path(self, base_path: str, max_backups: int = 5) -> str:
         """
         Generates a versioned backup path by adding a timestamp.
         Deletes older backups if they exceed max_backups.
@@ -564,7 +682,7 @@ class GlobalClusterController(QObject):
 
         return backup_path
 
-    def get_latest_autosave_file(self):
+    def get_latest_autosave_file(self) -> Optional[str]:
         """
         Finds the most recent autosave file in the TEMP_DIR.
         """
@@ -577,7 +695,7 @@ class GlobalClusterController(QObject):
         latest_autosave = autosave_files[0]
         return os.path.join(TEMP_DIR, latest_autosave)
 
-    def get_autosave_files(self):
+    def get_autosave_files(self) -> List[str]:
         """
         Returns a list of available autosave files in TEMP_DIR.
         """
@@ -590,6 +708,81 @@ class GlobalClusterController(QObject):
         # Return full paths
         autosave_files_full = [os.path.join(TEMP_DIR, f) for f in autosave_files]
         return autosave_files_full
+
+    def handle_sampling_parameters_changed(self):
+        """
+        Handles the sampling parameters after debouncing.
+        This method is called when the debounce timer times out, indicating that
+        the user has finished adjusting sampling parameters such as the number of crops per cluster.
+        It refreshes the displayed crops based on the updated parameters.
+        """
+        logging.info("Handling debounced sampling parameter changes.")
+
+        # Retrieve the currently selected cluster ID from the view
+        selected_cluster_id = self.view.get_selected_cluster_id()
+
+        if selected_cluster_id is not None:
+            # If a cluster is selected, update the displayed crops based on the new sampling parameters
+            logging.debug(f"Selected cluster ID: {selected_cluster_id}. Refreshing displayed crops.")
+            self.display_crops(selected_cluster_id)
+        else:
+            # If no cluster is selected, clear the displayed crops
+            logging.warning("No cluster is currently selected. Clearing displayed crops.")
+            self.view.display_sampled_crops([])
+
+    @pyqtSlot()
+    def on_export_annotations(self):
+        """
+        Handles exporting labeled annotations to a JSON file.
+        """
+        grouped_annotations: Dict[str, List[dict]] = {}
+        annotations_without_class = False
+
+        # Organize annotations by filename
+        for cluster_id, annotations in self.clusters.items():
+            for anno in annotations:
+                if anno.class_id is not None and anno.class_id != -1:
+                    annotation_data = {
+                        'coord': list(anno.coord),
+                        'class_id': anno.class_id,
+                        'cluster_id': cluster_id
+                    }
+                    grouped_annotations.setdefault(anno.filename, []).append(annotation_data)
+                else:
+                    annotations_without_class = True
+
+        if annotations_without_class:
+            reply = QMessageBox.question(
+                self.view,
+                "Annotations Without Class Labels",
+                "Some annotations do not have class labels assigned. Do you want to proceed with exporting?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            if reply == QMessageBox.No:
+                logging.info("User canceled exporting due to missing class labels.")
+                return
+
+        if not grouped_annotations:
+            QMessageBox.warning(self.view, "No Annotations", "There are no annotations to export.")
+            return
+
+        # Prompt user to select the export location
+        options = QFileDialog.Options()
+        export_file, _ = QFileDialog.getSaveFileName(
+            self.view, "Export Annotations", "", "JSON Files (*.json);;All Files (*)", options=options
+        )
+        if export_file:
+            try:
+                with open(export_file, 'w') as f:
+                    json.dump(grouped_annotations, f, indent=4)
+                logging.info(f"Annotations exported to {export_file}")
+                QMessageBox.information(self.view, "Export Successful", f"Annotations exported to {export_file}")
+            except Exception as e:
+                logging.error(f"Error exporting annotations: {e}")
+                QMessageBox.critical(self.view, "Error", f"Failed to export annotations: {e}")
+        else:
+            logging.debug("Export annotations action was canceled.")
 
     def autosave_project_state(self):
         """
@@ -613,6 +806,75 @@ class GlobalClusterController(QObject):
 
         # Send save request to worker
         self.autosave_worker.save_project_state_signal.emit(project_state, versioned_backup_path)
+
+    @pyqtSlot(bool)
+    def on_autosave_finished(self, success: bool):
+        """
+        Handles completion of the autosave operation.
+        """
+        if success:
+            logging.info("Autosave completed successfully.")
+        else:
+            logging.error("Autosave failed.")
+
+        self.is_saving = False  # Reset the saving flag
+
+    @pyqtSlot(str)
+    def on_load_project_state(self, project_file: str):
+        """
+        Loads the project state from a saved file to resume the session.
+        """
+        self.load_project_state(project_file)
+
+    @pyqtSlot()
+    def on_save_project_state(self):
+        """
+        Prompts the user to save the current project state to a file.
+        """
+        options = QFileDialog.Options()
+        project_file, _ = QFileDialog.getSaveFileName(
+            self.view, "Save Project State", "", "JSON Files (*.json);;All Files (*)", options=options
+        )
+        if project_file:
+            self.save_project_state(project_file)
+        else:
+            logging.debug("Save project state action was canceled.")
+
+    def load_project_state(self, project_file: str):
+        """
+        Loads the project state from a saved file to resume the session.
+        """
+        if not os.path.exists(project_file):
+            logging.info(f"No project file found at {project_file} to load.")
+            QMessageBox.warning(self.view, "Load Project", f"No project file found at {project_file}.")
+            return
+
+        try:
+            with open(project_file, 'r') as f:
+                project_state = json.load(f)
+
+            self.clusters = {}
+            for filename, annotations in project_state.items():
+                for annotation_data in annotations:
+                    anno = Annotation.from_dict(annotation_data)
+                    self.clusters.setdefault(anno.cluster_id, []).append(anno)
+
+            logging.info(f"Project state loaded from {project_file}")
+
+            # Update the GUI
+            cluster_info = self.generate_cluster_info()
+            self.view.populate_cluster_selection(cluster_info, selected_cluster_id=None)
+            # Automatically display the crops of the first cluster if available
+            first_cluster_id = next(iter(self.clusters), None)
+            if first_cluster_id is not None:
+                self.display_crops(cluster_id=first_cluster_id)
+            self.view.hide_progress_bar()
+
+            QMessageBox.information(self.view, "Project Loaded", f"Project state loaded from {project_file}")
+
+        except (IOError, json.JSONDecodeError, KeyError, ValueError) as e:
+            logging.error(f"Failed to load project state from {project_file}: {e}")
+            QMessageBox.critical(self.view, "Error", f"Failed to load project state: {e}")
 
     @pyqtSlot()
     def on_restore_autosave_requested(self):
@@ -640,237 +902,3 @@ class GlobalClusterController(QObject):
             self.load_project_state(autosave_file)
         else:
             logging.info("User canceled the restore autosave action.")
-
-    @pyqtSlot(bool)
-    def on_autosave_finished(self, success):
-        """
-        Handles completion of the autosave operation.
-        """
-        if success:
-            logging.info("Autosave completed successfully.")
-        else:
-            logging.error("Autosave failed.")
-
-        self.is_saving = False  # Reset the saving flag
-
-    @pyqtSlot(str)
-    def on_load_project_state(self, project_file):
-        """
-        Loads the project state from a saved file to resume the session.
-        """
-        self.load_project_state(project_file)
-
-    def load_project_state(self, project_file):
-        """
-        Loads the project state from a saved file to resume the session.
-        """
-        if not os.path.exists(project_file):
-            logging.info(f"No project file found at {project_file} to load.")
-            return
-
-        try:
-            with open(project_file, 'r') as f:
-                project_state = json.load(f)
-
-            self.clusters = {}
-            for filename, annotations in project_state.items():
-                for annotation in annotations:
-                    coord = annotation['coord']
-                    class_id = annotation.get('class_id')
-                    cluster_id = int(annotation['cluster_id'])
-                    image_index = int(annotation['image_index'])
-
-                    if cluster_id not in self.clusters:
-                        self.clusters[cluster_id] = []
-                    self.clusters[cluster_id].append({
-                        'filename': filename,
-                        'coord': coord,
-                        'class_id': class_id,
-                        'image_index': image_index,
-                        'cluster_id': cluster_id
-                    })
-
-            logging.info(f"Project state loaded from {project_file}")
-
-            # Update the GUI
-            self.view.populate_cluster_selection(self.generate_cluster_info(), selected_cluster_id=None)
-            # Automatically display the crops of the first cluster if available
-            first_cluster_id = next(iter(self.clusters), None)
-            if first_cluster_id is not None:
-                self.display_crops(cluster_id=first_cluster_id)
-
-            QMessageBox.information(self.view, "Project Loaded", f"Project state loaded from {project_file}")
-
-        except (IOError, json.JSONDecodeError, KeyError, ValueError) as e:
-            logging.error(f"Failed to load project state from {project_file}: {e}")
-            QMessageBox.critical(self.view, "Error", f"Failed to load project state: {e}")
-
-    @pyqtSlot()
-    def on_export_annotations(self):
-        """
-        Handles the action of exporting annotations when the user clicks the 'Export Annotations' button.
-        """
-        self.export_annotations()
-
-    @pyqtSlot(int, int)
-    def on_class_selected(self, cluster_id, class_id):
-        """
-        Handles the event when a class is selected for a cluster.
-        Assigns the class label to every sample in the current view for the selected cluster.
-        """
-        logging.info(f"Class {class_id} selected for all samples in view for cluster {cluster_id}.")
-
-        # Update the class label for each annotation in view (current cluster)
-        cluster_id = int(cluster_id)
-        annotations = self.clusters.get(cluster_id, [])
-        for anno in annotations:
-            # Assign the class to all samples in the view
-            anno['class_id'] = class_id
-            logging.debug(f"Annotation for image {anno['image_index']} updated with class_id {class_id}")
-
-        # Refresh the view to show updated labels
-        self.display_crops(cluster_id)
-
-    @pyqtSlot(dict, int)
-    def on_crop_label_changed(self, crop_data, class_id):
-        if not isinstance(class_id, int):
-            logging.error("class_id is not an integer. Received:", type(class_id))
-
-        cluster_id = int(crop_data['cluster_id'])
-        image_index = int(crop_data['image_index'])
-        coord = tuple(crop_data['coord'])  # Ensure coord is a tuple
-
-        # Update the class_id for the corresponding annotation in self.clusters
-        for anno in self.clusters[cluster_id]:
-            if int(anno['image_index']) == image_index and tuple(anno['coord']) == coord:
-                anno['class_id'] = class_id
-                label_action = "unlabeled" if class_id is None else "labeled"
-                logging.debug(
-                    f"Annotation for image {image_index}, coord {coord} {label_action} with class_id {class_id}")
-                break
-        else:
-            logging.warning(f"Annotation for image {image_index}, coord {coord} not found in cluster {cluster_id}")
-
-        # Refresh the cluster info and UI
-        cluster_info = self.generate_cluster_info()
-        self.view.populate_cluster_selection(cluster_info, selected_cluster_id=cluster_id)
-
-    @pyqtSlot()
-    def handle_sampling_parameters_changed(self):
-        """
-        Handles the sampling parameters after debouncing.
-        """
-        logging.info("Handling debounced sampling parameter changes.")
-        # Assuming there's a currently selected cluster
-        selected_cluster_id = self.view.get_selected_cluster_id()
-        if selected_cluster_id is not None:
-            self.display_crops(selected_cluster_id)
-        else:
-            logging.warning("No cluster is currently selected.")
-            self.view.display_sampled_crops([])
-
-    def display_crops(self, cluster_id: int):
-        """
-        Selects the top 'n' annotations from a single cluster to display as zoomed-in crops.
-        """
-        cluster_id = int(cluster_id)
-        if cluster_id not in self.clusters:
-            logging.warning(f"Cluster ID {cluster_id} does not exist.")
-            self.view.display_sampled_crops([])
-            return
-
-        annotations = self.clusters[cluster_id]
-        if not annotations:
-            logging.warning(f"No annotations found in cluster {cluster_id}.")
-            self.view.display_sampled_crops([])
-            return
-
-        # Select the top 'n' annotations within the cluster
-        num_samples = min(self.crops_per_cluster, len(annotations))
-        selected = annotations[:num_samples]
-        logging.debug(f"Selected top {len(selected)} annotations from cluster {cluster_id}.")
-
-        processed_annotations = []
-        for anno in selected:
-            processed_annotations.append({
-                'cluster_id': cluster_id,
-                'image_index': anno['image_index'],
-                'coord': anno['coord'],
-                'class_id': anno.get('class_id'),  # Ensure class_id is included when displaying
-                'filename': anno['filename']
-            })
-
-        self.image_worker = ImageProcessingWorker(
-            sampled_annotations=processed_annotations,
-            model=self.model,
-            image_processor=self.image_processor
-        )
-
-        # Image worker setup (one-off task)
-        self.image_thread = QThread()
-        self.image_worker.moveToThread(self.image_thread)
-        self.image_thread.started.connect(self.image_worker.process_images)
-        self.image_worker.processing_finished.connect(self.on_image_processing_finished)
-        self.image_worker.processing_finished.connect(self.image_thread.quit)
-        self.image_worker.processing_finished.connect(self.image_worker.deleteLater)
-        self.image_thread.finished.connect(self.image_thread.deleteLater)
-        self.image_thread.start()
-
-    def on_image_thread_finished(self):
-        """
-        Handles the image thread finishing.
-        """
-        logging.info("Image processing thread finished.")
-        self.image_thread.quit()
-        self.image_thread.wait()
-        self.image_thread = None
-
-    @pyqtSlot(list)
-    def on_image_processing_finished(self, processed_annotations):
-        logging.info(f"Received {len(processed_annotations)} processed crops from worker.")
-        sampled_crops = []
-        for data in processed_annotations:
-            processed_crop = data['processed_crop']
-            coord_pos = data['coord_pos']
-            q_image = self.image_processor.numpy_to_qimage(processed_crop)
-            q_image = self.draw_annotation_on_image(q_image, coord_pos)
-            q_pixmap = QPixmap.fromImage(q_image)
-            data['crop'] = q_pixmap  # Update the data with the QPixmap
-            sampled_crops.append(data)
-        self.view.display_sampled_crops(sampled_crops)
-        logging.info(f"Displayed {len(sampled_crops)} sampled crops.")
-
-    def draw_annotation_on_image(self, q_image: QImage, coord_pos: Tuple[int, int]) -> QImage:
-        """
-        Draws an annotation (circle) on the provided QImage at the specified position.
-        """
-        zoomed_qimage = q_image.copy()  # Make a copy to ensure data integrity
-        painter = QPainter(zoomed_qimage)
-        pen = QPen(QColor(0, 255, 0))  # Green color for the circle
-        pen.setWidth(5)  # Thickness of the circle outline
-        painter.setPen(pen)
-        painter.setRenderHint(QPainter.Antialiasing)
-
-        pos_x_zoomed, pos_y_zoomed = coord_pos
-
-        # Ensure the position is within the image bounds
-        pos_x_zoomed = min(max(pos_x_zoomed, 0), zoomed_qimage.width() - 1)
-        pos_y_zoomed = min(max(pos_y_zoomed, 0), zoomed_qimage.height() - 1)
-
-        # Define a radius for the circle
-        radius = max(8, min(zoomed_qimage.width(), zoomed_qimage.height()) // 40)
-
-        # Draw the unfilled circle
-        painter.drawEllipse(QPoint(int(pos_x_zoomed), int(pos_y_zoomed)), radius, radius)
-
-        painter.end()
-
-        return zoomed_qimage
-
-    @pyqtSlot(int)
-    def on_sample_cluster(self, cluster_id: int):
-        """
-        Handles requests to display crops from a specific cluster.
-        """
-        logging.info(f"Sampling crops from cluster {cluster_id}.")
-        self.display_crops(cluster_id)
