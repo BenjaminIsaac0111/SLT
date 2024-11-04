@@ -1,14 +1,14 @@
 # models/image_data_model.py
+
 import logging
-import threading
 from typing import Dict, Any, List, Optional, Tuple
 
 import h5py
 import numpy as np
-from PyQt5.QtCore import QObject, pyqtSignal, Qt
+from PyQt5.QtCore import QObject
 from PyQt5.QtGui import QPixmap, QImage
 
-from GUI.models.CacheManager import CacheManager  # Import the CacheManager
+from GUI.models.CacheManager import CacheManager
 
 
 class ImageDataModel(QObject):
@@ -17,40 +17,34 @@ class ImageDataModel(QObject):
     from an HDF5 file.
     """
 
-    # Singleton instance and lock
+    # Singleton instance
     _instance = None
-    _instance_lock = threading.Lock()
-
-    # Signal to emit pixmap when ready for GUI thread
-    pixmap_ready = pyqtSignal(QPixmap)
 
     def __new__(cls, hdf5_file_path: Optional[str] = None):
-        with cls._instance_lock:
-            if cls._instance is None:
-                if hdf5_file_path is None:
-                    raise ValueError("Must provide hdf5_file_path for the first initialization.")
-                cls._instance = super(ImageDataModel, cls).__new__(cls)
-                cls._instance._initialized = False
+        if cls._instance is None:
+            if hdf5_file_path is None:
+                raise ValueError("Must provide hdf5_file_path for the first initialization.")
+            cls._instance = super(ImageDataModel, cls).__new__(cls)
+            cls._instance._initialized = False
         return cls._instance
 
     def __init__(self, hdf5_file_path: Optional[str] = None):
-        with self._instance_lock:
-            if not self._initialized:
-                self._hdf5_file_path = hdf5_file_path
-                self._hdf5_file: Optional[h5py.File] = None
-                self._images = None
-                self._logits = None
-                self._epistemic_uncertainties = None
-                self._aleatoric_uncertainties = None
-                self._filenames = []
-                self._data_lock = threading.Lock()
-                self.cache = CacheManager(cache_size=256)  # Use CacheManager instead of OrderedDict
-                self._current_pixmap: Optional[QPixmap] = None
-                self._initialized = True
-                logging.info("ImageDataModel initialized.")
+        super().__init__()
+        if not self._initialized:
+            self._hdf5_file_path = hdf5_file_path
+            self._hdf5_file: Optional[h5py.File] = None
+            self._images = None
+            self._logits = None
+            self._epistemic_uncertainties = None
+            self._aleatoric_uncertainties = None
+            self._filenames = []
+            self.cache = CacheManager()
+            self._current_pixmap: Optional[QPixmap] = None
+            self._initialized = True
+            logging.info("ImageDataModel initialized.")
 
     def _load_hdf5_file(self):
-        """Opens the HDF5 file if not already open, with SWMR mode for thread-safe access."""
+        """Opens the HDF5 file if not already open."""
         if self._hdf5_file is None:
             try:
                 self._hdf5_file = h5py.File(
@@ -58,8 +52,6 @@ class ImageDataModel(QObject):
                     'r',
                     libver='latest',
                     swmr=True,
-                    rdcc_nbytes=1024 ** 3,  # 1GB chunk cache
-                    rdcc_w0=0.75
                 )
                 logging.info("HDF5 file opened successfully.")
             except Exception as e:
@@ -68,18 +60,17 @@ class ImageDataModel(QObject):
 
     def _load_datasets(self):
         """Loads datasets from HDF5 file if not already loaded."""
-        with self._data_lock:
-            if self._images is None:
-                try:
-                    self._images = self._hdf5_file['rgb_images']
-                    self._logits = self._hdf5_file['logits']
-                    self._epistemic_uncertainties = self._hdf5_file['epistemic_uncertainty']
-                    self._aleatoric_uncertainties = self._hdf5_file['aleatoric_uncertainty']
-                    self._filenames = list(self._hdf5_file['filenames'].asstr())
-                    logging.info("Datasets loaded successfully.")
-                except KeyError as e:
-                    logging.error(f"Missing dataset in HDF5 file: {e}")
-                    raise
+        if self._images is None:
+            try:
+                self._images = self._hdf5_file['rgb_images']
+                self._logits = self._hdf5_file['logits']
+                self._epistemic_uncertainties = self._hdf5_file['epistemic_uncertainty']
+                self._aleatoric_uncertainties = self._hdf5_file['aleatoric_uncertainty']
+                self._filenames = list(self._hdf5_file['filenames'].asstr())
+                logging.info("Datasets loaded successfully.")
+            except KeyError as e:
+                logging.error(f"Missing dataset in HDF5 file: {e}")
+                raise
 
     def get_image_data(self, index: int) -> Dict[str, Any]:
         """Fetches image data, using CacheManager to minimize I/O."""
@@ -93,20 +84,19 @@ class ImageDataModel(QObject):
         # Cache access using CacheManager
         cached_data = self.cache.get(index)
         if cached_data is not None:
+            logging.debug(f"Data for index {index} retrieved from cache.")
             return cached_data
 
         # Data retrieval and caching
-        with self._data_lock:
-            data = {
-                'image': self._images[index],
-                'logits': self._logits[index],
-                'uncertainty': self._epistemic_uncertainties[index] - self._aleatoric_uncertainties[index][
-                    ..., np.newaxis],
-                'filename': self._filenames[index]
-            }
-            # Store data in cache
-            self.cache.set(index, data)
-            logging.debug(f"Data for index {index} cached.")
+        data = {
+            'image': self._images[index],
+            'logits': self._logits[index],
+            'uncertainty': self._epistemic_uncertainties[index] - self._aleatoric_uncertainties[index][..., np.newaxis],
+            'filename': self._filenames[index]
+        }
+        # Store data in cache
+        self.cache.set(index, data)
+        logging.debug(f"Data for index {index} cached.")
         return data
 
     def create_zoomed_crop(
@@ -143,21 +133,6 @@ class ImageDataModel(QObject):
         logging.debug("Zoomed crop created successfully.")
         return zoomed_pixmap, x_start, y_start
 
-    def get_pixmap_by_index(self, index: int):
-        """Fetches a QPixmap for the given index and emits it to the main thread."""
-        data = self.get_image_data(index)
-        image_array = data['image']
-
-        if image_array.dtype != np.uint8:
-            image_array = (image_array * 255).astype(np.uint8)
-
-        height, width, channels = image_array.shape
-        q_image = QImage(image_array.copy(), width, height, QImage.Format_RGB888)
-        pixmap = QPixmap.fromImage(q_image)
-
-        self.pixmap_ready.emit(pixmap)
-        logging.debug("Pixmap emitted for index.")
-
     def get_filenames(self) -> List[str]:
         """Returns a copy of the filenames."""
         self._load_hdf5_file()
@@ -172,11 +147,10 @@ class ImageDataModel(QObject):
 
     def close(self):
         """Closes the HDF5 file."""
-        with self._data_lock:
-            if self._hdf5_file is not None:
-                self._hdf5_file.close()
-                self._hdf5_file = None
-                logging.info("HDF5 file closed.")
+        if self._hdf5_file is not None:
+            self._hdf5_file.close()
+            self._hdf5_file = None
+            logging.info("HDF5 file closed.")
 
     def __enter__(self):
         return self

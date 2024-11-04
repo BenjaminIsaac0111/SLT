@@ -37,16 +37,19 @@ class ClickablePixmapItem(QGraphicsObject):
     """
     class_label_changed = pyqtSignal(dict, int)  # Emits (annotation_dict, class_id)
 
-    def __init__(self, annotation: Annotation, pixmap: QPixmap, text_item: Optional[QGraphicsTextItem] = None, *args,
-                 **kwargs):
+    def __init__(self, annotation: Annotation, pixmap: QPixmap, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.annotation = annotation
         self.pixmap = pixmap
-        self.text_item = text_item
         self.class_id = annotation.class_id
         self.setAcceptHoverEvents(True)
         self.hovered = False
         self.selected = False
+
+        # Create the text item as a child
+        self.text_item = QGraphicsTextItem(self)
+        self.text_item.setDefaultTextColor(Qt.black)
+        self.text_item.setFont(QFont("Arial", 12))  # Adjust font if needed
         self.update_text_label()
 
     def set_crop_class(self, class_id: int):
@@ -66,6 +69,8 @@ class ClickablePixmapItem(QGraphicsObject):
         if self.text_item is not None:
             label_text = CLASS_COMPONENTS.get(self.class_id, "Unlabelled") if self.class_id != -1 else "Unlabelled"
             self.text_item.setPlainText(label_text)
+            # Position the text above the image
+            self.text_item.setPos(0, -20)  # Adjust as needed
 
     def boundingRect(self):
         return QRectF(0, 0, self.pixmap.width(), self.pixmap.height())
@@ -288,30 +293,16 @@ class ClusteredCropsView(QWidget):
 
     def populate_cluster_selection(self, cluster_info: Dict[int, dict], selected_cluster_id: Optional[int] = None):
         """
-        Populates the cluster selection ComboBox with available cluster IDs and their info.
-        Displays the percentage of labeled data for each cluster.
-
-        :param cluster_info: A dictionary containing information about each cluster.
-        :param selected_cluster_id: The cluster ID to be selected initially.
+        Populates the cluster selection ComboBox with cluster IDs and info.
         """
-        self.cluster_combo.blockSignals(True)  # Prevent triggering selection signal during population
-        if selected_cluster_id is None:
-            selected_cluster_id = self.get_selected_cluster_id()
         self.cluster_combo.clear()
-
-        for cid, info in cluster_info.items():
-            num_annotations = info['num_annotations']
-            num_images = info['num_images']
-            labeled_percentage = info['labeled_percentage']
-            label = info.get('label', '')
-
-            if label:
-                display_text = (f"Cluster {cid} - '{label}' ({num_annotations} annotations, {labeled_percentage:.1f}% "
-                                f"labeled)")
-            else:
-                display_text = f"Cluster {cid} ({num_annotations} annotations, {labeled_percentage:.1f}% labeled)"
-
-            self.cluster_combo.addItem(display_text, cid)
+        for cluster_id, info in cluster_info.items():
+            display_text = f"Cluster {cluster_id} - {info['num_annotations']} annotations"
+            self.cluster_combo.addItem(display_text, cluster_id)
+        if selected_cluster_id is not None:
+            index = self.cluster_combo.findData(selected_cluster_id)
+            if index != -1:
+                self.cluster_combo.setCurrentIndex(index)
 
         # After populating, set the current index to the one matching selected_cluster_id
         index = self.cluster_combo.findData(selected_cluster_id)
@@ -374,18 +365,27 @@ class ClusteredCropsView(QWidget):
             annotation: Annotation = crop['annotation']
             annotation.class_id = class_id if class_id is not None else -1
 
-            # Find the corresponding ClickablePixmapItem and update its label
-            for item in self.scene.items():
-                if isinstance(item, ClickablePixmapItem) and item.annotation == annotation:
-                    item.set_crop_class(class_id if class_id is not None else -1)
+        # Re-arrange the crops to reflect the updated labels
+        self.arrange_crops()
 
     def get_selected_cluster_id(self) -> Optional[int]:
         """
-        Retrieves the currently selected cluster ID from the ComboBox.
-
-        :return: The selected cluster ID, or None if not found.
+        Returns the currently selected cluster ID.
         """
-        return self.cluster_combo.currentData()
+        index = self.cluster_combo.currentIndex()
+        if index != -1:
+            return int(self.cluster_combo.itemData(index))
+        return None
+
+    def get_cluster_id_list(self) -> List[int]:
+        """
+        Returns the list of cluster IDs in the order they appear in the dropdown.
+        """
+        cluster_id_list = []
+        for index in range(self.cluster_combo.count()):
+            cluster_id = int(self.cluster_combo.itemData(index))
+            cluster_id_list.append(cluster_id)
+        return cluster_id_list
 
     def display_sampled_crops(self, sampled_crops: List[dict]):
         """
@@ -465,22 +465,12 @@ class ClusteredCropsView(QWidget):
                 logging.warning(f"Invalid QPixmap for image index {annotation.image_index}. Skipping.")
                 continue
 
-            # Create a text item for the label name
-            label_text = CLASS_COMPONENTS.get(annotation.class_id,
-                                              "Unlabelled") if annotation.class_id != -1 else "Unlabelled"
-            text_item = QGraphicsTextItem(label_text)
-            text_item.setDefaultTextColor(Qt.black)
-            text_item.setFont(QFont("Arial", 12))  # Adjust font if needed
-
             # Create pixmap item with reference to the Annotation instance
-            pixmap_item = ClickablePixmapItem(annotation=annotation, pixmap=q_pixmap, text_item=text_item)
+            pixmap_item = ClickablePixmapItem(annotation=annotation, pixmap=q_pixmap)
             pixmap_item.setFlag(QGraphicsItem.ItemIsSelectable, True)
 
             # Connect the signals
             pixmap_item.class_label_changed.connect(self.crop_label_changed.emit)
-
-            # Position the text label above the crop
-            text_item.setPos(x_offset, y_offset - 20)  # 20 pixels above the crop
 
             # Position the crop image
             original_width = q_pixmap.width()
@@ -492,7 +482,6 @@ class ClusteredCropsView(QWidget):
 
             pixmap_item.setPos(x_offset, y_offset)
             self.scene.addItem(pixmap_item)
-            self.scene.addItem(text_item)
 
             x_offset += image_size + 20
             max_row_height = max(max_row_height, image_size)
@@ -502,7 +491,7 @@ class ClusteredCropsView(QWidget):
                 y_offset += max_row_height + 40  # Adjust for both crop and label height
                 max_row_height = 0
 
-        # Adjust the scene rect
+            # Adjust the scene rect
         self.scene.setSceneRect(self.scene.itemsBoundingRect())
 
     def on_crop_class_label_changed(self, annotation_dict: dict, class_id: int):

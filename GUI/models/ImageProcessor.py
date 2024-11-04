@@ -5,7 +5,9 @@ from typing import Tuple, Dict
 
 import numpy as np
 from PIL import Image
+from PyQt5.QtCore import QThread
 from PyQt5.QtGui import QImage, QPixmap
+from PyQt5.QtWidgets import QApplication
 from matplotlib import pyplot as plt
 from matplotlib.colors import Colormap
 
@@ -127,14 +129,14 @@ class ImageProcessor:
 
     def process_image_data(
             self, image_array: np.ndarray, logits: np.ndarray, uncertainty: np.ndarray
-    ) -> Dict[str, QPixmap]:
+    ) -> Dict[str, Image.Image]:
         """
-        Processes image data and returns a dictionary of processed images.
+        Processes image data and returns a dictionary of processed PIL Images.
 
         :param image_array: A numpy array of the original image.
         :param logits: A numpy array of logits.
         :param uncertainty: A numpy array of uncertainty values.
-        :return: A dictionary containing 'image', 'mask', 'overlay', 'heatmap' as QPixmaps.
+        :return: A dictionary containing 'image', 'mask', 'overlay', 'heatmap' as PIL Images.
         """
         image = Image.fromarray((image_array * 255).astype(np.uint8)).convert('RGB')
         mask = self.process_mask(logits)
@@ -143,10 +145,10 @@ class ImageProcessor:
         heatmap = self.create_heatmap(normalized_uncertainty)
         logging.info("Image data processed.")
         return {
-            'image': self.pil_image_to_qpixmap(image),
-            'mask': self.pil_image_to_qpixmap(mask),
-            'overlay': self.pil_image_to_qpixmap(overlay),
-            'heatmap': self.pil_image_to_qpixmap(heatmap)
+            'image': image,
+            'mask': mask,
+            'overlay': overlay,
+            'heatmap': heatmap
         }
 
     def _generate_cache_key(
@@ -161,7 +163,7 @@ class ImageProcessor:
         :param zoom_factor: Zoom factor for the crop.
         :return: A unique cache key as a string.
         """
-        # Use image data's hash (you can alternatively use image.tobytes() for larger data)
+        # Use image data's hash
         image_hash = hashlib.md5(image.tobytes()).hexdigest()
         # Create a key with image hash, coordinates, crop size, and zoom factor
         cache_key = f"{image_hash}_{coord[0]}_{coord[1]}_{crop_size}_{zoom_factor}"
@@ -241,59 +243,86 @@ class ImageProcessor:
 
         return result
 
-    def numpy_to_qimage(self, image: np.ndarray) -> QImage:
+    def numpy_to_pil_image(self, image: np.ndarray) -> Image.Image:
         """
-        Converts a numpy array to QImage.
+        Converts a NumPy array to a PIL Image.
 
         :param image: A numpy array representing the image.
-        :return: QImage object.
+        :return: PIL Image object.
         """
         if image.dtype != np.uint8:
             image = (255 * (image - image.min()) / (image.max() - image.min())).astype(np.uint8)
 
         if len(image.shape) == 2:
             # Grayscale
-            qimage = QImage(image.data, image.shape[1], image.shape[0], image.strides[0],
-                            QImage.Format_Grayscale8).copy()
+            pil_image = Image.fromarray(image, mode='L')
         elif image.shape[2] == 3:
             # RGB
-            qimage = QImage(image.data, image.shape[1], image.shape[0], image.strides[0],
-                            QImage.Format_RGB888).copy()
+            pil_image = Image.fromarray(image, mode='RGB')
         elif image.shape[2] == 4:
             # RGBA
-            qimage = QImage(image.data, image.shape[1], image.shape[0], image.strides[0],
-                            QImage.Format_RGBA8888).copy()
+            pil_image = Image.fromarray(image, mode='RGBA')
         else:
-            raise ValueError("Unsupported image format for conversion to QImage.")
-        return qimage
+            raise ValueError("Unsupported image format for conversion to PIL Image.")
+        return pil_image
 
     def pil_image_to_qpixmap(self, pil_image: Image.Image) -> QPixmap:
         """
         Converts a PIL Image to QPixmap.
+        This method should be called from the main GUI thread.
 
         :param pil_image: PIL Image to convert.
         :return: QPixmap representation of the image.
         """
-        try:
-            if pil_image.mode == "RGB":
-                r, g, b = pil_image.split()
-                image = Image.merge("RGB", (r, g, b))
-                data = image.tobytes("raw", "RGB")
-                qimage = QImage(data, image.width, image.height, QImage.Format_RGB888)
-            elif pil_image.mode == "RGBA":
-                r, g, b, a = pil_image.split()
-                image = Image.merge("RGBA", (r, g, b, a))
-                data = image.tobytes("raw", "RGBA")
-                qimage = QImage(data, image.width, image.height, QImage.Format_RGBA8888)
-            else:
-                # Convert to RGB if in a different mode
-                image = pil_image.convert("RGB")
-                data = image.tobytes("raw", "RGB")
-                qimage = QImage(data, image.width, image.height, QImage.Format_RGB888)
+        # Ensure this method is called from the main thread
+        if not QApplication.instance().thread() == QThread.currentThread():
+            raise RuntimeError("pil_image_to_qpixmap should be called from the main GUI thread.")
 
-            qpixmap = QPixmap.fromImage(qimage)
-            logging.debug("Converted PIL Image to QPixmap successfully.")
-            return qpixmap
-        except Exception as e:
-            logging.error(f"Failed to convert PIL Image to QPixmap: {e}")
-            raise e
+        # Convert PIL Image to QImage
+        data = pil_image.tobytes("raw", pil_image.mode)
+        qimage = QImage(data, pil_image.width, pil_image.height,
+                        QImage.Format_ARGB32 if pil_image.mode == 'RGBA' else QImage.Format_RGB888)
+        qpixmap = QPixmap.fromImage(qimage)
+        logging.debug("Converted PIL Image to QPixmap successfully.")
+        return qpixmap
+
+    def numpy_to_qimage(self, image: np.ndarray) -> QImage:
+        """
+        Converts a numpy array to QImage.
+        This method should be called from the main GUI thread.
+
+        :param image: A numpy array representing the image.
+        :return: QImage object.
+        """
+        # Ensure this method is called from the main thread
+        if not QApplication.instance().thread() == QThread.currentThread():
+            raise RuntimeError("numpy_to_qimage should be called from the main GUI thread.")
+
+        pil_image = self.numpy_to_pil_image(image)
+        return self.pil_image_to_qimage(pil_image)
+
+    def pil_image_to_qimage(self, pil_image: Image.Image) -> QImage:
+        """
+        Converts a PIL Image to QImage.
+        This method should be called from the main GUI thread.
+
+        :param pil_image: PIL Image to convert.
+        :return: QImage representation of the image.
+        """
+        # Ensure this method is called from the main thread
+        if not QApplication.instance().thread() == QThread.currentThread():
+            raise RuntimeError("pil_image_to_qimage should be called from the main GUI thread.")
+
+        data = pil_image.tobytes("raw", pil_image.mode)
+        if pil_image.mode == "RGB":
+            qimage = QImage(data, pil_image.width, pil_image.height, QImage.Format_RGB888)
+        elif pil_image.mode == "RGBA":
+            qimage = QImage(data, pil_image.width, pil_image.height, QImage.Format_RGBA8888)
+        elif pil_image.mode == "L":
+            qimage = QImage(data, pil_image.width, pil_image.height, QImage.Format_Grayscale8)
+        else:
+            # Convert to RGB if in a different mode
+            pil_image = pil_image.convert("RGB")
+            data = pil_image.tobytes("raw", "RGB")
+            qimage = QImage(data, pil_image.width, pil_image.height, QImage.Format_RGB888)
+        return qimage

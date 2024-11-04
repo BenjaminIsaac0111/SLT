@@ -20,10 +20,10 @@ class UncertaintyRegionSelector:
             filter_size: int = 32,
             aggregation_method: str = 'mean',
             gaussian_sigma: float = 3.0,
-            edge_buffer: int = 64,
+            edge_buffer: int = 16,
             eps: float = 1.0,  # DBSCAN parameter for spatial clustering
             min_samples: int = 1,  # DBSCAN parameter for spatial clustering
-            distance_threshold: float = 1.75,  # Agglomerative Clustering parameter for logit features
+            distance_threshold: float = 1.5,  # Agglomerative Clustering parameter for logit features
             linkage: str = 'ward'  # Linkage criteria for Agglomerative Clustering
     ):
         """

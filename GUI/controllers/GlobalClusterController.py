@@ -1,3 +1,5 @@
+# controllers/GlobalClusterController.py
+
 import json
 import logging
 import os
@@ -182,30 +184,32 @@ class ImageProcessingWorker(QObject):
     def process_images(self):
         sampled_crops = []
 
-        with ThreadPoolExecutor() as executor:
-            futures = {executor.submit(self.process_single_annotation, anno): anno for anno in self.sampled_annotations}
-
-            for future in as_completed(futures):
-                result = future.result()
-                if result is not None:
-                    sampled_crops.append(result)
+        for anno in self.sampled_annotations:
+            result = self.process_single_annotation(anno)
+            if result is not None:
+                sampled_crops.append(result)
 
         self.processing_finished.emit(sampled_crops)
 
     def process_single_annotation(self, anno):
-        # Access Annotation attributes directly using dot notation
-        image_data = self.model.get_image_data(anno.image_index)
-        image_array = image_data.get('image', None)
-        coord = anno.coord
-        if image_array is None:
-            return None
+        cache_key = (anno.image_index, tuple(anno.coord))
+        cached_result = self.image_processor.cache.get(cache_key)
+        if cached_result:
+            processed_crop, coord_pos = cached_result
+        else:
+            # Process the crop
+            image_data = self.model.get_image_data(anno.image_index)
+            image_array = image_data.get('image', None)
+            coord = anno.coord
+            if image_array is None:
+                return None
 
-        # Process the crop without PyQt5
-        processed_crop, coord_pos = self.image_processor.extract_crop_data(
-            image_array, coord, crop_size=512, zoom_factor=2
-        )
-        if processed_crop is None:
-            return None
+            processed_crop, coord_pos = self.image_processor.extract_crop_data(
+                image_array, coord, crop_size=512, zoom_factor=2
+            )
+
+            # Store in cache
+            self.image_processor.cache.set(cache_key, (processed_crop, coord_pos))
 
         return {
             'annotation': anno,
@@ -213,6 +217,76 @@ class ImageProcessingWorker(QObject):
             'coord_pos': coord_pos
         }
 
+
+class PrefetchWorker(QObject):
+    finished = pyqtSignal()
+
+    def __init__(self, cluster_ids: List[int], clusters: Dict[int, List[Annotation]],
+                 model: ImageDataModel, image_processor: ImageProcessor, crops_per_cluster: int):
+        super().__init__()
+        self.cluster_ids = cluster_ids
+        self.clusters = clusters
+        self.model = model
+        self.image_processor = image_processor
+        self.crops_per_cluster = crops_per_cluster
+        self.is_running = False
+        self._is_stopped = False
+
+    @pyqtSlot()
+    def run(self):
+        """
+        Prefetches data for the specified cluster IDs.
+        """
+        self.is_running = True
+        for cluster_id in self.cluster_ids:
+            if self._is_stopped:
+                logging.info(f"Prefetching stopped. Exiting prefetch worker.")
+                break
+            annotations = self.clusters.get(cluster_id, [])
+            num_samples = min(self.crops_per_cluster, len(annotations))
+            selected = annotations[:num_samples]
+
+            logging.info(f"Prefetching cluster {cluster_id}: {num_samples} annotations.")
+
+            for anno in selected:
+                if self._is_stopped:
+                    logging.info(f"Prefetching stopped during annotation processing.")
+                    break
+                # Prefetch image data
+                try:
+                    cache_key = (anno.image_index, tuple(anno.coord))
+                    if self.image_processor.cache.get(cache_key):
+                        logging.debug(f"Annotation {anno} already prefetched. Skipping.")
+                        continue  # Already prefetched
+
+                    image_data = self.model.get_image_data(anno.image_index)
+                    image_array = image_data.get('image', None)
+                    coord = anno.coord
+                    if image_array is None:
+                        logging.warning(f"No image data found for image index {anno.image_index}.")
+                        continue
+
+                    # Process the crop
+                    processed_crop, coord_pos = self.image_processor.extract_crop_data(
+                        image_array, coord, crop_size=512, zoom_factor=2
+                    )
+
+                    # Store in cache
+                    self.image_processor.cache.set(cache_key, (processed_crop, coord_pos))
+
+                    logging.debug(f"Prefetched annotation {anno}.")
+
+                except Exception as e:
+                    logging.error(f"Error prefetching data for cluster {cluster_id}, annotation {anno}: {e}")
+                    continue
+        self.is_running = False
+        self.finished.emit()
+
+    def stop(self):
+        """
+        Stops the prefetching process.
+        """
+        self._is_stopped = True
 
 
 class GlobalClusterController(QObject):
@@ -232,11 +306,22 @@ class GlobalClusterController(QObject):
         self.region_selector = UncertaintyRegionSelector()
         self.is_saving = False
 
+        self.prefetched_clusters = set()  # Keep track of prefetched clusters
+
+        self.prefetch_timer = QTimer()
+        self.prefetch_timer.setSingleShot(True)
+        self.prefetch_timer.setInterval(100)  # Adjust the interval as needed
+        self.prefetch_timer.timeout.connect(self.execute_prefetch)
+
         # Initialize attributes before restoring project state
         self.clusters: Dict[int, List[Annotation]] = {}
         self.cluster_labels: Dict[int, str] = {}
 
         self.crops_per_cluster = 100
+
+        # Set the prefetch buffer size here
+        self.prefetch_buffer_size = 10  # Adjust this value as needed
+
         self.debounce_timer = QTimer()
         self.debounce_timer.setInterval(300)
         self.debounce_timer.setSingleShot(True)
@@ -262,6 +347,7 @@ class GlobalClusterController(QObject):
 
         # Initialize threads to None
         self.image_thread: Optional[QThread] = None
+        self.prefetch_thread: Optional[QThread] = None
         self.worker: Optional[ClusteringWorker] = None
 
         # Now, attempt to load the last autosave
@@ -422,25 +508,126 @@ class GlobalClusterController(QObject):
         selected = annotations[:num_samples]
         logging.debug(f"Selected top {len(selected)} annotations from cluster {cluster_id}.")
 
-        # Pass the Annotation instances directly
-        processed_annotations = selected  # This is now a list of Annotation instances
+        # Check if data is prefetched
+        processed_annotations = []
+        annotations_to_process = []
 
-        # Initialize ImageProcessingWorker
-        self.image_worker = ImageProcessingWorker(
-            sampled_annotations=processed_annotations,
+        for anno in selected:
+            cache_key = (anno.image_index, tuple(anno.coord))
+            cached_result = self.image_processor.cache.get(cache_key)
+            if cached_result:
+                processed_crop, coord_pos = cached_result
+                processed_annotations.append({
+                    'annotation': anno,
+                    'processed_crop': processed_crop,
+                    'coord_pos': coord_pos
+                })
+            else:
+                annotations_to_process.append(anno)
+
+        # Process any annotations not already prefetched
+        if annotations_to_process:
+            self.image_worker = ImageProcessingWorker(
+                sampled_annotations=annotations_to_process,
+                model=self.model,
+                image_processor=self.image_processor
+            )
+            # Image worker setup
+            self.image_thread = QThread()
+            self.image_worker.moveToThread(self.image_thread)
+            self.image_thread.started.connect(self.image_worker.process_images)
+            self.image_worker.processing_finished.connect(self.on_image_processing_finished)
+            self.image_worker.processing_finished.connect(self.image_thread.quit)
+            self.image_worker.processing_finished.connect(self.image_worker.deleteLater)
+            self.image_thread.finished.connect(self.image_thread.deleteLater)
+            self.image_thread.start()
+        else:
+            # If all data is already processed, display it
+            self.on_image_processing_finished(processed_annotations)
+
+        # Initiate prefetching for adjacent clusters
+        self.prefetch_adjacent_clusters(cluster_id)
+
+    def prefetch_adjacent_clusters(self, current_cluster_id: int):
+        """
+        Schedules prefetching of data for adjacent clusters after a debounce interval.
+        """
+        self.current_cluster_id_for_prefetch = current_cluster_id
+        self.prefetch_timer.start()
+
+    def execute_prefetch(self):
+        """
+        Initiates prefetching of data for adjacent clusters.
+        """
+        current_cluster_id = self.current_cluster_id_for_prefetch
+        # Get the list of cluster IDs in the order they appear in the dropdown
+        cluster_ids = self.view.get_cluster_id_list()
+        if current_cluster_id not in cluster_ids:
+            logging.warning(f"Current cluster ID {current_cluster_id} not found in cluster list.")
+            return
+
+        current_index = cluster_ids.index(current_cluster_id)
+
+        clusters_to_prefetch = []
+
+        # Prefetch clusters ahead of the current cluster
+        for offset in range(1, self.prefetch_buffer_size + 1):
+            next_index = current_index + offset
+            if next_index < len(cluster_ids):
+                clusters_to_prefetch.append(cluster_ids[next_index])
+
+        # Prefetch clusters before the current cluster
+        for offset in range(1, self.prefetch_buffer_size + 1):
+            prev_index = current_index - offset
+            if prev_index >= 0:
+                clusters_to_prefetch.append(cluster_ids[prev_index])
+
+        logging.info(f"Prefetching clusters: {clusters_to_prefetch}")
+
+        # Start prefetching in a separate thread
+        self.start_prefetching(clusters_to_prefetch)
+
+    def start_prefetching(self, cluster_ids: List[int]):
+        """
+        Starts the prefetching process for the specified cluster IDs.
+        """
+        # Cancel any ongoing prefetching
+        if hasattr(self, 'prefetch_worker') and self.prefetch_worker.is_running:
+            self.prefetch_worker.stop()
+            self.prefetch_thread.quit()
+            self.prefetch_thread.wait()
+
+            # ... existing code ...
+
+        # Filter out clusters that have already been prefetched
+        clusters_to_prefetch = [cid for cid in cluster_ids if cid not in self.prefetched_clusters]
+
+        if not clusters_to_prefetch:
+            logging.info("All clusters already prefetched. Skipping prefetching.")
+            return
+
+        # Update the set of prefetched clusters
+        self.prefetched_clusters.update(clusters_to_prefetch)
+
+        # Initialize PrefetchWorker
+        self.prefetch_worker = PrefetchWorker(
+            cluster_ids=clusters_to_prefetch,
+            clusters=self.clusters,
             model=self.model,
-            image_processor=self.image_processor
+            image_processor=self.image_processor,
+            crops_per_cluster=self.crops_per_cluster
         )
 
-        # Image worker setup (one-off task)
-        self.image_thread = QThread()
-        self.image_worker.moveToThread(self.image_thread)
-        self.image_thread.started.connect(self.image_worker.process_images)
-        self.image_worker.processing_finished.connect(self.on_image_processing_finished)
-        self.image_worker.processing_finished.connect(self.image_thread.quit)
-        self.image_worker.processing_finished.connect(self.image_worker.deleteLater)
-        self.image_thread.finished.connect(self.image_thread.deleteLater)
-        self.image_thread.start()
+        # Set up thread
+        self.prefetch_thread = QThread()
+        self.prefetch_worker.moveToThread(self.prefetch_thread)
+        self.prefetch_thread.started.connect(self.prefetch_worker.run)
+        self.prefetch_worker.finished.connect(self.prefetch_thread.quit)
+        self.prefetch_worker.finished.connect(self.prefetch_worker.deleteLater)
+        self.prefetch_thread.finished.connect(self.prefetch_thread.deleteLater)
+
+        # Start prefetching
+        self.prefetch_thread.start()
 
     @pyqtSlot(list)
     def on_image_processing_finished(self, processed_annotations: List[dict]):
@@ -629,6 +816,62 @@ class GlobalClusterController(QObject):
         else:
             logging.debug("Export annotations action was canceled.")
 
+    def autosave_project_state(self):
+        """
+        Autosaves the current project state to a versioned backup file.
+        """
+        if self.is_saving:
+            logging.info("Autosave already in progress, skipping this autosave.")
+            return  # Skip if a save is already in progress
+
+        if not self.clusters:
+            logging.info("No clusters to save. Skipping autosave.")
+            return  # No data to save
+
+        self.is_saving = True
+
+        # Prepare the project state data
+        project_state = self.get_current_state()
+
+        # Create a versioned backup path
+        versioned_backup_path = self.get_versioned_backup_path(self.temp_file_path, max_backups=5)
+
+        # Send save request to worker
+        self.autosave_worker.save_project_state_signal.emit(project_state, versioned_backup_path)
+
+    @pyqtSlot(bool)
+    def on_autosave_finished(self, success: bool):
+        """
+        Handles completion of the autosave operation.
+        """
+        if success:
+            logging.info("Autosave completed successfully.")
+        else:
+            logging.error("Autosave failed.")
+
+        self.is_saving = False  # Reset the saving flag
+
+    @pyqtSlot(str)
+    def on_load_project_state(self, project_file: str):
+        """
+        Loads the project state from a saved file to resume the session.
+        """
+        self.load_project_state(project_file)
+
+    @pyqtSlot()
+    def on_save_project_state(self):
+        """
+        Prompts the user to save the current project state to a file.
+        """
+        options = QFileDialog.Options()
+        project_file, _ = QFileDialog.getSaveFileName(
+            self.view, "Save Project State", "", "JSON Files (*.json);;All Files (*)", options=options
+        )
+        if project_file:
+            self.save_project_state(project_file)
+        else:
+            logging.debug("Save project state action was canceled.")
+
     def save_project_state(self, project_file_path: Optional[str] = None, show_popup: bool = True):
         """
         Saves the current project state, including in-progress annotations and settings.
@@ -735,110 +978,34 @@ class GlobalClusterController(QObject):
         """
         Handles exporting labeled annotations to a JSON file.
         """
-        grouped_annotations: Dict[str, List[dict]] = {}
-        annotations_without_class = False
-
-        # Organize annotations by filename
-        for cluster_id, annotations in self.clusters.items():
-            for anno in annotations:
-                if anno.class_id is not None and anno.class_id != -1:
-                    annotation_data = {
-                        'coord': list(anno.coord),
-                        'class_id': anno.class_id,
-                        'cluster_id': cluster_id
-                    }
-                    grouped_annotations.setdefault(anno.filename, []).append(annotation_data)
-                else:
-                    annotations_without_class = True
-
-        if annotations_without_class:
-            reply = QMessageBox.question(
-                self.view,
-                "Annotations Without Class Labels",
-                "Some annotations do not have class labels assigned. Do you want to proceed with exporting?",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No
-            )
-            if reply == QMessageBox.No:
-                logging.info("User canceled exporting due to missing class labels.")
-                return
-
-        if not grouped_annotations:
-            QMessageBox.warning(self.view, "No Annotations", "There are no annotations to export.")
-            return
-
-        # Prompt user to select the export location
-        options = QFileDialog.Options()
-        export_file, _ = QFileDialog.getSaveFileName(
-            self.view, "Export Annotations", "", "JSON Files (*.json);;All Files (*)", options=options
-        )
-        if export_file:
-            try:
-                with open(export_file, 'w') as f:
-                    json.dump(grouped_annotations, f, indent=4)
-                logging.info(f"Annotations exported to {export_file}")
-                QMessageBox.information(self.view, "Export Successful", f"Annotations exported to {export_file}")
-            except Exception as e:
-                logging.error(f"Error exporting annotations: {e}")
-                QMessageBox.critical(self.view, "Error", f"Failed to export annotations: {e}")
-        else:
-            logging.debug("Export annotations action was canceled.")
-
-    def autosave_project_state(self):
-        """
-        Autosaves the current project state to a versioned backup file.
-        """
-        if self.is_saving:
-            logging.info("Autosave already in progress, skipping this autosave.")
-            return  # Skip if a save is already in progress
-
-        if not self.clusters:
-            logging.info("No clusters to save. Skipping autosave.")
-            return  # No data to save
-
-        self.is_saving = True
-
-        # Prepare the project state data
-        project_state = self.get_current_state()
-
-        # Create a versioned backup path
-        versioned_backup_path = self.get_versioned_backup_path(self.temp_file_path, max_backups=5)
-
-        # Send save request to worker
-        self.autosave_worker.save_project_state_signal.emit(project_state, versioned_backup_path)
-
-    @pyqtSlot(bool)
-    def on_autosave_finished(self, success: bool):
-        """
-        Handles completion of the autosave operation.
-        """
-        if success:
-            logging.info("Autosave completed successfully.")
-        else:
-            logging.error("Autosave failed.")
-
-        self.is_saving = False  # Reset the saving flag
-
-    @pyqtSlot(str)
-    def on_load_project_state(self, project_file: str):
-        """
-        Loads the project state from a saved file to resume the session.
-        """
-        self.load_project_state(project_file)
+        self.export_annotations()
 
     @pyqtSlot()
-    def on_save_project_state(self):
+    def on_restore_autosave_requested(self):
         """
-        Prompts the user to save the current project state to a file.
+        Handles the manual restoration of an autosave file.
+        Prompts the user to select an autosave file to restore.
         """
+        autosave_files = self.get_autosave_files()
+        if not autosave_files:
+            QMessageBox.information(self.view, "No Autosave Found", "There are no autosave files to restore.")
+            return
+
+        # Use QFileDialog to let the user select an autosave file
         options = QFileDialog.Options()
-        project_file, _ = QFileDialog.getSaveFileName(
-            self.view, "Save Project State", "", "JSON Files (*.json);;All Files (*)", options=options
+        # Set the initial directory to TEMP_DIR
+        autosave_file, _ = QFileDialog.getOpenFileName(
+            self.view,
+            "Select Autosave File to Restore",
+            TEMP_DIR,
+            "Autosave Files (project_autosave*.json);;All Files (*)",
+            options=options
         )
-        if project_file:
-            self.save_project_state(project_file)
+
+        if autosave_file:
+            self.load_project_state(autosave_file)
         else:
-            logging.debug("Save project state action was canceled.")
+            logging.info("User canceled the restore autosave action.")
 
     def load_project_state(self, project_file: str):
         """
@@ -875,30 +1042,3 @@ class GlobalClusterController(QObject):
         except (IOError, json.JSONDecodeError, KeyError, ValueError) as e:
             logging.error(f"Failed to load project state from {project_file}: {e}")
             QMessageBox.critical(self.view, "Error", f"Failed to load project state: {e}")
-
-    @pyqtSlot()
-    def on_restore_autosave_requested(self):
-        """
-        Handles the manual restoration of an autosave file.
-        Prompts the user to select an autosave file to restore.
-        """
-        autosave_files = self.get_autosave_files()
-        if not autosave_files:
-            QMessageBox.information(self.view, "No Autosave Found", "There are no autosave files to restore.")
-            return
-
-        # Use QFileDialog to let the user select an autosave file
-        options = QFileDialog.Options()
-        # Set the initial directory to TEMP_DIR
-        autosave_file, _ = QFileDialog.getOpenFileName(
-            self.view,
-            "Select Autosave File to Restore",
-            TEMP_DIR,
-            "Autosave Files (project_autosave*.json);;All Files (*)",
-            options=options
-        )
-
-        if autosave_file:
-            self.load_project_state(autosave_file)
-        else:
-            logging.info("User canceled the restore autosave action.")
