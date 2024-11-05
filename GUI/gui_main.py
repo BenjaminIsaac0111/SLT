@@ -13,7 +13,7 @@ def main():
     app = QApplication(sys.argv)
 
     # Initialize the model (replace 'your_hdf5_file.h5' with the actual HDF5 file path)
-    hdf5_file_path = (r"C:\Users\benja\OneDrive - University of Leeds\PhD "
+    hdf5_file_path = (r"C:\Users\wispy\OneDrive - University of Leeds\PhD "
                       r"Projects\Attention-UNET\cfg\unet_training_experiments\outputs\dropout_attention_unet_fl_f1.h5"
                       r"\dropout_attention_unet_fl_f1_inference_output.h5")
     model = ImageDataModel(hdf5_file_path)

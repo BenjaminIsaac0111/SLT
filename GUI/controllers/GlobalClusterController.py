@@ -310,7 +310,7 @@ class GlobalClusterController(QObject):
 
         self.prefetch_timer = QTimer()
         self.prefetch_timer.setSingleShot(True)
-        self.prefetch_timer.setInterval(100)  # Adjust the interval as needed
+        self.prefetch_timer.setInterval(200)  # Adjust the interval as needed
         self.prefetch_timer.timeout.connect(self.execute_prefetch)
 
         # Initialize attributes before restoring project state
@@ -775,9 +775,9 @@ class GlobalClusterController(QObject):
             for anno in annotations:
                 if anno.class_id is not None and anno.class_id != -1:
                     annotation_data = {
-                        'coord': list(anno.coord),
-                        'class_id': anno.class_id,
-                        'cluster_id': cluster_id
+                        'coord': [int(c) for c in anno.coord],  # Ensure coords are Python ints
+                        'class_id': int(anno.class_id),  # Convert class_id to Python int
+                        'cluster_id': int(cluster_id)  # Convert cluster_id to Python int
                     }
                     grouped_annotations.setdefault(anno.filename, []).append(annotation_data)
                 else:

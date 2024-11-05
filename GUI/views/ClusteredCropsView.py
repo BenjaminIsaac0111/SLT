@@ -5,8 +5,8 @@ from functools import partial
 from typing import List, Dict, Optional
 
 from PyQt5.QtCore import QRectF, pyqtSignal, Qt, QEvent
-from PyQt5.QtGui import QPen, QPainter, QPixmap, QFont, QWheelEvent
-from PyQt5.QtWidgets import QGraphicsObject, QAction, QGraphicsItem
+from PyQt5.QtGui import QPen, QPainter, QPixmap, QFont, QWheelEvent, QTransform
+from PyQt5.QtWidgets import QGraphicsObject, QAction, QGraphicsItem, QApplication
 from PyQt5.QtWidgets import (
     QWidget, QComboBox, QPushButton, QVBoxLayout, QLabel,
     QProgressBar, QSpinBox, QSlider, QGraphicsView,
@@ -64,13 +64,29 @@ class ClickablePixmapItem(QGraphicsObject):
 
     def update_text_label(self):
         """
-        Updates the text label with the current class name.
+        Updates the text label with the current class name and scales the font size based on DPI, independent of zoom.
         """
         if self.text_item is not None:
             label_text = CLASS_COMPONENTS.get(self.class_id, "Unlabelled") if self.class_id != -1 else "Unlabelled"
             self.text_item.setPlainText(label_text)
+
+            # Get monitor DPI and set a fixed pixel size for the font
+            screen = QApplication.primaryScreen()
+            dpi = screen.physicalDotsPerInch()
+            base_font_pixel_size = 12  # Adjust based on readability
+            scaled_font_pixel_size = int(base_font_pixel_size * (dpi / 96))
+
+            # Set font with fixed pixel size
+            font = QFont("Arial")
+            font.setPixelSize(scaled_font_pixel_size)
+            self.text_item.setFont(font)
+
             # Position the text above the image
             self.text_item.setPos(0, -20)  # Adjust as needed
+
+            # Counteract the zoom effect on the text item
+            scale_factor = 1 / self.scale()
+            self.text_item.setTransform(QTransform().scale(scale_factor, scale_factor))
 
     def boundingRect(self):
         return QRectF(0, 0, self.pixmap.width(), self.pixmap.height())
@@ -99,25 +115,22 @@ class ClickablePixmapItem(QGraphicsObject):
         if event.button() == Qt.LeftButton:
             self.selected = not self.selected  # Toggle selection
             self.update()
-        elif event.button() == Qt.RightButton:
-            self.show_context_menu(event)
 
-    def show_context_menu(self, event):
-        menu = QMenu()
+    def contextMenuEvent(self, event):
+        self.scene().context_menu_open = True  # Set the flag in the scene
+        self.menu = QMenu()
 
-        # Add actions for each class using functools.partial
         for class_id, class_name in CLASS_COMPONENTS.items():
-            action = QAction(class_name, self)
+            action = QAction(class_name, self.menu)
             action.triggered.connect(partial(self.set_crop_class, class_id))
-            menu.addAction(action)
+            self.menu.addAction(action)
 
-        # Add Unlabel Option
-        unlabel_action = QAction("Unlabel", self)
+        unlabel_action = QAction("Unlabel", self.menu)
         unlabel_action.triggered.connect(partial(self.set_crop_class, -1))
-        menu.addAction(unlabel_action)
+        self.menu.addAction(unlabel_action)
 
-        # Display the menu
-        menu.exec_(event.screenPos())
+        self.menu.exec_(event.screenPos())
+        self.scene().context_menu_open = False  # Unset the flag
 
 
 class ClusteredCropsView(QWidget):
@@ -141,6 +154,7 @@ class ClusteredCropsView(QWidget):
     def __init__(self):
         super().__init__()
         self.zoom_level = 5  # Initial zoom level
+        self.context_menu_open = False  # Initialize the flag
         self.selected_crops: List[dict] = []  # Store sampled crops for dynamic rearrangement
         self.init_ui()
 
@@ -427,6 +441,8 @@ class ClusteredCropsView(QWidget):
         Arranges the sampled crops in a grid layout that adapts to the window size
         and supports zooming functionality. Images expand and contract to fill the space.
         """
+        if getattr(self.scene, 'context_menu_open', False):
+            return  # Do not rearrange crops if the context menu is open
         self.scene.clear()
 
         if not self.selected_crops:
