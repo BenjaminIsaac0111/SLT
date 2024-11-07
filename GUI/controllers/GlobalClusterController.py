@@ -1,9 +1,8 @@
-# controllers/GlobalClusterController.py
-
 import json
 import logging
 import os
 import tempfile
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import List, Dict, Optional
@@ -70,10 +69,11 @@ class ClusteringWorker(QThread):
     clustering_finished = pyqtSignal(list)
     progress_updated = pyqtSignal(int)
 
-    def __init__(self, model: ImageDataModel, labels_acquirer: UncertaintyRegionSelector, parent=None):
+    def __init__(self, hdf5_file_path: str, labels_acquirer: UncertaintyRegionSelector, parent=None):
         super().__init__(parent)
-        self.model = model
+        self.hdf5_file_path = hdf5_file_path  # Pass the file path
         self.labels_acquirer = labels_acquirer
+        self.model = None  # Will be initialized in the thread
 
     def process_image(self, idx):
         """
@@ -98,7 +98,7 @@ class ClusteringWorker(QThread):
                 filename=filename,
                 coord=coord,
                 logit_features=logit_feature,
-                class_id=-1,  # Default to -1 (unlabelled)
+                class_id=-1,  # Default to -1 (unlabeled)
                 image_index=idx,
                 uncertainty=uncertainty_map[coord[0], coord[1]],
                 cluster_id=None  # Assign the cluster ID here
@@ -112,7 +112,10 @@ class ClusteringWorker(QThread):
         """
         Executes the clustering process with parallel image processing.
         """
-        all_annotations = []  # List to collect annotations with image_index, coord, logit_features, etc.
+        # Initialize the ImageDataModel in this thread
+        self.model = ImageDataModel(self.hdf5_file_path)
+
+        all_annotations = []  # List to collect annotations
         total_images = self.model.get_number_of_images()
         logging.info(f"Starting clustering on {total_images} images.")
 
@@ -167,6 +170,10 @@ class ClusteringWorker(QThread):
         for label, annotation in zip(labels, all_annotations):
             annotation.cluster_id = int(label)  # Directly assign cluster_id
 
+        # Close the model's HDF5 file
+        if self.model is not None:
+            self.model.close()
+
         logging.info(f"Global clustering complete. Number of clusters: {len(set(clustering.labels_))}")
         self.clustering_finished.emit(all_annotations)
 
@@ -174,20 +181,28 @@ class ClusteringWorker(QThread):
 class ImageProcessingWorker(QObject):
     processing_finished = pyqtSignal(list)
 
-    def __init__(self, sampled_annotations, model, image_processor):
+    def __init__(self, sampled_annotations, hdf5_file_path: str, image_processor: ImageProcessor):
         super().__init__()
         self.sampled_annotations = sampled_annotations
-        self.model = model
+        self.hdf5_file_path = hdf5_file_path  # Pass the file path
         self.image_processor = image_processor
+        self.model = None  # Will be initialized in the thread
 
     @pyqtSlot()
     def process_images(self):
+        # Initialize the ImageDataModel in this thread
+        self.model = ImageDataModel(self.hdf5_file_path)
+
         sampled_crops = []
 
         for anno in self.sampled_annotations:
             result = self.process_single_annotation(anno)
             if result is not None:
                 sampled_crops.append(result)
+
+        # Close the model's HDF5 file
+        if self.model is not None:
+            self.model.close()
 
         self.processing_finished.emit(sampled_crops)
 
@@ -222,15 +237,16 @@ class PrefetchWorker(QObject):
     finished = pyqtSignal()
 
     def __init__(self, cluster_ids: List[int], clusters: Dict[int, List[Annotation]],
-                 model: ImageDataModel, image_processor: ImageProcessor, crops_per_cluster: int):
+                 hdf5_file_path: str, image_processor: ImageProcessor, crops_per_cluster: int):
         super().__init__()
         self.cluster_ids = cluster_ids
         self.clusters = clusters
-        self.model = model
+        self.hdf5_file_path = hdf5_file_path  # Pass the file path
         self.image_processor = image_processor
         self.crops_per_cluster = crops_per_cluster
         self.is_running = False
         self._is_stopped = False
+        self.model = None  # Will be initialized in the thread
 
     @pyqtSlot()
     def run(self):
@@ -238,10 +254,20 @@ class PrefetchWorker(QObject):
         Prefetches data for the specified cluster IDs.
         """
         self.is_running = True
+
+        # Initialize the ImageDataModel in this thread
+        self.model = ImageDataModel(self.hdf5_file_path)
+
+        if self._is_stopped:
+            logging.info(f"Prefetching stopped before starting. Exiting prefetch worker.")
+            self.finished.emit()
+            return
+
         for cluster_id in self.cluster_ids:
             if self._is_stopped:
-                logging.info(f"Prefetching stopped. Exiting prefetch worker.")
+                logging.info(f"Prefetching stopped during cluster processing.")
                 break
+
             annotations = self.clusters.get(cluster_id, [])
             num_samples = min(self.crops_per_cluster, len(annotations))
             selected = annotations[:num_samples]
@@ -279,6 +305,11 @@ class PrefetchWorker(QObject):
                 except Exception as e:
                     logging.error(f"Error prefetching data for cluster {cluster_id}, annotation {anno}: {e}")
                     continue
+
+        # Close the model's HDF5 file
+        if self.model is not None:
+            self.model.close()
+
         self.is_running = False
         self.finished.emit()
 
@@ -298,7 +329,7 @@ class GlobalClusterController(QObject):
     clustering_progress = pyqtSignal(int)
     clusters_ready = pyqtSignal(dict)
 
-    def __init__(self, model: ImageDataModel, view: ClusteredCropsView):
+    def __init__(self, model: Optional[ImageDataModel], view: ClusteredCropsView):
         super().__init__()
         self.model = model
         self.view = view
@@ -318,9 +349,6 @@ class GlobalClusterController(QObject):
         self.cluster_labels: Dict[int, str] = {}
 
         self.crops_per_cluster = 100
-
-        # Set the prefetch buffer size here
-        self.prefetch_buffer_size = 10  # Adjust this value as needed
 
         self.debounce_timer = QTimer()
         self.debounce_timer.setInterval(300)
@@ -350,25 +378,6 @@ class GlobalClusterController(QObject):
         self.prefetch_thread: Optional[QThread] = None
         self.worker: Optional[ClusteringWorker] = None
 
-        # Now, attempt to load the last autosave
-        latest_autosave_file = self.get_latest_autosave_file()
-        if latest_autosave_file:
-            logging.info(f"Autosave file found: {latest_autosave_file}")
-            # Prompt the user to restore the last autosave
-            reply = QMessageBox.question(
-                self.view,
-                "Restore Autosave?",
-                "An autosave file was found. Do you want to restore your last session?",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.Yes
-            )
-            if reply == QMessageBox.Yes:
-                self.load_project_state(latest_autosave_file)
-            else:
-                logging.info("User chose not to restore the autosave.")
-        else:
-            logging.info("No autosave file found.")
-
         # Connect view signals
         self.connect_signals()
 
@@ -381,7 +390,6 @@ class GlobalClusterController(QObject):
         self.view.request_clustering.connect(self.start_clustering)
         self.view.sample_cluster.connect(self.on_sample_cluster)
         self.view.sampling_parameters_changed.connect(self.on_selection_parameters_changed)
-        self.view.class_selected.connect(self.on_class_selected)
         self.view.class_selected_for_all.connect(self.on_class_selected_for_all)
         self.view.crop_label_changed.connect(self.on_crop_label_changed)
         self.view.save_project_state_requested.connect(self.on_save_project_state)
@@ -409,7 +417,10 @@ class GlobalClusterController(QObject):
         self.view.reset_progress()  # Ensure the progress bar is reset
 
         # Initialize and configure the ClusteringWorker
-        self.clustering_worker = ClusteringWorker(model=self.model, labels_acquirer=self.region_selector)
+        self.clustering_worker = ClusteringWorker(
+            hdf5_file_path=self.model.hdf5_file_path,  # Pass the file path
+            labels_acquirer=self.region_selector
+        )
         self.clustering_worker.progress_updated.connect(self.clustering_progress.emit)
         self.clustering_worker.clustering_finished.connect(self.on_clustering_finished)
         self.clustering_worker.finished.connect(self.clustering_worker.deleteLater)  # Clean up thread
@@ -461,7 +472,7 @@ class GlobalClusterController(QObject):
         """
         Generates a dictionary containing cluster information for populating the GUI's cluster selection.
         """
-        cluster_info = {}
+        cluster_info = OrderedDict()
         for cluster_id, annotations in self.clusters.items():
             image_filenames = set(anno.filename for anno in annotations)
             num_annotations = len(annotations)
@@ -529,7 +540,7 @@ class GlobalClusterController(QObject):
         if annotations_to_process:
             self.image_worker = ImageProcessingWorker(
                 sampled_annotations=annotations_to_process,
-                model=self.model,
+                hdf5_file_path=self.model.hdf5_file_path,  # Pass the file path
                 image_processor=self.image_processor
             )
             # Image worker setup
@@ -570,19 +581,21 @@ class GlobalClusterController(QObject):
 
         clusters_to_prefetch = []
 
-        # Prefetch clusters ahead of the current cluster
-        for offset in range(1, self.prefetch_buffer_size + 1):
-            next_index = current_index + offset
-            if next_index < len(cluster_ids):
-                clusters_to_prefetch.append(cluster_ids[next_index])
+        # Prefetch the next cluster
+        next_index = current_index + 1
+        if next_index < len(cluster_ids):
+            clusters_to_prefetch.append(cluster_ids[next_index])
 
-        # Prefetch clusters before the current cluster
-        for offset in range(1, self.prefetch_buffer_size + 1):
-            prev_index = current_index - offset
-            if prev_index >= 0:
-                clusters_to_prefetch.append(cluster_ids[prev_index])
+        # Prefetch the previous cluster
+        prev_index = current_index - 1
+        if prev_index >= 0:
+            clusters_to_prefetch.append(cluster_ids[prev_index])
 
-        logging.info(f"Prefetching clusters: {clusters_to_prefetch}")
+        if not clusters_to_prefetch:
+            logging.info("No adjacent clusters to prefetch.")
+            return
+
+        logging.info(f"Prefetching adjacent clusters: {clusters_to_prefetch}")
 
         # Start prefetching in a separate thread
         self.start_prefetching(clusters_to_prefetch)
@@ -597,13 +610,11 @@ class GlobalClusterController(QObject):
             self.prefetch_thread.quit()
             self.prefetch_thread.wait()
 
-            # ... existing code ...
-
         # Filter out clusters that have already been prefetched
         clusters_to_prefetch = [cid for cid in cluster_ids if cid not in self.prefetched_clusters]
 
         if not clusters_to_prefetch:
-            logging.info("All clusters already prefetched. Skipping prefetching.")
+            logging.info("All adjacent clusters already prefetched. Skipping prefetching.")
             return
 
         # Update the set of prefetched clusters
@@ -613,7 +624,7 @@ class GlobalClusterController(QObject):
         self.prefetch_worker = PrefetchWorker(
             cluster_ids=clusters_to_prefetch,
             clusters=self.clusters,
-            model=self.model,
+            hdf5_file_path=self.model.hdf5_file_path,  # Pass the file path
             image_processor=self.image_processor,
             crops_per_cluster=self.crops_per_cluster
         )
@@ -684,43 +695,18 @@ class GlobalClusterController(QObject):
     @pyqtSlot(object)
     def on_class_selected_for_all(self, class_id: Optional[int]):
         """
-        Labels all visible crops with the selected class. If class_id is None, unlabel all visible crops.
+        Handles when a class is selected to label all visible crops.
         """
         if class_id is None:
             logging.info("Unlabeling all visible crops.")
         else:
             logging.info(f"Class {class_id} selected for all visible crops.")
 
-        # Update the class_id for each visible crop
-        for crop in self.view.selected_crops:
-            cluster_id = int(crop['annotation'].cluster_id)
-            image_index = int(crop['annotation'].image_index)
-            coord = tuple(crop['annotation'].coord)  # Ensure coord is a tuple
-
-            # Update the class_id for the corresponding Annotation in self.clusters
-            for anno in self.clusters.get(cluster_id, []):
-                if anno.image_index == image_index and anno.coord == coord:
-                    anno.class_id = class_id if class_id is not None else -1
-                    logging.debug(f"Annotation for image {image_index}, coord {coord} updated with class_id {class_id}")
-                    break
-
-        # Update the view to reflect these changes
-        self.view.label_all_visible_crops(class_id)
-
-    @pyqtSlot(int, int)
-    def on_class_selected(self, cluster_id: int, class_id: int):
-        """
-        Handles the event when a class is selected for a cluster.
-        Assigns the class label to every sample in the current view for the selected cluster.
-        """
-        logging.info(f"Class {class_id} selected for all samples in cluster {cluster_id}.")
-        annotations = self.clusters.get(cluster_id, [])
-        for anno in annotations:
-            anno.class_id = class_id
-            logging.debug(f"Annotation for image {anno.image_index} updated with class_id {class_id}")
-
-        # Refresh the view to show updated labels
-        self.display_crops(cluster_id)
+        # The view has already updated the annotations and emitted crop_label_changed signals.
+        # Refresh the cluster info and UI
+        cluster_info = self.generate_cluster_info()
+        selected_cluster_id = self.view.get_selected_cluster_id()
+        self.view.populate_cluster_selection(cluster_info, selected_cluster_id=selected_cluster_id)
 
     @pyqtSlot(dict, int)
     def on_crop_label_changed(self, crop_data: dict, class_id: int):
@@ -896,12 +882,17 @@ class GlobalClusterController(QObject):
         """
         Extracts the current project state, organizing clusters and annotations in a dictionary format.
         """
-        project_state = {}
+        project_state = {
+            'hdf5_file_path': self.model.hdf5_file_path,  # Include the HDF5 file path
+            'annotations': {},
+            'cluster_order': list(self.clusters.keys()),  # Store the cluster IDs in order
+            'selected_cluster_id': self.view.get_selected_cluster_id(),  # Save the selected cluster ID
+        }
 
         for cluster_id, annotations in self.clusters.items():
             for anno in annotations:
                 annotation_data = anno.to_dict()
-                project_state.setdefault(anno.filename, []).append(annotation_data)
+                project_state['annotations'].setdefault(anno.filename, []).append(annotation_data)
 
         return project_state
 
@@ -1020,21 +1011,63 @@ class GlobalClusterController(QObject):
             with open(project_file, 'r') as f:
                 project_state = json.load(f)
 
-            self.clusters = {}
-            for filename, annotations in project_state.items():
+            hdf5_file_path = project_state.get('hdf5_file_path')
+            if not hdf5_file_path or not os.path.exists(hdf5_file_path):
+                # Prompt the user to select the HDF5 file
+                options = QFileDialog.Options()
+                hdf5_file_path, _ = QFileDialog.getOpenFileName(
+                    self.view, "Select HDF5 File", "", "HDF5 Files (*.h5 *.hdf5);;All Files (*)", options=options
+                )
+                if not hdf5_file_path:
+                    QMessageBox.critical(self.view, "Error", "No HDF5 file selected. Cannot load project.")
+                    return
+
+            # Close the previous model if it exists
+            if self.model is not None:
+                self.model.close()
+
+            # Initialize the model if not already initialized or if hdf5_file_path is different
+            if self.model is None or self.model.hdf5_file_path != hdf5_file_path:
+                self.model = ImageDataModel(hdf5_file_path)
+                # Reinitialize any dependent components if necessary
+
+            # Load annotations
+            annotations_data = project_state.get('annotations', {})
+            cluster_order = project_state.get('cluster_order', [])
+            selected_cluster_id = project_state.get('selected_cluster_id', None)
+
+            # Build clusters with the specified order
+            clusters = {}
+            for filename, annotations in annotations_data.items():
                 for annotation_data in annotations:
                     anno = Annotation.from_dict(annotation_data)
-                    self.clusters.setdefault(anno.cluster_id, []).append(anno)
+                    clusters.setdefault(anno.cluster_id, []).append(anno)
+
+            # Reorder clusters based on cluster_order
+            self.clusters = {}
+            for cluster_id in cluster_order:
+                if cluster_id in clusters:
+                    self.clusters[cluster_id] = clusters[cluster_id]
+                else:
+                    logging.warning(f"Cluster ID {cluster_id} from cluster_order not found in annotations.")
+            # Add any clusters that were not in cluster_order
+            for cluster_id, annotations in clusters.items():
+                if cluster_id not in self.clusters:
+                    self.clusters[cluster_id] = annotations
 
             logging.info(f"Project state loaded from {project_file}")
 
             # Update the GUI
             cluster_info = self.generate_cluster_info()
-            self.view.populate_cluster_selection(cluster_info, selected_cluster_id=None)
-            # Automatically display the crops of the first cluster if available
-            first_cluster_id = next(iter(self.clusters), None)
-            if first_cluster_id is not None:
-                self.display_crops(cluster_id=first_cluster_id)
+            self.view.populate_cluster_selection(cluster_info, selected_cluster_id=selected_cluster_id)
+            # Display the crops of the selected cluster if available
+            if selected_cluster_id is not None and selected_cluster_id in self.clusters:
+                self.display_crops(cluster_id=selected_cluster_id)
+            else:
+                # If the selected cluster is not available, display the first cluster
+                first_cluster_id = next(iter(self.clusters), None)
+                if first_cluster_id is not None:
+                    self.display_crops(cluster_id=first_cluster_id)
             self.view.hide_progress_bar()
 
             QMessageBox.information(self.view, "Project Loaded", f"Project state loaded from {project_file}")

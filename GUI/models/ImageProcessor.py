@@ -20,14 +20,14 @@ class ImageProcessor:
     uncertainty normalization, and heatmap generation.
     """
 
-    def __init__(self, colormap_name: str = 'tab10', heatmap_cmap_name: str = 'Spectral_r', cache_size: int = 250):
+    def __init__(self, colormap_name: str = 'tab10', heatmap_cmap_name: str = 'Spectral_r'):
         """
         Initializes the ImageProcessor with specified colormaps.
 
         :param colormap_name: Name of the matplotlib colormap to use for mask processing.
         :param heatmap_cmap_name: Name of the matplotlib colormap to use for heatmap generation.
         """
-        self.cache = CacheManager(cache_size=cache_size)  # Use CacheManager instead of LRUCache
+        self.cache = CacheManager()
         self.colormap_name = colormap_name
         self.heatmap_cmap_name = heatmap_cmap_name
         self.colormap: Colormap = plt.get_cmap(self.colormap_name)

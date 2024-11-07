@@ -1,17 +1,15 @@
-# GUI/views/ClusteredCropsView.py
-
 import logging
 from functools import partial
 from typing import List, Dict, Optional
 
 from PyQt5.QtCore import QRectF, pyqtSignal, Qt, QEvent
-from PyQt5.QtGui import QPen, QPainter, QPixmap, QFont, QWheelEvent, QTransform
-from PyQt5.QtWidgets import QGraphicsObject, QAction, QGraphicsItem, QApplication
+from PyQt5.QtGui import QPen, QPainter, QPixmap, QFont, QWheelEvent
 from PyQt5.QtWidgets import (
     QWidget, QComboBox, QPushButton, QVBoxLayout, QLabel,
     QProgressBar, QSpinBox, QSlider, QGraphicsView,
     QGraphicsScene, QMenu, QGridLayout, QFileDialog,
-    QGroupBox, QSizePolicy, QSplitter, QGraphicsTextItem
+    QGroupBox, QSizePolicy, QSplitter, QGraphicsTextItem, QGraphicsObject, QAction, QGraphicsItem, QApplication,
+    QHBoxLayout
 )
 
 from GUI.models.Annotation import Annotation
@@ -46,18 +44,21 @@ class ClickablePixmapItem(QGraphicsObject):
         self.hovered = False
         self.selected = False
 
+        # Calculate font size based on screen DPI
+        self.dpi_scaling = QApplication.primaryScreen().logicalDotsPerInch() / 96.0  # 96 DPI is standard
+        self.base_font_size = 12  # Base font size that scales dynamically
+
         # Create the text item as a child
         self.text_item = QGraphicsTextItem(self)
         self.text_item.setDefaultTextColor(Qt.black)
-        self.text_item.setFont(QFont("Arial", 12))  # Adjust font if needed
         self.update_text_label()
 
     def set_crop_class(self, class_id: int):
         """
         Updates the class_id of the annotation and emits a signal.
         """
-        self.annotation.class_id = class_id if class_id != -1 else -1
-        self.class_id = self.annotation.class_id
+        self.annotation.class_id = class_id
+        self.class_id = class_id
         self.class_label_changed.emit(self.annotation.to_dict(), self.class_id)
         self.update_text_label()
         self.update()
@@ -67,26 +68,17 @@ class ClickablePixmapItem(QGraphicsObject):
         Updates the text label with the current class name and scales the font size based on DPI, independent of zoom.
         """
         if self.text_item is not None:
+            # Calculate dynamic font size
+            font_size = int(self.base_font_size * self.dpi_scaling)
+            font = QFont("Arial", font_size)
+            self.text_item.setFont(font)
+
+            # Set label text
             label_text = CLASS_COMPONENTS.get(self.class_id, "Unlabelled") if self.class_id != -1 else "Unlabelled"
             self.text_item.setPlainText(label_text)
 
-            # Get monitor DPI and set a fixed pixel size for the font
-            screen = QApplication.primaryScreen()
-            dpi = screen.physicalDotsPerInch()
-            base_font_pixel_size = 12  # Adjust based on readability
-            scaled_font_pixel_size = int(base_font_pixel_size * (dpi / 96))
-
-            # Set font with fixed pixel size
-            font = QFont("Arial")
-            font.setPixelSize(scaled_font_pixel_size)
-            self.text_item.setFont(font)
-
             # Position the text above the image
             self.text_item.setPos(0, -20)  # Adjust as needed
-
-            # Counteract the zoom effect on the text item
-            scale_factor = 1 / self.scale()
-            self.text_item.setTransform(QTransform().scale(scale_factor, scale_factor))
 
     def boundingRect(self):
         return QRectF(0, 0, self.pixmap.width(), self.pixmap.height())
@@ -143,7 +135,6 @@ class ClusteredCropsView(QWidget):
     request_clustering = pyqtSignal()
     sample_cluster = pyqtSignal(int)
     sampling_parameters_changed = pyqtSignal(int, int)  # Emits (cluster_id, crops_per_cluster)
-    class_selected = pyqtSignal(int, int)  # Emits (cluster_id, class_id)
     class_selected_for_all = pyqtSignal(object)  # Emits the class_id for all visible crops
     crop_label_changed = pyqtSignal(dict, int)  # Emits (annotation_dict, class_id)
     save_project_state_requested = pyqtSignal()
@@ -187,10 +178,32 @@ class ClusteredCropsView(QWidget):
         cluster_selection_group = QGroupBox("Cluster Selection")
         cluster_selection_layout = QVBoxLayout()
         cluster_selection_layout.addWidget(QLabel("Select Cluster:"))
+
+        # Create a horizontal layout for ComboBox and buttons
+        cluster_selection_controls_layout = QHBoxLayout()
+
+        self.prev_cluster_button = QPushButton("Previous")
+        self.prev_cluster_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.prev_cluster_button.clicked.connect(self.on_prev_cluster)
+        self.prev_cluster_button.setEnabled(False)  # Initially disabled
+
         self.cluster_combo = QComboBox()
         self.cluster_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.cluster_combo.currentIndexChanged.connect(self.on_cluster_selected)
-        cluster_selection_layout.addWidget(self.cluster_combo)
+
+        self.next_cluster_button = QPushButton("Next")
+        self.next_cluster_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.next_cluster_button.clicked.connect(self.on_next_cluster)
+        self.next_cluster_button.setEnabled(False)  # Initially disabled
+
+        # Add widgets to the controls layout
+        cluster_selection_controls_layout.addWidget(self.prev_cluster_button)
+        cluster_selection_controls_layout.addWidget(self.cluster_combo)
+        cluster_selection_controls_layout.addWidget(self.next_cluster_button)
+
+        # Add the controls layout to the cluster selection layout
+        cluster_selection_layout.addLayout(cluster_selection_controls_layout)
+
         cluster_selection_group.setLayout(cluster_selection_layout)
         control_panel_layout.addWidget(cluster_selection_group)
 
@@ -212,7 +225,7 @@ class ClusteredCropsView(QWidget):
         zoom_layout = QVBoxLayout()
         self.zoom_slider = QSlider(Qt.Horizontal)
         self.zoom_slider.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.zoom_slider.setMinimum(-10)
+        self.zoom_slider.setMinimum(0)
         self.zoom_slider.setMaximum(10)
         self.zoom_slider.setValue(self.zoom_level)
         self.zoom_slider.valueChanged.connect(self.on_zoom_changed)
@@ -252,19 +265,19 @@ class ClusteredCropsView(QWidget):
         # Save and Load Buttons
         self.load_project_button = QPushButton("Load Project")
         self.load_project_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.load_project_button.clicked.connect(self.load_project_state_requested.emit)
+        self.load_project_button.clicked.connect(self.on_load_project_state)
 
         self.save_project_button = QPushButton("Save Project")
         self.save_project_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.save_project_button.clicked.connect(self.save_project_state_requested.emit)
+        self.save_project_button.clicked.connect(self.on_save_project_state)
 
         self.export_annotations_button = QPushButton("Export Annotations")
         self.export_annotations_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.export_annotations_button.clicked.connect(self.export_annotations_requested.emit)
+        self.export_annotations_button.clicked.connect(self.on_export_annotations)
 
         self.restore_autosave_button = QPushButton("Restore Autosave")
         self.restore_autosave_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.restore_autosave_button.clicked.connect(self.restore_autosave_requested.emit)
+        self.restore_autosave_button.clicked.connect(self.on_restore_autosave)
 
         control_panel_layout.addWidget(self.load_project_button)
         control_panel_layout.addWidget(self.save_project_button)
@@ -308,22 +321,43 @@ class ClusteredCropsView(QWidget):
     def populate_cluster_selection(self, cluster_info: Dict[int, dict], selected_cluster_id: Optional[int] = None):
         """
         Populates the cluster selection ComboBox with cluster IDs and info.
+        The clusters are displayed in the order they appear in the cluster_info.
         """
+        self.cluster_combo.blockSignals(True)  # Block signals to prevent unwanted emissions
         self.cluster_combo.clear()
-        for cluster_id, info in cluster_info.items():
+        for cluster_id in cluster_info:
+            info = cluster_info[cluster_id]
             display_text = f"Cluster {cluster_id} - {info['num_annotations']} annotations"
             self.cluster_combo.addItem(display_text, cluster_id)
+        self.cluster_combo.blockSignals(False)  # Re-enable signals
+
         if selected_cluster_id is not None:
             index = self.cluster_combo.findData(selected_cluster_id)
             if index != -1:
                 self.cluster_combo.setCurrentIndex(index)
-
-        # After populating, set the current index to the one matching selected_cluster_id
-        index = self.cluster_combo.findData(selected_cluster_id)
-        if index != -1:
-            self.cluster_combo.setCurrentIndex(index)
-        self.cluster_combo.blockSignals(False)
         logging.debug(f"Populated cluster selection with IDs: {list(cluster_info.keys())}")
+
+        # Update the enabled state of the next and previous buttons
+        has_clusters = self.cluster_combo.count() > 0
+        current_index = self.cluster_combo.currentIndex()
+        self.prev_cluster_button.setEnabled(has_clusters and current_index > 0)
+        self.next_cluster_button.setEnabled(has_clusters and current_index < self.cluster_combo.count() - 1)
+
+    def on_prev_cluster(self):
+        """
+        Selects the previous cluster in the ComboBox.
+        """
+        current_index = self.cluster_combo.currentIndex()
+        if current_index > 0:
+            self.cluster_combo.setCurrentIndex(current_index - 1)
+
+    def on_next_cluster(self):
+        """
+        Selects the next cluster in the ComboBox.
+        """
+        current_index = self.cluster_combo.currentIndex()
+        if current_index < self.cluster_combo.count() - 1:
+            self.cluster_combo.setCurrentIndex(current_index + 1)
 
     def on_cluster_selected(self, index: int):
         """
@@ -335,6 +369,10 @@ class ClusteredCropsView(QWidget):
         if cluster_id is not None:
             logging.debug(f"Cluster selected: {cluster_id}")
             self.sample_cluster.emit(cluster_id)
+
+        # Update the enabled state of the next and previous buttons
+        self.prev_cluster_button.setEnabled(index > 0)
+        self.next_cluster_button.setEnabled(index < self.cluster_combo.count() - 1)
 
     def on_crops_changed(self, value: int):
         """
@@ -360,12 +398,7 @@ class ClusteredCropsView(QWidget):
             logging.info(f"Class button clicked: {class_id}")
 
         self.class_selected_for_all.emit(class_id)
-
-    def on_restore_autosave(self):
-        """
-        Emits a signal when the 'Restore Autosave' button is clicked.
-        """
-        self.restore_autosave_requested.emit()
+        self.label_all_visible_crops(class_id)
 
     def label_all_visible_crops(self, class_id: Optional[int]):
         """
@@ -378,6 +411,8 @@ class ClusteredCropsView(QWidget):
             # Update the crop's class_id
             annotation: Annotation = crop['annotation']
             annotation.class_id = class_id if class_id is not None else -1
+            # Emit the signal
+            self.crop_label_changed.emit(annotation.to_dict(), annotation.class_id)
 
         # Re-arrange the crops to reflect the updated labels
         self.arrange_crops()
@@ -475,7 +510,6 @@ class ClusteredCropsView(QWidget):
         for idx, crop_data in enumerate(self.selected_crops):
             annotation: Annotation = crop_data['annotation']
             q_pixmap: QPixmap = crop_data['processed_crop']
-            coord_pos: tuple = crop_data['coord_pos']
 
             if q_pixmap.isNull():
                 logging.warning(f"Invalid QPixmap for image index {annotation.image_index}. Skipping.")
@@ -504,20 +538,11 @@ class ClusteredCropsView(QWidget):
 
             if (idx + 1) % num_columns == 0:
                 x_offset = 20
-                y_offset += max_row_height + 40  # Adjust for both crop and label height
+                y_offset += max_row_height + 20  # Adjust for both crop and label height
                 max_row_height = 0
 
             # Adjust the scene rect
         self.scene.setSceneRect(self.scene.itemsBoundingRect())
-
-    def on_crop_class_label_changed(self, annotation_dict: dict, class_id: int):
-        """
-        Handles when a class label is set for an individual crop.
-
-        :param annotation_dict: The dictionary representation of the Annotation.
-        :param class_id: The new class ID assigned.
-        """
-        self.crop_label_changed.emit(annotation_dict, class_id)
 
     def on_zoom_changed(self, value: int):
         """

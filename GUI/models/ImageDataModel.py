@@ -1,47 +1,39 @@
 # models/image_data_model.py
 
 import logging
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional
 
 import h5py
 import numpy as np
 from PyQt5.QtCore import QObject
-from PyQt5.QtGui import QPixmap, QImage
+from PyQt5.QtGui import QPixmap
 
 from GUI.models.CacheManager import CacheManager
 
 
 class ImageDataModel(QObject):
     """
-    Singleton class for loading and accessing image data, logits, uncertainties, and filenames
+    Class for loading and accessing image data, logits, uncertainties, and filenames
     from an HDF5 file.
     """
 
-    # Singleton instance
-    _instance = None
-
-    def __new__(cls, hdf5_file_path: Optional[str] = None):
-        if cls._instance is None:
-            if hdf5_file_path is None:
-                raise ValueError("Must provide hdf5_file_path for the first initialization.")
-            cls._instance = super(ImageDataModel, cls).__new__(cls)
-            cls._instance._initialized = False
-        return cls._instance
-
-    def __init__(self, hdf5_file_path: Optional[str] = None):
+    def __init__(self, hdf5_file_path: str):
         super().__init__()
-        if not self._initialized:
-            self._hdf5_file_path = hdf5_file_path
-            self._hdf5_file: Optional[h5py.File] = None
-            self._images = None
-            self._logits = None
-            self._epistemic_uncertainties = None
-            self._aleatoric_uncertainties = None
-            self._filenames = []
-            self.cache = CacheManager()
-            self._current_pixmap: Optional[QPixmap] = None
-            self._initialized = True
-            logging.info("ImageDataModel initialized.")
+        self._hdf5_file_path = hdf5_file_path
+        self._hdf5_file: Optional[h5py.File] = None
+        self._images = None
+        self._logits = None
+        self._epistemic_uncertainties = None
+        self._aleatoric_uncertainties = None
+        self._filenames = []
+        self.cache = CacheManager()
+        self._current_pixmap: Optional[QPixmap] = None
+        logging.info("ImageDataModel initialized.")
+
+    @property
+    def hdf5_file_path(self) -> str:
+        """Public property to access the HDF5 file path."""
+        return self._hdf5_file_path
 
     def _load_hdf5_file(self):
         """Opens the HDF5 file if not already open."""
@@ -98,40 +90,6 @@ class ImageDataModel(QObject):
         self.cache.set(index, data)
         logging.debug(f"Data for index {index} cached.")
         return data
-
-    def create_zoomed_crop(
-            self, image_array: np.ndarray, coord: Tuple[int, int], crop_size: int = 256, zoom_factor: int = 2
-    ) -> Tuple[QPixmap, int, int]:
-        """
-        Creates a zoomed crop of the given image around the specified coordinate.
-        """
-        logging.debug(
-            f"Creating zoomed crop at coord: {coord} with crop_size: {crop_size} and zoom_factor: {zoom_factor}")
-
-        # Ensure image is in uint8 format
-        if image_array.dtype != np.uint8:
-            image_array = (image_array * 255).astype(np.uint8)
-
-        height, width, channels = image_array.shape
-        if channels != 3:
-            raise ValueError("Expected RGB image with 3 channels.")
-
-        # Create QPixmap from image array
-        q_image = QImage(image_array.copy(), width, height, QImage.Format_RGB888)
-        original_pixmap = QPixmap.fromImage(q_image)
-
-        # Calculate crop boundaries
-        x_center, y_center = coord[1], coord[0]
-        x_start = max(0, min(width - crop_size, x_center - crop_size // 2))
-        y_start = max(0, min(height - crop_size, y_center - crop_size // 2))
-
-        cropped_pixmap = original_pixmap.copy(x_start, y_start, crop_size, crop_size)
-        zoomed_pixmap = cropped_pixmap.scaled(
-            crop_size * zoom_factor, crop_size * zoom_factor,
-            Qt.KeepAspectRatio, Qt.SmoothTransformation
-        )
-        logging.debug("Zoomed crop created successfully.")
-        return zoomed_pixmap, x_start, y_start
 
     def get_filenames(self) -> List[str]:
         """Returns a copy of the filenames."""

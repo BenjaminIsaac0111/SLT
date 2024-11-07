@@ -1,30 +1,109 @@
 import logging
+import os
 import sys
+import tempfile
 
+from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QApplication, QMainWindow, QTabWidget
+from PyQt5.QtWidgets import QDialog, QVBoxLayout, QLabel, QPushButton, QFileDialog, QMessageBox
 
 from GUI.controllers.GlobalClusterController import GlobalClusterController
 from GUI.models.ImageDataModel import ImageDataModel
 from GUI.views.ClusteredCropsView import ClusteredCropsView
 
 
+class StartupDialog(QDialog):
+    def __init__(self, autosave_file_exists):
+        super().__init__()
+        self.selected_option = None  # Track which option the user selected
+
+        self.setWindowTitle("Welcome to Patch Image Analysis Tool")
+        self.setFixedSize(400, 200)
+
+        layout = QVBoxLayout()
+        layout.addWidget(QLabel("Please choose how you'd like to start:", alignment=Qt.AlignCenter))
+
+        if autosave_file_exists:
+            continue_button = QPushButton("Continue Last Session")
+            continue_button.clicked.connect(self.continue_last_session)
+            layout.addWidget(continue_button)
+
+        load_button = QPushButton("Load Project")
+        load_button.clicked.connect(self.load_project)
+        layout.addWidget(load_button)
+
+        new_button = QPushButton("Start New Project")
+        new_button.clicked.connect(self.start_new_project)
+        layout.addWidget(new_button)
+
+        self.setLayout(layout)
+
+    def continue_last_session(self):
+        self.selected_option = "continue_last"
+        self.accept()
+
+    def load_project(self):
+        options = QFileDialog.Options()
+        project_file, _ = QFileDialog.getOpenFileName(
+            self, "Load Project", "", "JSON Files (*.json);;All Files (*)", options=options
+        )
+        if project_file:
+            self.selected_option = "load_project"
+            self.project_file = project_file
+            self.accept()
+
+    def start_new_project(self):
+        options = QFileDialog.Options()
+        hdf5_file, _ = QFileDialog.getOpenFileName(
+            self, "Select HDF5 File", "", "HDF5 Files (*.h5 *.hdf5);;All Files (*)", options=options
+        )
+        if hdf5_file:
+            self.selected_option = "start_new"
+            self.hdf5_file = hdf5_file
+            self.accept()
+        else:
+            QMessageBox.warning(self, "Warning", "No HDF5 file selected.")
+
+
 def main():
     logging.basicConfig(level=logging.DEBUG)
     app = QApplication(sys.argv)
 
-    # Initialize the model (replace 'your_hdf5_file.h5' with the actual HDF5 file path)
-    hdf5_file_path = (r"C:\Users\wispy\OneDrive - University of Leeds\PhD "
-                      r"Projects\Attention-UNET\cfg\unet_training_experiments\outputs\dropout_attention_unet_fl_f1.h5"
-                      r"\dropout_attention_unet_fl_f1_inference_output.h5")
-    model = ImageDataModel(hdf5_file_path)
-
-    # Initialize views
+    # Initialize views and controller
     clustered_crops_view = ClusteredCropsView()
+    global_cluster_controller = GlobalClusterController(model=None, view=clustered_crops_view)
 
-    # Initialize controllers
-    global_cluster_controller = GlobalClusterController(model=model, view=clustered_crops_view)
+    # Check for the latest autosave file
+    temp_dir = os.path.join(tempfile.gettempdir(), 'my_application_temp')
+    os.makedirs(temp_dir, exist_ok=True)
+    autosave_files = [f for f in os.listdir(temp_dir) if f.startswith('project_autosave') and f.endswith('.json')]
+    latest_autosave_file = None
+    if autosave_files:
+        autosave_files.sort(key=lambda f: os.path.getmtime(os.path.join(temp_dir, f)), reverse=True)
+        latest_autosave_file = os.path.join(temp_dir, autosave_files[0])
 
-    # Create a main window with tabs to switch between different views
+    # Show the startup dialog
+    startup_dialog = StartupDialog(autosave_file_exists=bool(latest_autosave_file))
+    if startup_dialog.exec_() == QDialog.Accepted:
+        # Check which option the user selected
+        if startup_dialog.selected_option == "continue_last" and latest_autosave_file:
+            # Continue with last autosaved project
+            global_cluster_controller.load_project_state(latest_autosave_file)
+        elif startup_dialog.selected_option == "load_project":
+            # Load selected project file
+            project_file = startup_dialog.project_file
+            global_cluster_controller.load_project_state(project_file)
+        elif startup_dialog.selected_option == "start_new":
+            # Start new project with selected HDF5 file
+            hdf5_file_path = startup_dialog.hdf5_file
+            model = ImageDataModel(hdf5_file_path)
+            global_cluster_controller.model = model  # Set model in the controller
+
+    else:
+        # If the dialog was cancelled, exit the application
+        sys.exit()
+
+    # Create the main application window
     main_window = QMainWindow()
     tab_widget = QTabWidget()
     tab_widget.addTab(clustered_crops_view, "Clustered Crops")
