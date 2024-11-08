@@ -5,6 +5,7 @@ import tempfile
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+from functools import partial
 from typing import List, Dict, Optional
 
 import numpy as np
@@ -459,9 +460,11 @@ class GlobalClusterController(QObject):
                     'coord_pos': coord_pos
                 })
             else:
+                # Process annotations that are not cached
                 annotations_to_process.append(anno)
 
         if annotations_to_process:
+            # Start the image processing worker for the annotations to process
             self.image_worker = ImageProcessingWorker(
                 sampled_annotations=annotations_to_process,
                 hdf5_file_path=self.model.hdf5_file_path,
@@ -470,14 +473,118 @@ class GlobalClusterController(QObject):
             self.image_thread = QThread()
             self.image_worker.moveToThread(self.image_thread)
             self.image_thread.started.connect(self.image_worker.process_images)
-            self.image_worker.processing_finished.connect(self.on_image_processing_finished)
+
+            # Use a lambda function to pass both cached and newly processed annotations
+            self.image_worker.processing_finished.connect(
+                lambda processed_annotations_new: self.on_image_processing_finished_main_thread(
+                    processed_annotations + processed_annotations_new
+                )
+            )
             self.image_worker.processing_finished.connect(self.image_thread.quit)
             self.image_worker.processing_finished.connect(self.image_worker.deleteLater)
             self.image_worker.progress_updated.connect(self.view.update_crop_loading_progress_bar)  # Connect progress
             self.image_thread.finished.connect(self.image_thread.deleteLater)
             self.image_thread.start()
         else:
-            self.on_image_processing_finished(processed_annotations)
+            # All data is cached; proceed to display
+            self.display_processed_annotations(processed_annotations)
+
+        self.preload_adjacent_clusters(cluster_id)
+
+    @pyqtSlot(list)
+    def on_image_processing_finished_main_thread(self, total_annotations: List[dict]):
+        self.display_processed_annotations(total_annotations)
+
+    def display_processed_annotations(self, annotations: List[dict]):
+        sampled_crops = []
+        for data in annotations:
+            annotation = data['annotation']
+            processed_crop = data['processed_crop']
+            coord_pos = data['coord_pos']
+            if processed_crop is None or coord_pos is None:
+                logging.warning(f"Processed crop or coord_pos is None for annotation: {annotation}")
+                continue
+            q_image = self.image_processor.numpy_to_qimage(processed_crop)
+            q_image = self.draw_annotation_on_image(q_image, coord_pos)
+            q_pixmap = QPixmap.fromImage(q_image)
+            sampled_crops.append({
+                'annotation': annotation,
+                'processed_crop': q_pixmap,
+                'coord_pos': coord_pos
+            })
+        self.view.display_sampled_crops(sampled_crops)
+        logging.info(f"Displayed {len(sampled_crops)} sampled crops.")
+        self.view.hide_progress_bar()  # Hide progress bar after loading completes
+        self.loading_images = False
+
+    def preload_adjacent_clusters(self, current_cluster_id: int):
+        cluster_ids = self.view.get_cluster_id_list()
+        current_index = cluster_ids.index(current_cluster_id)
+
+        adjacent_indices = []
+        if current_index > 0:
+            adjacent_indices.append(current_index - 1)  # Previous cluster
+        if current_index < len(cluster_ids) - 1:
+            adjacent_indices.append(current_index + 1)  # Next cluster
+
+        for index in adjacent_indices:
+            adjacent_cluster_id = cluster_ids[index]
+            if adjacent_cluster_id == current_cluster_id:
+                continue  # Skip current cluster
+            if not self.is_cluster_cached(adjacent_cluster_id):
+                self.start_background_loading(adjacent_cluster_id)
+
+    def is_cluster_cached(self, cluster_id: int) -> bool:
+        annotations = self.clusters.get(cluster_id, [])
+        for anno in annotations[:self.crops_per_cluster]:
+            cache_key = (anno.image_index, tuple(anno.coord))
+            if not self.image_processor.cache.get(cache_key):
+                return False
+        return True
+
+    def start_background_loading(self, cluster_id: int):
+        if hasattr(self, 'prefetching_clusters') and cluster_id in self.prefetching_clusters:
+            logging.debug(f"Already pre-loading cluster {cluster_id}.")
+            return
+
+        if not hasattr(self, 'prefetching_clusters'):
+            self.prefetching_clusters = set()
+        self.prefetching_clusters.add(cluster_id)
+
+        annotations = self.clusters.get(cluster_id, [])
+        num_samples = min(self.crops_per_cluster, len(annotations))
+        selected = annotations[:num_samples]
+
+        # Store prefetch workers in a dictionary
+        if not hasattr(self, 'prefetch_workers'):
+            self.prefetch_workers = {}
+
+        prefetch_worker = ImageProcessingWorker(
+            sampled_annotations=selected,
+            hdf5_file_path=self.model.hdf5_file_path,
+            image_processor=self.image_processor
+        )
+        prefetch_thread = QThread()
+        prefetch_worker.moveToThread(prefetch_thread)
+        prefetch_thread.started.connect(prefetch_worker.process_images)
+        prefetch_worker.processing_finished.connect(partial(self.on_prefetch_finished, cluster_id))
+        prefetch_worker.processing_finished.connect(prefetch_thread.quit)
+        prefetch_worker.processing_finished.connect(prefetch_worker.deleteLater)
+        prefetch_thread.finished.connect(prefetch_thread.deleteLater)
+        prefetch_thread.start()
+
+        # Store the worker and thread in the dictionary
+        self.prefetch_workers[cluster_id] = (prefetch_worker, prefetch_thread)
+
+    @pyqtSlot(list)
+    def on_prefetch_finished(self, cluster_id: int, processed_annotations: List[dict]):
+        if hasattr(self, 'prefetching_clusters'):
+            self.prefetching_clusters.discard(cluster_id)
+            # Remove the worker from the dictionary
+            if hasattr(self, 'prefetch_workers'):
+                self.prefetch_workers.pop(cluster_id, None)
+        logging.info(f"Prefetching completed for cluster {cluster_id}.")
+        # Since data is cached, no further action is needed
 
     @pyqtSlot(list)
     def on_image_processing_finished(self, processed_annotations: List[dict]):
