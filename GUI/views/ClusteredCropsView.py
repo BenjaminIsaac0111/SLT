@@ -167,10 +167,11 @@ class ClusteredCropsView(QWidget):
         self.clustering_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.clustering_button.clicked.connect(self.request_clustering.emit)
         clustering_layout.addWidget(self.clustering_button)
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setValue(0)
-        self.progress_bar.setVisible(False)  # Initially hidden
-        clustering_layout.addWidget(self.progress_bar)
+        # Use a unique variable name for the clustering progress bar
+        self.clustering_progress_bar = QProgressBar()
+        self.clustering_progress_bar.setValue(0)
+        self.clustering_progress_bar.setVisible(False)  # Initially hidden
+        clustering_layout.addWidget(self.clustering_progress_bar)
         clustering_group.setLayout(clustering_layout)
         control_panel_layout.addWidget(clustering_group)
 
@@ -304,6 +305,17 @@ class ClusteredCropsView(QWidget):
         self.scene = QGraphicsScene(self)
         self.graphics_view.setScene(self.scene)
 
+        # Now that self.graphics_view is defined, add the crop loading progress bar
+        self.crop_loading_progress_bar = QProgressBar(self.graphics_view)
+        self.crop_loading_progress_bar.setGeometry(
+            (self.graphics_view.viewport().width() - 300) // 2,
+            (self.graphics_view.viewport().height() - 25) // 2,
+            300,
+            25
+        )  # Position and size within the view
+        self.crop_loading_progress_bar.setAlignment(Qt.AlignCenter)
+        self.crop_loading_progress_bar.setVisible(False)
+
         # Add the crop view to the splitter
         splitter.addWidget(self.graphics_view)
 
@@ -317,6 +329,44 @@ class ClusteredCropsView(QWidget):
         self.setLayout(main_layout)
         self.setWindowTitle("Clustered Crops Viewer")
         self.resize(1200, 800)  # Ensure a large initial window size
+
+    # Update methods to use the correct progress bar
+
+    def show_clustering_progress_bar(self):
+        self.clustering_progress_bar.setValue(0)
+        self.clustering_progress_bar.setVisible(True)
+
+    def update_clustering_progress_bar(self, progress: int):
+        self.clustering_progress_bar.setValue(progress)
+
+    def hide_clustering_progress_bar(self):
+        self.clustering_progress_bar.setVisible(False)
+
+    def show_crop_loading_progress_bar(self):
+        """
+        Shows the progress bar in the center of the graphics view.
+        """
+        viewport_rect = self.graphics_view.viewport().rect()
+        x = (viewport_rect.width() - self.crop_loading_progress_bar.width()) // 2
+        y = (viewport_rect.height() - self.crop_loading_progress_bar.height()) // 2
+        self.crop_loading_progress_bar.move(x, y)
+        self.crop_loading_progress_bar.setValue(0)
+        self.crop_loading_progress_bar.setVisible(True)
+
+    def update_crop_loading_progress_bar(self, progress: int):
+        """
+        Updates the progress bar value.
+        """
+        if not self.crop_loading_progress_bar.isVisible():
+            self.crop_loading_progress_bar.setVisible(True)
+        self.crop_loading_progress_bar.setValue(progress)
+        logging.debug(f"Progress updated to: {progress}%")
+
+    def hide_crop_loading_progress_bar(self):
+        """
+        Hides the progress bar.
+        """
+        self.crop_loading_progress_bar.setVisible(False)
 
     def populate_cluster_selection(self, cluster_info: Dict[int, dict], selected_cluster_id: Optional[int] = None):
         """
@@ -447,28 +497,28 @@ class ClusteredCropsView(QWidget):
 
     def update_progress(self, progress: int):
         """
-        Updates the progress bar with the current progress value.
+        Updates the crop loading progress bar with the current progress value.
 
         :param progress: Progress percentage (0-100).
         """
-        if not self.progress_bar.isVisible():
-            self.progress_bar.setVisible(True)
-        self.progress_bar.setValue(progress)
+        if not self.crop_loading_progress_bar.isVisible():
+            self.crop_loading_progress_bar.setVisible(True)
+        self.crop_loading_progress_bar.setValue(progress)
         logging.debug(f"Progress updated to: {progress}%")
 
     def reset_progress(self):
         """
         Resets and shows the progress bar.
         """
-        self.progress_bar.setValue(0)
-        self.progress_bar.setVisible(True)
+        self.crop_loading_progress_bar.setValue(0)
+        self.crop_loading_progress_bar.setVisible(True)
         logging.debug("Progress bar reset.")
 
     def hide_progress_bar(self):
         """
-        Hides the progress bar.
+        Hides the crop loading progress bar.
         """
-        self.progress_bar.setVisible(False)
+        self.crop_loading_progress_bar.setVisible(False)
         logging.debug("Progress bar hidden.")
 
     def arrange_crops(self):
@@ -506,6 +556,7 @@ class ClusteredCropsView(QWidget):
         x_offset = 20
         y_offset = 20
         max_row_height = 0
+        arranged_crops_count = 0  # Counter for arranged crops
 
         for idx, crop_data in enumerate(self.selected_crops):
             annotation: Annotation = crop_data['annotation']
@@ -532,6 +583,7 @@ class ClusteredCropsView(QWidget):
 
             pixmap_item.setPos(x_offset, y_offset)
             self.scene.addItem(pixmap_item)
+            arranged_crops_count += 1  # Increment counter
 
             x_offset += image_size + 20
             max_row_height = max(max_row_height, image_size)
@@ -541,8 +593,17 @@ class ClusteredCropsView(QWidget):
                 y_offset += max_row_height + 20  # Adjust for both crop and label height
                 max_row_height = 0
 
-            # Adjust the scene rect
+        # Assertion to ensure all crops are arranged
+        expected_arranged = len(self.selected_crops)
+        actual_arranged = arranged_crops_count
+        assert actual_arranged == expected_arranged, (
+            f"View arrangement mismatch: expected {expected_arranged} crops arranged, got {actual_arranged}"
+        )
+        logging.info(f"Arranged {actual_arranged} crops in the view.")
+
+        # Adjust the scene rect
         self.scene.setSceneRect(self.scene.itemsBoundingRect())
+        logging.debug("Scene rect set to include all items.")
 
     def on_zoom_changed(self, value: int):
         """
@@ -574,13 +635,18 @@ class ClusteredCropsView(QWidget):
 
     def resizeEvent(self, event):
         """
-        Overrides the resize event to rearrange crops when the window size changes.
-
-        :param event: The resize event.
+        Overrides the resize event to rearrange crops and reposition progress bars when the window size changes.
         """
         super().resizeEvent(event)
         logging.debug("Window resized. Rearranging crops.")
         self.arrange_crops()
+
+        # Re-center the crop loading progress bar if it's visible
+        if self.crop_loading_progress_bar.isVisible():
+            viewport_rect = self.graphics_view.viewport().rect()
+            x = (viewport_rect.width() - self.crop_loading_progress_bar.width()) // 2
+            y = (viewport_rect.height() - self.crop_loading_progress_bar.height()) // 2
+            self.crop_loading_progress_bar.move(x, y)
 
     def on_load_project_state(self):
         """

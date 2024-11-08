@@ -8,7 +8,7 @@ import numpy as np
 from PyQt5.QtCore import QObject
 from PyQt5.QtGui import QPixmap
 
-from GUI.models.CacheManager import CacheManager
+from GUI.models.CacheManager import CacheManager  # Ensure the correct import path
 
 
 class ImageDataModel(QObject):
@@ -16,6 +16,9 @@ class ImageDataModel(QObject):
     Class for loading and accessing image data, logits, uncertainties, and filenames
     from an HDF5 file.
     """
+
+    # Shared Singleton CacheManager
+    cache = CacheManager(cache_size=1024)  # Adjust cache size as needed
 
     def __init__(self, hdf5_file_path: str):
         super().__init__()
@@ -26,7 +29,6 @@ class ImageDataModel(QObject):
         self._epistemic_uncertainties = None
         self._aleatoric_uncertainties = None
         self._filenames = []
-        self.cache = CacheManager()
         self._current_pixmap: Optional[QPixmap] = None
         logging.info("ImageDataModel initialized.")
 
@@ -73,8 +75,11 @@ class ImageDataModel(QObject):
             logging.error("Index out of range.")
             raise IndexError("Index out of range.")
 
+        # Generate a unique cache key (in this case, using the index)
+        cache_key = index
+
         # Cache access using CacheManager
-        cached_data = self.cache.get(index)
+        cached_data = self.cache.get(cache_key)
         if cached_data is not None:
             logging.debug(f"Data for index {index} retrieved from cache.")
             return cached_data
@@ -87,7 +92,7 @@ class ImageDataModel(QObject):
             'filename': self._filenames[index]
         }
         # Store data in cache
-        self.cache.set(index, data)
+        self.cache.set(cache_key, data)
         logging.debug(f"Data for index {index} cached.")
         return data
 

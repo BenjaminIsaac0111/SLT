@@ -9,9 +9,20 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QApplication, QMainWindow, QTabWidget
 from PyQt5.QtWidgets import QDialog, QVBoxLayout, QLabel, QPushButton, QFileDialog, QMessageBox
 
-from GUI.controllers.GlobalClusterController import GlobalClusterController
-from GUI.models.ImageDataModel import ImageDataModel
-from GUI.views.ClusteredCropsView import ClusteredCropsView
+
+def setup_logging():
+    """
+    Configures the logging settings for the application.
+    """
+    logging.basicConfig(
+        level=logging.DEBUG,  # Set the logging level to DEBUG
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.StreamHandler(sys.stdout)  # Ensure that logs are sent to the console
+            # You can add more handlers here if needed, e.g., FileHandler
+        ]
+    )
+    logging.debug("Logging has been configured.")
 
 
 class StartupDialog(QDialog):
@@ -68,10 +79,13 @@ class StartupDialog(QDialog):
 
 
 def main():
-    logging.basicConfig(level=logging.DEBUG)
     app = QApplication(sys.argv)
 
     # Initialize views and controller
+    from GUI.views.ClusteredCropsView import ClusteredCropsView
+    from GUI.controllers.GlobalClusterController import GlobalClusterController
+    from GUI.models.ImageDataModel import ImageDataModel
+
     clustered_crops_view = ClusteredCropsView()
     global_cluster_controller = GlobalClusterController(model=None, view=clustered_crops_view)
 
@@ -118,4 +132,5 @@ def main():
 
 
 if __name__ == "__main__":
+    setup_logging()
     main()
