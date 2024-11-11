@@ -656,6 +656,10 @@ class GlobalClusterController(QObject):
         selected_cluster_id = self.view.get_selected_cluster_id()
         self.view.populate_cluster_selection(cluster_info, selected_cluster_id=selected_cluster_id)
 
+        # Auto-Advance to Next Cluster if Enabled
+        if self.view.auto_next_checkbox.isChecked():
+            self.navigate_to_next_cluster()
+
     @pyqtSlot(dict, int)
     def on_crop_label_changed(self, crop_data: dict, class_id: int):
         """
@@ -1023,3 +1027,19 @@ class GlobalClusterController(QObject):
         except (IOError, json.JSONDecodeError, KeyError, ValueError) as e:
             logging.error(f"Failed to load project state from {project_file}: {e}")
             QMessageBox.critical(self.view, "Error", f"Failed to load project state: {e}")
+
+    def navigate_to_next_cluster(self):
+        current_id = self.view.get_selected_cluster_id()
+        cluster_ids = self.view.get_cluster_id_list()
+        current_index = cluster_ids.index(current_id)
+        if current_index < len(cluster_ids) - 1:
+            next_id = cluster_ids[current_index + 1]
+            self.on_sample_cluster(next_id)
+
+    def navigate_to_previous_cluster(self):
+        current_id = self.view.get_selected_cluster_id()
+        cluster_ids = self.view.get_cluster_id_list()
+        current_index = cluster_ids.index(current_id)
+        if current_index > 0:
+            prev_id = cluster_ids[current_index - 1]
+            self.on_sample_cluster(prev_id)

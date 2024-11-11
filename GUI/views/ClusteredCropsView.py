@@ -3,13 +3,13 @@ from functools import partial
 from typing import List, Dict, Optional
 
 from PyQt5.QtCore import QRectF, pyqtSignal, Qt, QEvent
-from PyQt5.QtGui import QPen, QPainter, QPixmap, QFont, QWheelEvent
+from PyQt5.QtGui import QPen, QPainter, QPixmap, QFont
 from PyQt5.QtWidgets import (
     QWidget, QComboBox, QPushButton, QVBoxLayout, QLabel,
     QProgressBar, QSpinBox, QSlider, QGraphicsView,
     QGraphicsScene, QMenu, QGridLayout, QFileDialog,
     QGroupBox, QSizePolicy, QSplitter, QGraphicsTextItem, QGraphicsObject, QAction, QGraphicsItem, QApplication,
-    QHBoxLayout
+    QHBoxLayout, QCheckBox
 )
 
 from GUI.models.Annotation import Annotation
@@ -147,14 +147,19 @@ class ClusteredCropsView(QWidget):
         self.zoom_level = 5  # Initial zoom level
         self.context_menu_open = False  # Initialize the flag
         self.selected_crops: List[dict] = []  # Store sampled crops for dynamic rearrangement
+        self.auto_next_cluster = False
         self.init_ui()
+
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setFocus()
+        self.graphics_view.viewport().installEventFilter(self)
 
     def init_ui(self):
         """
         Initializes the user interface components.
         """
         # Create a QSplitter to divide control panel and crop view
-        splitter = QSplitter(Qt.Horizontal)
+        self.splitter = QSplitter(Qt.Horizontal)
 
         # Left Panel (Control Panel)
         control_panel = QWidget()
@@ -166,8 +171,10 @@ class ClusteredCropsView(QWidget):
         self.clustering_button = QPushButton("Start Clustering")
         self.clustering_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.clustering_button.clicked.connect(self.request_clustering.emit)
+        self.clustering_button.setFocusPolicy(Qt.NoFocus)  # Prevent button from stealing focus
         clustering_layout.addWidget(self.clustering_button)
-        # Use a unique variable name for the clustering progress bar
+
+        # Clustering Progress Bar
         self.clustering_progress_bar = QProgressBar()
         self.clustering_progress_bar.setValue(0)
         self.clustering_progress_bar.setVisible(False)  # Initially hidden
@@ -178,6 +185,13 @@ class ClusteredCropsView(QWidget):
         # Cluster Selection Group
         cluster_selection_group = QGroupBox("Cluster Selection")
         cluster_selection_layout = QVBoxLayout()
+        # Checkbox for Auto-Next Cluster
+        self.auto_next_checkbox = QCheckBox("Auto Next Cluster")
+        self.auto_next_checkbox.setChecked(self.auto_next_cluster)  # Set initial state
+        self.auto_next_checkbox.stateChanged.connect(self.on_auto_next_toggle)
+        self.auto_next_checkbox.setFocusPolicy(Qt.NoFocus)  # Prevent checkbox from stealing focus
+        cluster_selection_layout.addWidget(self.auto_next_checkbox)
+
         cluster_selection_layout.addWidget(QLabel("Select Cluster:"))
 
         # Create a horizontal layout for ComboBox and buttons
@@ -187,15 +201,18 @@ class ClusteredCropsView(QWidget):
         self.prev_cluster_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.prev_cluster_button.clicked.connect(self.on_prev_cluster)
         self.prev_cluster_button.setEnabled(False)  # Initially disabled
+        self.prev_cluster_button.setFocusPolicy(Qt.NoFocus)  # Prevent button from stealing focus
 
         self.cluster_combo = QComboBox()
         self.cluster_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.cluster_combo.currentIndexChanged.connect(self.on_cluster_selected)
+        self.cluster_combo.setFocusPolicy(Qt.NoFocus)  # Prevent combobox from stealing focus
 
         self.next_cluster_button = QPushButton("Next")
         self.next_cluster_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.next_cluster_button.clicked.connect(self.on_next_cluster)
         self.next_cluster_button.setEnabled(False)  # Initially disabled
+        self.next_cluster_button.setFocusPolicy(Qt.NoFocus)  # Prevent button from stealing focus
 
         # Add widgets to the controls layout
         cluster_selection_controls_layout.addWidget(self.prev_cluster_button)
@@ -217,6 +234,7 @@ class ClusteredCropsView(QWidget):
         self.crops_spinbox.setRange(1, 1000)
         self.crops_spinbox.setValue(100)
         self.crops_spinbox.valueChanged.connect(self.on_crops_changed)
+        self.crops_spinbox.setFocusPolicy(Qt.NoFocus)  # Prevent spinbox from stealing focus
         sampling_layout.addWidget(self.crops_spinbox)
         sampling_group.setLayout(sampling_layout)
         control_panel_layout.addWidget(sampling_group)
@@ -230,34 +248,37 @@ class ClusteredCropsView(QWidget):
         self.zoom_slider.setMaximum(10)
         self.zoom_slider.setValue(self.zoom_level)
         self.zoom_slider.valueChanged.connect(self.on_zoom_changed)
+        self.zoom_slider.setFocusPolicy(Qt.NoFocus)  # Prevent slider from stealing focus
         zoom_layout.addWidget(self.zoom_slider)
         zoom_group.setLayout(zoom_layout)
         control_panel_layout.addWidget(zoom_group)
 
-        # Class Selection Buttons Group
+        # Class Selection Buttons with Key Hints
         class_buttons_group = QGroupBox("Class Labels")
         class_buttons_layout = QGridLayout()
-        row = 0
-        col = 0
+        row, col = 0, 0
 
-        # Add Unlabel Button
-        unlabel_button = QPushButton("Unlabel")
-        unlabel_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        # Button for Unlabel with '-' key hint
+        unlabel_button = QPushButton("Unlabel (-)")
         unlabel_button.clicked.connect(partial(self.on_class_button_clicked, None))
+        unlabel_button.setFocusPolicy(Qt.NoFocus)  # Prevent button from stealing focus
         class_buttons_layout.addWidget(unlabel_button, row, col)
-
         col += 1
+
+        # Add buttons for each class with number key hints
         for class_id, class_name in CLASS_COMPONENTS.items():
-            button = QPushButton(class_name)
-            button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            button_text = f"{class_name} ({class_id})"
+            button = QPushButton(button_text)
             button.clicked.connect(partial(self.on_class_button_clicked, class_id))
+            button.setFocusPolicy(Qt.NoFocus)  # Prevent button from stealing focus
             class_buttons_layout.addWidget(button, row, col)
             col += 1
-            if col >= 3:  # Adjust number of buttons per row
+            if col >= 3:
                 col = 0
                 row += 1
         class_buttons_group.setLayout(class_buttons_layout)
 
+        # Add class buttons to control panel layout
         control_panel_layout.addWidget(class_buttons_group)
 
         # Add a spacer to ensure dynamic resizing
@@ -267,18 +288,22 @@ class ClusteredCropsView(QWidget):
         self.load_project_button = QPushButton("Load Project")
         self.load_project_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.load_project_button.clicked.connect(self.on_load_project_state)
+        self.load_project_button.setFocusPolicy(Qt.NoFocus)  # Prevent button from stealing focus
 
         self.save_project_button = QPushButton("Save Project")
         self.save_project_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.save_project_button.clicked.connect(self.on_save_project_state)
+        self.save_project_button.setFocusPolicy(Qt.NoFocus)  # Prevent button from stealing focus
 
         self.export_annotations_button = QPushButton("Export Annotations")
         self.export_annotations_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.export_annotations_button.clicked.connect(self.on_export_annotations)
+        self.export_annotations_button.setFocusPolicy(Qt.NoFocus)  # Prevent button from stealing focus
 
         self.restore_autosave_button = QPushButton("Restore Autosave")
         self.restore_autosave_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.restore_autosave_button.clicked.connect(self.on_restore_autosave)
+        self.restore_autosave_button.setFocusPolicy(Qt.NoFocus)  # Prevent button from stealing focus
 
         control_panel_layout.addWidget(self.load_project_button)
         control_panel_layout.addWidget(self.save_project_button)
@@ -288,7 +313,7 @@ class ClusteredCropsView(QWidget):
         control_panel_layout.addStretch()
 
         # Add the control panel to the splitter
-        splitter.addWidget(control_panel)
+        self.splitter.addWidget(control_panel)
 
         # Right Panel (Crop View)
         self.graphics_view = QGraphicsView()
@@ -298,14 +323,14 @@ class ClusteredCropsView(QWidget):
         self.graphics_view.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.graphics_view.setDragMode(QGraphicsView.ScrollHandDrag)
         self.graphics_view.setViewportUpdateMode(QGraphicsView.BoundingRectViewportUpdate)
-        self.graphics_view.viewport().installEventFilter(self)
+        self.graphics_view.setFocusPolicy(Qt.NoFocus)  # Ensure it can receive focus
         self.graphics_view.setMouseTracking(True)
 
         # Graphics Scene
         self.scene = QGraphicsScene(self)
         self.graphics_view.setScene(self.scene)
 
-        # Now that self.graphics_view is defined, add the crop loading progress bar
+        # Crop Loading Progress Bar
         self.crop_loading_progress_bar = QProgressBar(self.graphics_view)
         self.crop_loading_progress_bar.setGeometry(
             (self.graphics_view.viewport().width() - 300) // 2,
@@ -317,20 +342,74 @@ class ClusteredCropsView(QWidget):
         self.crop_loading_progress_bar.setVisible(False)
 
         # Add the crop view to the splitter
-        splitter.addWidget(self.graphics_view)
+        self.splitter.addWidget(self.graphics_view)
 
-        # Set the initial splitter ratio
-        splitter.setStretchFactor(0, 1)  # Control panel takes less space initially
-        splitter.setStretchFactor(1, 5)  # Crop view takes more space initially
+        self.splitter.setStretchFactor(0, 1)  # Control panel takes less space initially
+        self.splitter.setStretchFactor(1, 3)  # Crop view takes up two-thirds initially
+        self.splitter.splitterMoved.connect(self.arrange_crops)
 
         # Set the layout for the main window
         main_layout = QVBoxLayout(self)
-        main_layout.addWidget(splitter)
+        main_layout.addWidget(self.splitter)
         self.setLayout(main_layout)
         self.setWindowTitle("Clustered Crops Viewer")
-        self.resize(1200, 800)  # Ensure a large initial window size
+        self.resize(1200, 800)
 
-    # Update methods to use the correct progress bar
+    def keyPressEvent(self, event):
+        key = event.key()
+
+        # Number keys for class selection (0 to 8)
+        if Qt.Key_0 <= key <= Qt.Key_8:
+            class_id = key - Qt.Key_0
+            if class_id in CLASS_COMPONENTS:
+                self.on_class_button_clicked(class_id)
+                return  # Event handled
+
+        # Minus key to unlabel
+        if key == Qt.Key_Minus or key == Qt.Key_Underscore:
+            self.on_class_button_clicked(None)
+            return  # Event handled
+
+        # Enter key to go to the next cluster
+        if key == Qt.Key_Return or key == Qt.Key_Enter:
+            self.on_next_cluster()
+            return
+
+        # Backspace key to go to the previous cluster
+        if key == Qt.Key_Backspace:
+            self.on_prev_cluster()
+            return
+
+        # Zoom with Ctrl + Mouse Wheel
+        if key == Qt.Key_Plus or key == Qt.Key_Equal:
+            self.zoom_level = min(self.zoom_level + 1, 10)
+            self.zoom_slider.setValue(self.zoom_level)
+            return
+        elif key == Qt.Key_Minus:
+            self.zoom_level = max(self.zoom_level - 1, 0)
+            self.zoom_slider.setValue(self.zoom_level)
+            return
+
+        super().keyPressEvent(event)
+
+    def eventFilter(self, obj, event):
+        """
+        Intercepts wheel events on the graphics view's viewport to handle zooming without scrolling.
+        """
+        if obj == self.graphics_view.viewport() and event.type() == QEvent.Wheel:
+            if event.modifiers() == Qt.ControlModifier:
+                # Handle zooming
+                delta = event.angleDelta().y() / 120  # 120 is the standard step
+                self.zoom_level += delta
+                self.zoom_level = max(0, min(self.zoom_level, 10))  # Limit zoom_level between 0 and 10
+                self.zoom_slider.setValue(self.zoom_level)
+                self.arrange_crops()  # Update the display to apply the zoom
+                event.accept()  # Accept the event to prevent further processing
+                return True  # Event handled
+            else:
+                # Allow scrolling
+                return False  # Do not filter the event
+        return super().eventFilter(obj, event)
 
     def show_clustering_progress_bar(self):
         self.clustering_progress_bar.setValue(0)
@@ -368,6 +447,14 @@ class ClusteredCropsView(QWidget):
         """
         self.crop_loading_progress_bar.setVisible(False)
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Calculate sizes based on the actual window width
+        total_width = self.width()
+        control_panel_width = total_width // 3  # One-third of the total width
+        graphics_view_width = total_width - control_panel_width
+        self.splitter.setSizes([control_panel_width, graphics_view_width])
+
     def populate_cluster_selection(self, cluster_info: Dict[int, dict], selected_cluster_id: Optional[int] = None):
         """
         Populates the cluster selection ComboBox with cluster IDs and info.
@@ -400,6 +487,7 @@ class ClusteredCropsView(QWidget):
         current_index = self.cluster_combo.currentIndex()
         if current_index > 0:
             self.cluster_combo.setCurrentIndex(current_index - 1)
+        self.setFocus()  # Ensure the main widget regains focus
 
     def on_next_cluster(self):
         """
@@ -408,6 +496,7 @@ class ClusteredCropsView(QWidget):
         current_index = self.cluster_combo.currentIndex()
         if current_index < self.cluster_combo.count() - 1:
             self.cluster_combo.setCurrentIndex(current_index + 1)
+        self.setFocus()  # Ensure the main widget regains focus
 
     def on_cluster_selected(self, index: int):
         """
@@ -424,6 +513,9 @@ class ClusteredCropsView(QWidget):
         self.prev_cluster_button.setEnabled(index > 0)
         self.next_cluster_button.setEnabled(index < self.cluster_combo.count() - 1)
 
+    def on_auto_next_toggle(self, state):
+        self.auto_next_cluster = bool(state)
+
     def on_crops_changed(self, value: int):
         """
         Emits a signal when the number of crops per cluster changes.
@@ -437,18 +529,24 @@ class ClusteredCropsView(QWidget):
 
     def on_class_button_clicked(self, class_id: Optional[int]):
         """
-        Handles the event when a class button is clicked to label all visible crops,
-        or unlabel them if class_id is None.
-
-        :param class_id: The class ID to assign, or None to unlabel.
+        Assign the current cluster with the selected class, then move to the next cluster if auto-advance is enabled.
         """
         if class_id is None:
-            logging.info("Unlabeling all visible crops.")
+            logging.info("Unlabeling current cluster.")
         else:
-            logging.info(f"Class button clicked: {class_id}")
+            logging.info(f"Assigning class {class_id} to the current cluster.")
 
-        self.class_selected_for_all.emit(class_id)
+        # Label all visible crops
         self.label_all_visible_crops(class_id)
+
+        # Emit the signal to inform the controller
+        self.class_selected_for_all.emit(class_id)
+
+        # Move to the next cluster if auto-advance is enabled
+        if self.auto_next_cluster:
+            self.on_next_cluster()
+
+        self.setFocus()  # Ensure the main widget regains focus
 
     def label_all_visible_crops(self, class_id: Optional[int]):
         """
@@ -615,31 +713,13 @@ class ClusteredCropsView(QWidget):
         logging.debug(f"Zoom level changed to: {self.zoom_level}")
         self.arrange_crops()
 
-    def eventFilter(self, source, event):
-        """
-        Event filter to handle mouse wheel events for zooming.
-
-        :param source: The source of the event.
-        :param event: The event object.
-        :return: True if the event is handled, False otherwise.
-        """
-        if event.type() == QEvent.Wheel and isinstance(event, QWheelEvent):
-            modifiers = event.modifiers()
-            if modifiers == Qt.ControlModifier:
-                delta = event.angleDelta().y() / 120  # 120 is the standard step
-                self.zoom_level += delta
-                self.zoom_level = max(-10, min(self.zoom_level, 10))  # Limit zoom_level
-                self.zoom_slider.setValue(self.zoom_level)
-                return True
-        return super().eventFilter(source, event)
-
     def resizeEvent(self, event):
         """
         Overrides the resize event to rearrange crops and reposition progress bars when the window size changes.
         """
         super().resizeEvent(event)
         logging.debug("Window resized. Rearranging crops.")
-        self.arrange_crops()
+        self.arrange_crops()  # Ensure crops are arranged on window resize
 
         # Re-center the crop loading progress bar if it's visible
         if self.crop_loading_progress_bar.isVisible():
