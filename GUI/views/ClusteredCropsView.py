@@ -425,12 +425,18 @@ class ClusteredCropsView(QWidget):
         """
         Shows the progress bar in the center of the graphics view.
         """
+        self.center_crop_loading_progress_bar()
+        self.crop_loading_progress_bar.setValue(0)
+        self.crop_loading_progress_bar.setVisible(True)
+
+    def center_crop_loading_progress_bar(self):
+        """
+        Centers the crop loading progress bar within the viewport of the graphics view.
+        """
         viewport_rect = self.graphics_view.viewport().rect()
         x = (viewport_rect.width() - self.crop_loading_progress_bar.width()) // 2
         y = (viewport_rect.height() - self.crop_loading_progress_bar.height()) // 2
         self.crop_loading_progress_bar.move(x, y)
-        self.crop_loading_progress_bar.setValue(0)
-        self.crop_loading_progress_bar.setVisible(True)
 
     def update_crop_loading_progress_bar(self, progress: int):
         """
@@ -723,10 +729,7 @@ class ClusteredCropsView(QWidget):
 
         # Re-center the crop loading progress bar if it's visible
         if self.crop_loading_progress_bar.isVisible():
-            viewport_rect = self.graphics_view.viewport().rect()
-            x = (viewport_rect.width() - self.crop_loading_progress_bar.width()) // 2
-            y = (viewport_rect.height() - self.crop_loading_progress_bar.height()) // 2
-            self.crop_loading_progress_bar.move(x, y)
+            self.center_crop_loading_progress_bar()
 
     def on_load_project_state(self):
         """
