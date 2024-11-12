@@ -3,12 +3,12 @@ from functools import partial
 from typing import List, Dict, Optional
 
 from PyQt5.QtCore import QRectF, pyqtSignal, Qt, QEvent
-from PyQt5.QtGui import QPen, QPainter, QPixmap, QFont
+from PyQt5.QtGui import QPen, QPainter, QPixmap, QFont, QFontMetrics
 from PyQt5.QtWidgets import (
     QWidget, QComboBox, QPushButton, QVBoxLayout, QLabel,
     QProgressBar, QSpinBox, QSlider, QGraphicsView,
     QGraphicsScene, QMenu, QGridLayout, QFileDialog,
-    QGroupBox, QSizePolicy, QSplitter, QGraphicsTextItem, QGraphicsObject, QAction, QGraphicsItem, QApplication,
+    QGroupBox, QSizePolicy, QSplitter, QGraphicsObject, QAction, QGraphicsItem, QApplication,
     QHBoxLayout, QCheckBox
 )
 
@@ -43,55 +43,70 @@ class ClickablePixmapItem(QGraphicsObject):
         self.setAcceptHoverEvents(True)
         self.hovered = False
         self.selected = False
+        self.scale_factor = 1.0  # Initialize scale factor
 
         # Calculate font size based on screen DPI
-        self.dpi_scaling = QApplication.primaryScreen().logicalDotsPerInch() / 96.0  # 96 DPI is standard
-        self.base_font_size = 12  # Base font size that scales dynamically
+        screen = QApplication.primaryScreen()
+        logical_dpi = screen.logicalDotsPerInch()
+        standard_dpi = 96.0  # Standard Windows DPI
+        self.dpi_scaling = logical_dpi / standard_dpi
+        self.base_font_size = 12  # Base font size
 
-        # Create the text item as a child
-        self.text_item = QGraphicsTextItem(self)
-        self.text_item.setDefaultTextColor(Qt.black)
-        self.update_text_label()
+        # Set up font and metrics
+        font_size = int(self.base_font_size * self.dpi_scaling)
+        self.font = QFont("Arial", font_size)
+        self.font_metrics = QFontMetrics(self.font)
+        self.label_height = self.font_metrics.height()
+
+    def setScaleFactor(self, scale):
+        """
+        Sets the scale factor for the image.
+        """
+        self.scale_factor = scale
+        self.update()  # Trigger a repaint
 
     def set_crop_class(self, class_id: int):
-        """
-        Updates the class_id of the annotation and emits a signal.
-        """
         self.annotation.class_id = class_id
         self.class_id = class_id
         self.class_label_changed.emit(self.annotation.to_dict(), self.class_id)
-        self.update_text_label()
-        self.update()
-
-    def update_text_label(self):
-        """
-        Updates the text label with the current class name and scales the font size based on DPI, independent of zoom.
-        """
-        if self.text_item is not None:
-            # Calculate dynamic font size
-            font_size = int(self.base_font_size * self.dpi_scaling)
-            font = QFont("Arial", font_size)
-            self.text_item.setFont(font)
-
-            # Set label text
-            label_text = CLASS_COMPONENTS.get(self.class_id, "Unlabelled") if self.class_id != -1 else "Unlabelled"
-            self.text_item.setPlainText(label_text)
-
-            # Position the text above the image
-            self.text_item.setPos(0, -20)  # Adjust as needed
+        self.update()  # Redraw the item to reflect the new label
 
     def boundingRect(self):
-        return QRectF(0, 0, self.pixmap.width(), self.pixmap.height())
+        """
+        Adjusts the bounding rectangle to include the scaled image and the label above it.
+        """
+        pixmap_width = self.pixmap.width() * self.scale_factor
+        pixmap_height = self.pixmap.height() * self.scale_factor
+        return QRectF(0, -self.label_height, pixmap_width, pixmap_height + self.label_height)
 
     def paint(self, painter: QPainter, option, widget):
         painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
-        painter.drawPixmap(0, 0, self.pixmap)
 
-        # Draw border
+        # Draw the scaled pixmap
+        painter.save()
+        painter.scale(self.scale_factor, self.scale_factor)
+        painter.drawPixmap(0, 0, self.pixmap)
+        painter.restore()
+
+        # Draw border around the scaled image
+        pixmap_width = self.pixmap.width() * self.scale_factor
+        pixmap_height = self.pixmap.height() * self.scale_factor
         pen = QPen(Qt.black if not self.hovered else Qt.blue)
         pen.setWidth(2 if self.selected or self.hovered else 1)
         painter.setPen(pen)
-        painter.drawRect(self.boundingRect())
+        painter.drawRect(QRectF(0, 0, pixmap_width, pixmap_height))
+
+        # Draw label text directly above the image, aligned with its top edge
+        painter.save()
+        # Position the label above the image in the item's local coordinates
+        label_x = 0  # Align text with the left edge of the image
+        label_y = -self.label_height + self.font_metrics.ascent()  # Offset to position text above image
+        painter.translate(label_x, label_y)
+        painter.setFont(self.font)
+        painter.setPen(Qt.black)
+        label_text = CLASS_COMPONENTS.get(self.class_id, "Unlabelled") if self.class_id != -1 else "Unlabelled"
+        painter.drawText(0, 0, label_text)
+        painter.restore()
 
     def hoverEnterEvent(self, event):
         self.hovered = True
@@ -139,6 +154,10 @@ class ClusteredCropsView(QWidget):
     crop_label_changed = pyqtSignal(dict, int)  # Emits (annotation_dict, class_id)
     save_project_state_requested = pyqtSignal()
     export_annotations_requested = pyqtSignal()
+    # Signals for Save and Save As actions
+    save_project_requested = pyqtSignal()
+    save_project_as_requested = pyqtSignal()
+
     load_project_state_requested = pyqtSignal(str)  # Emits the filename of the project state to load
     restore_autosave_requested = pyqtSignal()
 
@@ -154,6 +173,7 @@ class ClusteredCropsView(QWidget):
         self.setFocus()
         self.graphics_view.viewport().installEventFilter(self)
 
+    # noinspection PyAttributeOutsideInit
     def init_ui(self):
         """
         Initializes the user interface components.
@@ -163,153 +183,157 @@ class ClusteredCropsView(QWidget):
 
         # Left Panel (Control Panel)
         control_panel = QWidget()
-        control_panel_layout = QVBoxLayout(control_panel)
+        control_panel_layout = QVBoxLayout(control_panel)  # Main layout for control panel
 
-        # Clustering Controls Group
-        clustering_group = QGroupBox("Clustering Controls")
+        ##### Clustering Controls Group #####
+        clustering_group = QGroupBox("Clustering")
         clustering_layout = QVBoxLayout()
+
         self.clustering_button = QPushButton("Start Clustering")
         self.clustering_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.clustering_button.clicked.connect(self.request_clustering.emit)
-        self.clustering_button.setFocusPolicy(Qt.NoFocus)  # Prevent button from stealing focus
+        self.clustering_button.setFocusPolicy(Qt.NoFocus)
         clustering_layout.addWidget(self.clustering_button)
 
         # Clustering Progress Bar
         self.clustering_progress_bar = QProgressBar()
         self.clustering_progress_bar.setValue(0)
-        self.clustering_progress_bar.setVisible(False)  # Initially hidden
+        self.clustering_progress_bar.setVisible(False)
         clustering_layout.addWidget(self.clustering_progress_bar)
+
         clustering_group.setLayout(clustering_layout)
         control_panel_layout.addWidget(clustering_group)
 
-        # Cluster Selection Group
-        cluster_selection_group = QGroupBox("Cluster Selection")
-        cluster_selection_layout = QVBoxLayout()
-        # Checkbox for Auto-Next Cluster
+        ##### Cluster Navigation Group #####
+        cluster_navigation_group = QGroupBox("Cluster Navigation")
+        cluster_navigation_layout = QVBoxLayout()
+
+        # Auto-Next Cluster Checkbox
         self.auto_next_checkbox = QCheckBox("Auto Next Cluster")
-        self.auto_next_checkbox.setChecked(self.auto_next_cluster)  # Set initial state
+        self.auto_next_checkbox.setChecked(self.auto_next_cluster)
         self.auto_next_checkbox.stateChanged.connect(self.on_auto_next_toggle)
-        self.auto_next_checkbox.setFocusPolicy(Qt.NoFocus)  # Prevent checkbox from stealing focus
-        cluster_selection_layout.addWidget(self.auto_next_checkbox)
+        self.auto_next_checkbox.setFocusPolicy(Qt.NoFocus)
+        cluster_navigation_layout.addWidget(self.auto_next_checkbox)
 
-        cluster_selection_layout.addWidget(QLabel("Select Cluster:"))
-
-        # Create a horizontal layout for ComboBox and buttons
-        cluster_selection_controls_layout = QHBoxLayout()
-
+        # Cluster Selection Controls
+        cluster_selection_layout = QHBoxLayout()
         self.prev_cluster_button = QPushButton("Previous")
         self.prev_cluster_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.prev_cluster_button.clicked.connect(self.on_prev_cluster)
-        self.prev_cluster_button.setEnabled(False)  # Initially disabled
-        self.prev_cluster_button.setFocusPolicy(Qt.NoFocus)  # Prevent button from stealing focus
+        self.prev_cluster_button.setEnabled(False)
+        self.prev_cluster_button.setFocusPolicy(Qt.NoFocus)
 
         self.cluster_combo = QComboBox()
         self.cluster_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.cluster_combo.currentIndexChanged.connect(self.on_cluster_selected)
-        self.cluster_combo.setFocusPolicy(Qt.NoFocus)  # Prevent combobox from stealing focus
+        self.cluster_combo.setFocusPolicy(Qt.NoFocus)
 
         self.next_cluster_button = QPushButton("Next")
         self.next_cluster_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.next_cluster_button.clicked.connect(self.on_next_cluster)
-        self.next_cluster_button.setEnabled(False)  # Initially disabled
-        self.next_cluster_button.setFocusPolicy(Qt.NoFocus)  # Prevent button from stealing focus
+        self.next_cluster_button.setEnabled(False)
+        self.next_cluster_button.setFocusPolicy(Qt.NoFocus)
 
-        # Add widgets to the controls layout
-        cluster_selection_controls_layout.addWidget(self.prev_cluster_button)
-        cluster_selection_controls_layout.addWidget(self.cluster_combo)
-        cluster_selection_controls_layout.addWidget(self.next_cluster_button)
+        cluster_selection_layout.addWidget(self.prev_cluster_button)
+        cluster_selection_layout.addWidget(self.cluster_combo)
+        cluster_selection_layout.addWidget(self.next_cluster_button)
 
-        # Add the controls layout to the cluster selection layout
-        cluster_selection_layout.addLayout(cluster_selection_controls_layout)
+        cluster_navigation_layout.addLayout(cluster_selection_layout)
+        cluster_navigation_group.setLayout(cluster_navigation_layout)
+        control_panel_layout.addWidget(cluster_navigation_group)
 
-        cluster_selection_group.setLayout(cluster_selection_layout)
-        control_panel_layout.addWidget(cluster_selection_group)
-
-        # Sampling Parameters Group
+        ##### Sampling Parameters Group #####
         sampling_group = QGroupBox("Sampling Parameters")
         sampling_layout = QVBoxLayout()
         sampling_layout.addWidget(QLabel("Number of Crops per Cluster:"))
+
         self.crops_spinbox = QSpinBox()
         self.crops_spinbox.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.crops_spinbox.setRange(1, 1000)
         self.crops_spinbox.setValue(100)
         self.crops_spinbox.valueChanged.connect(self.on_crops_changed)
-        self.crops_spinbox.setFocusPolicy(Qt.NoFocus)  # Prevent spinbox from stealing focus
+        self.crops_spinbox.setFocusPolicy(Qt.NoFocus)
         sampling_layout.addWidget(self.crops_spinbox)
+
         sampling_group.setLayout(sampling_layout)
         control_panel_layout.addWidget(sampling_group)
 
-        # Zoom Slider Group
+        ##### Zoom Controls Group #####
         zoom_group = QGroupBox("Zoom")
         zoom_layout = QVBoxLayout()
+
         self.zoom_slider = QSlider(Qt.Horizontal)
         self.zoom_slider.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.zoom_slider.setMinimum(0)
         self.zoom_slider.setMaximum(10)
         self.zoom_slider.setValue(self.zoom_level)
         self.zoom_slider.valueChanged.connect(self.on_zoom_changed)
-        self.zoom_slider.setFocusPolicy(Qt.NoFocus)  # Prevent slider from stealing focus
+        self.zoom_slider.setFocusPolicy(Qt.NoFocus)
         zoom_layout.addWidget(self.zoom_slider)
+
         zoom_group.setLayout(zoom_layout)
         control_panel_layout.addWidget(zoom_group)
 
-        # Class Selection Buttons with Key Hints
-        class_buttons_group = QGroupBox("Class Labels")
-        class_buttons_layout = QGridLayout()
+        ##### Class Labels Group #####
+        class_labels_group = QGroupBox("Class Labels")
+        class_labels_layout = QGridLayout()
         row, col = 0, 0
 
-        # Button for Unlabel with '-' key hint
+        # Unlabel Button
         unlabel_button = QPushButton("Unlabel (-)")
         unlabel_button.clicked.connect(partial(self.on_class_button_clicked, None))
-        unlabel_button.setFocusPolicy(Qt.NoFocus)  # Prevent button from stealing focus
-        class_buttons_layout.addWidget(unlabel_button, row, col)
+        unlabel_button.setFocusPolicy(Qt.NoFocus)
+        class_labels_layout.addWidget(unlabel_button, row, col)
         col += 1
 
-        # Add buttons for each class with number key hints
+        # Class Buttons
         for class_id, class_name in CLASS_COMPONENTS.items():
             button_text = f"{class_name} ({class_id})"
             button = QPushButton(button_text)
             button.clicked.connect(partial(self.on_class_button_clicked, class_id))
-            button.setFocusPolicy(Qt.NoFocus)  # Prevent button from stealing focus
-            class_buttons_layout.addWidget(button, row, col)
+            button.setFocusPolicy(Qt.NoFocus)
+            class_labels_layout.addWidget(button, row, col)
             col += 1
             if col >= 3:
                 col = 0
                 row += 1
-        class_buttons_group.setLayout(class_buttons_layout)
 
-        # Add class buttons to control panel layout
-        control_panel_layout.addWidget(class_buttons_group)
+        class_labels_group.setLayout(class_labels_layout)
+        control_panel_layout.addWidget(class_labels_group)
 
-        # Add a spacer to ensure dynamic resizing
-        control_panel_layout.addStretch()
+        ##### File Operations Group #####
+        file_operations_group = QGroupBox("File Operations")
+        file_operations_layout = QVBoxLayout()
 
-        # Save and Load Buttons
         self.load_project_button = QPushButton("Load Project")
-        self.load_project_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.load_project_button.clicked.connect(self.on_load_project_state)
-        self.load_project_button.setFocusPolicy(Qt.NoFocus)  # Prevent button from stealing focus
+        self.load_project_button.setFocusPolicy(Qt.NoFocus)
+        file_operations_layout.addWidget(self.load_project_button)
 
-        self.save_project_button = QPushButton("Save Project")
-        self.save_project_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.save_project_button.clicked.connect(self.on_save_project_state)
-        self.save_project_button.setFocusPolicy(Qt.NoFocus)  # Prevent button from stealing focus
+        self.save_project_button = QPushButton("Save")
+        self.save_project_button.clicked.connect(self.save_project_requested.emit)
+        self.save_project_button.setFocusPolicy(Qt.NoFocus)
+        file_operations_layout.addWidget(self.save_project_button)
+
+        self.save_project_as_button = QPushButton("Save As...")
+        self.save_project_as_button.clicked.connect(self.save_project_as_requested.emit)
+        self.save_project_as_button.setFocusPolicy(Qt.NoFocus)
+        file_operations_layout.addWidget(self.save_project_as_button)
 
         self.export_annotations_button = QPushButton("Export Annotations")
-        self.export_annotations_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.export_annotations_button.clicked.connect(self.on_export_annotations)
-        self.export_annotations_button.setFocusPolicy(Qt.NoFocus)  # Prevent button from stealing focus
+        self.export_annotations_button.setFocusPolicy(Qt.NoFocus)
+        file_operations_layout.addWidget(self.export_annotations_button)
 
         self.restore_autosave_button = QPushButton("Restore Autosave")
-        self.restore_autosave_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.restore_autosave_button.clicked.connect(self.on_restore_autosave)
-        self.restore_autosave_button.setFocusPolicy(Qt.NoFocus)  # Prevent button from stealing focus
+        self.restore_autosave_button.setFocusPolicy(Qt.NoFocus)
+        file_operations_layout.addWidget(self.restore_autosave_button)
 
-        control_panel_layout.addWidget(self.load_project_button)
-        control_panel_layout.addWidget(self.save_project_button)
-        control_panel_layout.addWidget(self.export_annotations_button)
-        control_panel_layout.addWidget(self.restore_autosave_button)
+        file_operations_group.setLayout(file_operations_layout)
+        control_panel_layout.addWidget(file_operations_group)
 
+        # Add a spacer to push everything to the top
         control_panel_layout.addStretch()
 
         # Add the control panel to the splitter
@@ -323,7 +347,7 @@ class ClusteredCropsView(QWidget):
         self.graphics_view.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.graphics_view.setDragMode(QGraphicsView.ScrollHandDrag)
         self.graphics_view.setViewportUpdateMode(QGraphicsView.BoundingRectViewportUpdate)
-        self.graphics_view.setFocusPolicy(Qt.NoFocus)  # Ensure it can receive focus
+        self.graphics_view.setFocusPolicy(Qt.NoFocus)
         self.graphics_view.setMouseTracking(True)
 
         # Graphics Scene
@@ -337,15 +361,15 @@ class ClusteredCropsView(QWidget):
             (self.graphics_view.viewport().height() - 25) // 2,
             300,
             25
-        )  # Position and size within the view
+        )
         self.crop_loading_progress_bar.setAlignment(Qt.AlignCenter)
         self.crop_loading_progress_bar.setVisible(False)
 
         # Add the crop view to the splitter
         self.splitter.addWidget(self.graphics_view)
 
-        self.splitter.setStretchFactor(0, 1)  # Control panel takes less space initially
-        self.splitter.setStretchFactor(1, 3)  # Crop view takes up two-thirds initially
+        self.splitter.setStretchFactor(0, 1)  # Control panel
+        self.splitter.setStretchFactor(1, 3)  # Crop view
         self.splitter.splitterMoved.connect(self.arrange_crops)
 
         # Set the layout for the main window
@@ -626,10 +650,6 @@ class ClusteredCropsView(QWidget):
         logging.debug("Progress bar hidden.")
 
     def arrange_crops(self):
-        """
-        Arranges the sampled crops in a grid layout that adapts to the window size
-        and supports zooming functionality. Images expand and contract to fill the space.
-        """
         if getattr(self.scene, 'context_menu_open', False):
             return  # Do not rearrange crops if the context menu is open
         self.scene.clear()
@@ -683,14 +703,17 @@ class ClusteredCropsView(QWidget):
                 logging.warning("Crop width is zero, skipping this image to prevent division by zero.")
                 continue
             scale = image_size / original_width
-            pixmap_item.setScale(scale)
+            pixmap_item.setScaleFactor(scale)  # Use setScaleFactor instead of setScale
+
+            # After setting the scale factor, get the bounding rect
+            bounding_rect = pixmap_item.boundingRect()
 
             pixmap_item.setPos(x_offset, y_offset)
             self.scene.addItem(pixmap_item)
             arranged_crops_count += 1  # Increment counter
 
-            x_offset += image_size + 20
-            max_row_height = max(max_row_height, image_size)
+            x_offset += bounding_rect.width() + 20  # Use bounding_rect.width()
+            max_row_height = max(max_row_height, bounding_rect.height())  # Use bounding_rect.height()
 
             if (idx + 1) % num_columns == 0:
                 x_offset = 20

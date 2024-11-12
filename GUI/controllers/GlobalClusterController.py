@@ -248,6 +248,7 @@ class GlobalClusterController(QObject):
         self.view = view
         self.image_processor = ImageProcessor()
         self.region_selector = UncertaintyRegionSelector()
+        self.current_save_path = None
         self.is_saving = False
         self.loading_images = False
 
@@ -303,6 +304,8 @@ class GlobalClusterController(QObject):
         self.view.export_annotations_requested.connect(self.on_export_annotations)
         self.view.load_project_state_requested.connect(self.on_load_project_state)
         self.view.restore_autosave_requested.connect(self.on_restore_autosave_requested)
+        self.view.save_project_requested.connect(self.save_project)
+        self.view.save_project_as_requested.connect(self.save_project_as)
 
         self.clustering_progress.connect(self.view.update_clustering_progress_bar)
         self.clusters_ready.connect(self.on_clusters_ready)
@@ -656,6 +659,9 @@ class GlobalClusterController(QObject):
         selected_cluster_id = self.view.get_selected_cluster_id()
         self.view.populate_cluster_selection(cluster_info, selected_cluster_id=selected_cluster_id)
 
+        # Autosave the project state after updating the class for all crops
+        self.autosave_project_state()
+
         # Auto-Advance to Next Cluster if Enabled
         if self.view.auto_next_checkbox.isChecked():
             self.navigate_to_next_cluster()
@@ -688,8 +694,11 @@ class GlobalClusterController(QObject):
         cluster_info = self.generate_cluster_info()
         self.view.populate_cluster_selection(cluster_info, selected_cluster_id=cluster_id)
 
+        # Autosave the project state after updating the individual crop label
+        self.autosave_project_state()
+
     @pyqtSlot(int, int)
-    def on_selection_parameters_changed(self, cluster_id: int, crops_per_cluster: int):
+    def on_selection_parameters_changed(self, crops_per_cluster: int):
         """
         Handles changes in selection parameters (number of crops per cluster).
         Implements debouncing to prevent excessive sampling.
@@ -797,38 +806,61 @@ class GlobalClusterController(QObject):
         self.load_project_state(project_file)
 
     @pyqtSlot()
-    def on_save_project_state(self):
+    def save_project(self):
         """
-        Prompts the user to save the current project state to a file.
+        Saves the project state to the current file path.
+        If the current file path is not set, it prompts the user to choose a save location (Save As behavior).
+        """
+        if self.current_save_path:
+            self.save_project_state(self.current_save_path, show_popup=True)
+        else:
+            self.save_project_as()
+
+    @pyqtSlot()
+    def save_project_as(self):
+        """
+        Prompts the user to select a location and file name, and then saves the project state.
         """
         options = QFileDialog.Options()
-        project_file, _ = QFileDialog.getSaveFileName(
-            self.view, "Save Project State", "", "JSON Files (*.json);;All Files (*)", options=options
+        file_path, _ = QFileDialog.getSaveFileName(
+            self.view, "Save Project As", "", "JSON Files (*.json);;All Files (*)", options=options
         )
-        if project_file:
-            self.save_project_state(project_file)
+        if file_path:
+            self.current_save_path = file_path  # Set the new save location
+            self.save_project_state(file_path, show_popup=True)
         else:
-            logging.debug("Save project state action was canceled.")
+            logging.info("Save As action was canceled by the user.")
 
-    def save_project_state(self, project_file_path: Optional[str] = None, show_popup: bool = True):
+    def save_project_state(self, file_path: Optional[str], show_popup: bool = True):
         """
         Saves the current project state, including in-progress annotations and settings.
         The `show_popup` parameter controls whether a success message is displayed.
         """
-        project_file = project_file_path or os.path.join(TEMP_DIR, 'labelling_project_state.json')
-        project_state = self.get_current_state()
+        if not file_path:
+            logging.error("No file path provided for saving.")
+            return
 
+        project_state = self.get_current_state()
         try:
-            with open(project_file, 'w') as f:
+            with open(file_path, 'w') as f:
                 json.dump(project_state, f, indent=4)
-            logging.info(f"Project state saved to {project_file}")
+            logging.info(f"Project state saved to {file_path}")
 
             if show_popup:
-                QMessageBox.information(self.view, "Project Saved", f"Project state saved to {project_file}")
+                QMessageBox.information(self.view, "Project Saved", f"Project state saved to {file_path}")
 
         except (TypeError, IOError) as e:
             logging.error(f"Failed to save project state: {e}")
             QMessageBox.critical(self.view, "Error", f"Failed to save project state: {e}")
+
+    def on_save_project_state(self):
+        """
+        Emits a signal when the 'Save Project' button is clicked.
+        """
+        if self.current_save_path:
+            self.save_project()
+        else:
+            self.save_project_as()
 
     def get_current_state(self) -> dict:
         """
@@ -922,6 +954,7 @@ class GlobalClusterController(QObject):
         Handles exporting labeled annotations to a JSON file.
         """
         self.export_annotations()
+        self.autosave_project_state()
 
     @pyqtSlot()
     def on_restore_autosave_requested(self):
@@ -947,6 +980,7 @@ class GlobalClusterController(QObject):
 
         if autosave_file:
             self.load_project_state(autosave_file)
+            self.autosave_project_state()
         else:
             logging.info("User canceled the restore autosave action.")
 
