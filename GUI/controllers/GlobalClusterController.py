@@ -298,7 +298,7 @@ class GlobalClusterController(QObject):
         self.view.request_clustering.connect(self.start_clustering)
         self.view.sample_cluster.connect(self.on_sample_cluster)
         self.view.sampling_parameters_changed.connect(self.on_selection_parameters_changed)
-        self.view.class_selected_for_all.connect(self.on_class_selected_for_all)
+        self.view.bulk_label_changed.connect(self.on_bulk_label_changed)
         self.view.crop_label_changed.connect(self.on_crop_label_changed)
         self.view.save_project_state_requested.connect(self.on_save_project_state)
         self.view.export_annotations_requested.connect(self.on_export_annotations)
@@ -380,7 +380,7 @@ class GlobalClusterController(QObject):
 
     def generate_cluster_info(self) -> Dict[int, dict]:
         """
-        Generates a dictionary containing cluster information for populating the GUI's cluster selection.
+        Generates a dictionary containing cluster information for the GUI.
         """
         cluster_info = OrderedDict()
         for cluster_id, annotations in self.clusters.items():
@@ -643,28 +643,21 @@ class GlobalClusterController(QObject):
 
         return zoomed_qimage
 
-    @pyqtSlot(object)
-    def on_class_selected_for_all(self, class_id: Optional[int]):
+    @pyqtSlot(int)
+    def on_bulk_label_changed(self, class_id: int):
         """
-        Handles when a class is selected to label all visible crops.
+        Handles a bulk update for all visible crops' labels.
+        Refreshes UI once and saves the project state.
         """
-        if class_id is None:
-            logging.info("Unlabeling all visible crops.")
-        else:
-            logging.info(f"Class {class_id} selected for all visible crops.")
+        # Get the current cluster ID to update information
+        current_cluster_id = self.view.get_selected_cluster_id()
 
-        # The view has already updated the annotations and emitted crop_label_changed signals.
-        # Refresh the cluster info and UI
+        # Update the cluster information in the UI
         cluster_info = self.generate_cluster_info()
-        selected_cluster_id = self.view.get_selected_cluster_id()
-        self.view.populate_cluster_selection(cluster_info, selected_cluster_id=selected_cluster_id)
+        self.view.populate_cluster_selection(cluster_info, selected_cluster_id=current_cluster_id)
 
-        # Autosave the project state after updating the class for all crops
+        # Autosave the project state once after the bulk operation
         self.autosave_project_state()
-
-        # Auto-Advance to Next Cluster if Enabled
-        if self.view.auto_next_checkbox.isChecked():
-            self.navigate_to_next_cluster()
 
     @pyqtSlot(dict, int)
     def on_crop_label_changed(self, crop_data: dict, class_id: int):
@@ -864,7 +857,7 @@ class GlobalClusterController(QObject):
 
     def get_current_state(self) -> dict:
         """
-        Extracts the current project state, organizing clusters and annotations in a dictionary format.
+        Extracts the current project state, organizing clusters and annotations.
         """
         project_state = {
             'hdf5_file_path': self.model.hdf5_file_path,  # Include the HDF5 file path

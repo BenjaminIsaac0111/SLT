@@ -150,7 +150,7 @@ class ClusteredCropsView(QWidget):
     request_clustering = pyqtSignal()
     sample_cluster = pyqtSignal(int)
     sampling_parameters_changed = pyqtSignal(int, int)  # Emits (cluster_id, crops_per_cluster)
-    class_selected_for_all = pyqtSignal(object)  # Emits the class_id for all visible crops
+    bulk_label_changed = pyqtSignal(int)  # Emits the class_id for all visible crops
     crop_label_changed = pyqtSignal(dict, int)  # Emits (annotation_dict, class_id)
     save_project_state_requested = pyqtSignal()
     export_annotations_requested = pyqtSignal()
@@ -559,40 +559,36 @@ class ClusteredCropsView(QWidget):
 
     def on_class_button_clicked(self, class_id: Optional[int]):
         """
-        Assign the current cluster with the selected class, then move to the next cluster if auto-advance is enabled.
+        Assigns a class to all visible crops and emits a bulk change signal.
         """
         if class_id is None:
             logging.info("Unlabeling current cluster.")
         else:
             logging.info(f"Assigning class {class_id} to the current cluster.")
 
-        # Label all visible crops
+        # Label all visible crops in bulk
         self.label_all_visible_crops(class_id)
-
-        # Emit the signal to inform the controller
-        self.class_selected_for_all.emit(class_id)
 
         # Move to the next cluster if auto-advance is enabled
         if self.auto_next_cluster:
             self.on_next_cluster()
 
-        self.setFocus()  # Ensure the main widget regains focus
+        self.setFocus()
 
     def label_all_visible_crops(self, class_id: Optional[int]):
         """
         Labels all the currently visible crops with the given class_id.
         If class_id is None, unlabels them.
-
-        :param class_id: The class ID to assign, or None to unlabel.
         """
         for crop in self.selected_crops:
-            # Update the crop's class_id
+            # Update the crop's class_id without emitting individual signals
             annotation: Annotation = crop['annotation']
             annotation.class_id = class_id if class_id is not None else -1
-            # Emit the signal
-            self.crop_label_changed.emit(annotation.to_dict(), annotation.class_id)
 
-        # Re-arrange the crops to reflect the updated labels
+        # Emit a bulk signal to indicate that all visible crops were updated
+        self.bulk_label_changed.emit(class_id)
+
+        # Refresh UI once after updating all crops
         self.arrange_crops()
 
     def get_selected_cluster_id(self) -> Optional[int]:
