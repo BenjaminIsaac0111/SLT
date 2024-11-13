@@ -9,10 +9,15 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QApplication, QMainWindow, QTabWidget
 from PyQt5.QtWidgets import QDialog, QVBoxLayout, QLabel, QPushButton, QFileDialog, QMessageBox
 
+from GUI.controllers.GlobalClusterController import GlobalClusterController
+from GUI.models.ImageDataModel import ImageDataModel
+from GUI.views.ClusteredCropsView import ClusteredCropsView
+
 QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
 QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
 
 app = QApplication(sys.argv)
+
 
 def setup_logging():
     """
@@ -61,8 +66,13 @@ class StartupDialog(QDialog):
 
     def load_project(self):
         options = QFileDialog.Options()
+        # Update the file filter to include compressed and uncompressed JSON files
         project_file, _ = QFileDialog.getOpenFileName(
-            self, "Load Project", "", "JSON Files (*.json);;All Files (*)", options=options
+            self,
+            "Load Project",
+            "",
+            "JSON Files (*.json);;Compressed JSON Files (*.json.gz);;All Files (*)",
+            options=options
         )
         if project_file:
             self.selected_option = "load_project"
@@ -72,7 +82,11 @@ class StartupDialog(QDialog):
     def start_new_project(self):
         options = QFileDialog.Options()
         hdf5_file, _ = QFileDialog.getOpenFileName(
-            self, "Select HDF5 File", "", "HDF5 Files (*.h5 *.hdf5);;All Files (*)", options=options
+            self,
+            "Select HDF5 File",
+            "",
+            "HDF5 Files (*.h5 *.hdf5);;All Files (*)",
+            options=options
         )
         if hdf5_file:
             self.selected_option = "start_new"
@@ -83,20 +97,18 @@ class StartupDialog(QDialog):
 
 
 def main():
-    app = QApplication(sys.argv)
+    setup_logging()
 
     # Initialize views and controller
-    from GUI.views.ClusteredCropsView import ClusteredCropsView
-    from GUI.controllers.GlobalClusterController import GlobalClusterController
-    from GUI.models.ImageDataModel import ImageDataModel
-
     clustered_crops_view = ClusteredCropsView()
     global_cluster_controller = GlobalClusterController(model=None, view=clustered_crops_view)
 
     # Check for the latest autosave file
     temp_dir = os.path.join(tempfile.gettempdir(), 'my_application_temp')
     os.makedirs(temp_dir, exist_ok=True)
-    autosave_files = [f for f in os.listdir(temp_dir) if f.startswith('project_autosave') and f.endswith('.json')]
+    # Update the search to look for .json.gz files
+    autosave_files = [f for f in os.listdir(temp_dir)
+                      if f.startswith('project_autosave') and f.endswith('.json.gz')]
     latest_autosave_file = None
     if autosave_files:
         autosave_files.sort(key=lambda f: os.path.getmtime(os.path.join(temp_dir, f)), reverse=True)
@@ -118,7 +130,6 @@ def main():
             hdf5_file_path = startup_dialog.hdf5_file
             model = ImageDataModel(hdf5_file_path)
             global_cluster_controller.model = model  # Set model in the controller
-
     else:
         # If the dialog was cancelled, exit the application
         sys.exit()
@@ -136,5 +147,4 @@ def main():
 
 
 if __name__ == "__main__":
-    setup_logging()
     main()

@@ -1,3 +1,4 @@
+import gzip
 import json
 import logging
 import os
@@ -20,7 +21,6 @@ from GUI.models.ImageProcessor import ImageProcessor
 from GUI.models.UncertaintyRegionSelector import UncertaintyRegionSelector
 from GUI.views.ClusteredCropsView import ClusteredCropsView
 
-# Create a dedicated temp directory for your application
 TEMP_DIR = os.path.join(tempfile.gettempdir(), 'my_application_temp')
 os.makedirs(TEMP_DIR, exist_ok=True)
 
@@ -48,10 +48,10 @@ class AutosaveWorker(QObject):
     @pyqtSlot(object, str)
     def save_project_state(self, project_state, file_path):
         """
-        Saves the project state to the specified file path asynchronously.
+        Saves the project state to the specified file path asynchronously, using compression.
         """
         try:
-            with open(file_path, 'w') as f:
+            with gzip.open(file_path, 'wt') as f:
                 json.dump(project_state, f, indent=4)
             logging.info(f"Autosave completed successfully to {file_path}")
             self.save_finished.emit(True)  # Signal successful save
@@ -271,7 +271,7 @@ class GlobalClusterController(QObject):
         self.autosave_thread.start()
 
         # Autosave file path within the dedicated temp directory
-        self.temp_file_path = os.path.join(TEMP_DIR, 'project_autosave.json')
+        self.temp_file_path = os.path.join(TEMP_DIR, 'project_autosave.json.gz')
         logging.info(f"Temporary autosave file path: {self.temp_file_path}")
 
         # Set autosave interval to 60 seconds
@@ -792,10 +792,21 @@ class GlobalClusterController(QObject):
         self.is_saving = False  # Reset the saving flag
 
     @pyqtSlot(str)
-    def on_load_project_state(self, project_file: str):
+    def on_load_project_state(self, project_file: str = None):
         """
         Loads the project state from a saved file to resume the session.
+        If no project_file is provided, prompts the user to select one.
         """
+        if not project_file:
+            options = QFileDialog.Options()
+            project_file, _ = QFileDialog.getOpenFileName(
+                self.view, "Open Project", "", "Compressed JSON Files (*.json.gz);;JSON Files (*.json);;All Files (*)",
+                options=options
+            )
+            if not project_file:
+                logging.info("Load project action was canceled by the user.")
+                return
+
         self.load_project_state(project_file)
 
     @pyqtSlot()
@@ -815,10 +826,14 @@ class GlobalClusterController(QObject):
         Prompts the user to select a location and file name, and then saves the project state.
         """
         options = QFileDialog.Options()
+        # Suggest the '.json.gz' extension
         file_path, _ = QFileDialog.getSaveFileName(
-            self.view, "Save Project As", "", "JSON Files (*.json);;All Files (*)", options=options
+            self.view, "Save Project As", "", "Compressed JSON Files (*.json.gz);;All Files (*)", options=options
         )
         if file_path:
+            # Ensure the file has the correct extension
+            if not file_path.endswith('.json.gz'):
+                file_path += '.json.gz'
             self.current_save_path = file_path  # Set the new save location
             self.save_project_state(file_path, show_popup=True)
         else:
@@ -835,7 +850,7 @@ class GlobalClusterController(QObject):
 
         project_state = self.get_current_state()
         try:
-            with open(file_path, 'w') as f:
+            with gzip.open(file_path, 'wt') as f:
                 json.dump(project_state, f, indent=4)
             logging.info(f"Project state saved to {file_path}")
 
@@ -873,18 +888,18 @@ class GlobalClusterController(QObject):
 
         return project_state
 
-    def get_versioned_backup_path(self, base_path: str, max_backups: int = 5) -> str:
+    def get_versioned_backup_path(self, base_path: str, max_backups: int = 10) -> str:
         """
         Generates a versioned backup path by adding a timestamp.
         Deletes older backups if they exceed max_backups.
         """
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_filename = f"{os.path.basename(base_path)}_{timestamp}.json"
+        backup_filename = f"{os.path.basename(base_path)}_{timestamp}.json.gz"
         backup_path = os.path.join(TEMP_DIR, backup_filename)
 
         # Remove old backups if exceeding max_backups
         all_backups = sorted([f for f in os.listdir(TEMP_DIR)
-                              if f.startswith(os.path.basename(base_path)) and f.endswith(".json")])
+                              if f.startswith(os.path.basename(base_path)) and f.endswith(".json.gz")])
 
         while len(all_backups) > max_backups:
             old_backup = all_backups.pop(0)  # Remove the oldest file
@@ -898,7 +913,7 @@ class GlobalClusterController(QObject):
         Finds the most recent autosave file in the TEMP_DIR.
         """
         autosave_files = [f for f in os.listdir(TEMP_DIR)
-                          if f.startswith('project_autosave') and f.endswith('.json')]
+                          if f.startswith('project_autosave') and f.endswith('.json.gz')]
         if not autosave_files:
             return None  # No autosave files found
         # Sort files by modification time in descending order
@@ -911,7 +926,7 @@ class GlobalClusterController(QObject):
         Returns a list of available autosave files in TEMP_DIR.
         """
         autosave_files = [f for f in os.listdir(TEMP_DIR)
-                          if f.startswith('project_autosave') and f.endswith('.json')]
+                          if f.startswith('project_autosave') and f.endswith('.json.gz')]
         if not autosave_files:
             return []
         # Sort files by modification time in descending order
@@ -960,14 +975,13 @@ class GlobalClusterController(QObject):
             QMessageBox.information(self.view, "No Autosave Found", "There are no autosave files to restore.")
             return
 
-        # Use QFileDialog to let the user select an autosave file
         options = QFileDialog.Options()
         # Set the initial directory to TEMP_DIR
         autosave_file, _ = QFileDialog.getOpenFileName(
             self.view,
             "Select Autosave File to Restore",
             TEMP_DIR,
-            "Autosave Files (project_autosave*.json);;All Files (*)",
+            "Autosave Files (project_autosave*.json.gz);;All Files (*)",
             options=options
         )
 
@@ -987,8 +1001,13 @@ class GlobalClusterController(QObject):
             return
 
         try:
-            with open(project_file, 'r') as f:
-                project_state = json.load(f)
+            try:
+                with gzip.open(project_file, 'rt') as f:
+                    project_state = json.load(f)
+            except OSError:
+                # If failed, open as a regular file
+                with open(project_file, 'r') as f:
+                    project_state = json.load(f)
 
             hdf5_file_path = project_state.get('hdf5_file_path')
             if not hdf5_file_path or not os.path.exists(hdf5_file_path):
