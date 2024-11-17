@@ -2,7 +2,7 @@ import logging
 from functools import partial
 from typing import List, Dict, Optional
 
-from PyQt5.QtCore import QRectF, pyqtSignal, Qt, QEvent, QSize
+from PyQt5.QtCore import QRectF, pyqtSignal, Qt, QEvent, QSize, pyqtSlot
 from PyQt5.QtGui import QPen, QPainter, QPixmap, QFont, QFontMetrics
 from PyQt5.QtWidgets import (
     QWidget, QComboBox, QPushButton, QVBoxLayout, QLabel,
@@ -440,6 +440,38 @@ class ClusteredCropsView(QWidget):
         # Add a spacer to push everything to the top
         control_panel_layout.addStretch()
 
+        # Labeling Statistics Group
+        statistics_group = QGroupBox("Labeling Statistics")
+        statistics_layout = QVBoxLayout()
+
+        # Total Annotations
+        self.total_annotations_label = QLabel("Total Annotations: 0")
+        statistics_layout.addWidget(self.total_annotations_label)
+
+        # Total Labeled Annotations
+        self.total_labeled_label = QLabel("Total Labeled Annotations: 0")
+        statistics_layout.addWidget(self.total_labeled_label)
+
+        # Class Counts
+        self.class_counts_labels = {}
+        for class_id in sorted(CLASS_COMPONENTS.keys()):
+            class_name = CLASS_COMPONENTS[class_id]
+            label = QLabel(f"{class_name}: 0")
+            statistics_layout.addWidget(label)
+            self.class_counts_labels[class_id] = label
+
+        # Unlabeled and Unsure counts
+        self.unlabeled_label = QLabel("Unlabeled (-1): 0")
+        statistics_layout.addWidget(self.unlabeled_label)
+        self.unsure_label = QLabel("Unsure (-2): 0")
+        statistics_layout.addWidget(self.unsure_label)
+
+        statistics_group.setLayout(statistics_layout)
+        control_panel_layout.addWidget(statistics_group)
+
+        # Add a spacer to push everything to the top
+        control_panel_layout.addStretch()
+
         # Add the control panel to the splitter
         self.splitter.addWidget(control_panel)
 
@@ -508,16 +540,6 @@ class ClusteredCropsView(QWidget):
         # Backspace key to go to the previous cluster
         if key == Qt.Key_Backspace:
             self.on_prev_cluster()
-            return
-
-        # Zoom with Ctrl + Mouse Wheel
-        if key == Qt.Key_Plus or key == Qt.Key_Equal:
-            self.zoom_level = min(self.zoom_level + 1, 10)
-            self.zoom_slider.setValue(self.zoom_level)
-            return
-        elif key == Qt.Key_Minus:
-            self.zoom_level = max(self.zoom_level - 1, 0)
-            self.zoom_slider.setValue(self.zoom_level)
             return
 
         super().keyPressEvent(event)
@@ -603,12 +625,13 @@ class ClusteredCropsView(QWidget):
             info = cluster_info[cluster_id]
             display_text = f"Cluster {cluster_id} - {info['num_annotations']} annotations"
             self.cluster_combo.addItem(display_text, cluster_id)
-        self.cluster_combo.blockSignals(False)  # Re-enable signals
 
         if selected_cluster_id is not None:
             index = self.cluster_combo.findData(selected_cluster_id)
             if index != -1:
                 self.cluster_combo.setCurrentIndex(index)
+        self.cluster_combo.blockSignals(False)  # Re-enable signals
+
         logging.debug(f"Populated cluster selection with IDs: {list(cluster_info.keys())}")
 
         # Update the enabled state of the next and previous buttons
@@ -746,6 +769,27 @@ class ClusteredCropsView(QWidget):
             self.crop_loading_progress_bar.setVisible(True)
         self.crop_loading_progress_bar.setValue(progress)
         logging.debug(f"Progress updated to: {progress}%")
+
+    @pyqtSlot(dict)
+    def update_labeling_statistics(self, statistics):
+        total_annotations = statistics['total_annotations']
+        total_labeled = statistics['total_labeled']
+        class_counts = statistics['class_counts']
+
+        self.total_annotations_label.setText(f"Total Annotations: {total_annotations}")
+        self.total_labeled_label.setText(f"Total Labeled Annotations: {total_labeled}")
+
+        # Update class counts
+        for class_id, count in class_counts.items():
+            if class_id in CLASS_COMPONENTS:
+                label = self.class_counts_labels.get(class_id)
+                if label:
+                    class_name = CLASS_COMPONENTS[class_id]
+                    label.setText(f"{class_name} ({class_id}): {count}")
+            elif class_id == -1:
+                self.unlabeled_label.setText(f"Unlabeled (-1): {count}")
+            elif class_id == -2:
+                self.unsure_label.setText(f"Unsure (-2): {count}")
 
     def reset_progress(self):
         """

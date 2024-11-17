@@ -243,6 +243,7 @@ class GlobalClusterController(QObject):
     clustering_started = pyqtSignal()
     clustering_progress = pyqtSignal(int)
     clusters_ready = pyqtSignal(dict)
+    labeling_statistics_updated = pyqtSignal(dict)
 
     def __init__(self, model: Optional[ImageDataModel], view: ClusteredCropsView):
         super().__init__()
@@ -307,8 +308,8 @@ class GlobalClusterController(QObject):
         self.view.load_project_state_requested.connect(self.on_load_project_state)
         self.view.restore_autosave_requested.connect(self.on_restore_autosave_requested)
         self.view.save_project_requested.connect(self.save_project)
-        self.view.save_project_requested.connect(self.save_project)
         self.view.save_project_as_requested.connect(self.save_project_as)
+        self.labeling_statistics_updated.connect(self.view.update_labeling_statistics)
 
         self.clustering_progress.connect(self.view.update_clustering_progress_bar)
         self.clusters_ready.connect(self.on_clusters_ready)
@@ -364,6 +365,7 @@ class GlobalClusterController(QObject):
         if first_cluster_id is not None:
             self.display_crops(cluster_id=first_cluster_id)
         self.view.hide_clustering_progress_bar()
+        self.compute_labeling_statistics()
 
     @pyqtSlot(list)
     def on_clustering_finished(self, annotations: list):
@@ -528,6 +530,36 @@ class GlobalClusterController(QObject):
         self.view.hide_progress_bar()  # Hide progress bar after loading completes
         self.loading_images = False
 
+    def compute_labeling_statistics(self):
+        """
+        Computes labeling statistics and emits a signal with the results.
+        """
+        total_annotations = 0
+        total_labeled = 0
+        class_counts = {class_id: 0 for class_id in CLASS_COMPONENTS.keys()}
+        class_counts[-1] = 0  # Unlabeled
+        class_counts[-2] = 0  # Unsure
+
+        for cluster_id, annotations in self.clusters.items():
+            for anno in annotations:
+                total_annotations += 1
+                class_id = anno.class_id if anno.class_id is not None else -1
+                if class_id in class_counts:
+                    class_counts[class_id] += 1
+                else:
+                    # Handle unexpected class IDs
+                    class_counts[class_id] = 1
+
+                if class_id != -1:
+                    total_labeled += 1
+
+        statistics = {
+            'total_annotations': total_annotations,
+            'total_labeled': total_labeled,
+            'class_counts': class_counts
+        }
+        self.labeling_statistics_updated.emit(statistics)
+
     def preload_adjacent_clusters(self, current_cluster_id: int):
         cluster_ids = self.view.get_cluster_id_list()
         current_index = cluster_ids.index(current_cluster_id)
@@ -666,6 +698,7 @@ class GlobalClusterController(QObject):
 
         # Autosave the project state once after the bulk operation
         self.autosave_project_state()
+        self.compute_labeling_statistics()
 
     @pyqtSlot(dict, int)
     def on_crop_label_changed(self, crop_data: dict, class_id: int):
@@ -697,6 +730,7 @@ class GlobalClusterController(QObject):
 
         # Autosave the project state after updating the individual crop label
         self.autosave_project_state()
+        self.compute_labeling_statistics()
 
     @pyqtSlot(int, int)
     def on_selection_parameters_changed(self, crops_per_cluster: int):
@@ -1062,6 +1096,8 @@ class GlobalClusterController(QObject):
                     self.clusters[cluster_id] = annotations
 
             logging.info(f"Project state loaded from {project_file}")
+
+            self.compute_labeling_statistics()
 
             # Update the GUI
             cluster_info = self.generate_cluster_info()
