@@ -4,235 +4,26 @@ import logging
 import os
 import tempfile
 from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from functools import partial
 from typing import List, Dict, Optional
 
-import numpy as np
 from PyQt5.QtCore import QObject, pyqtSignal, QThread, pyqtSlot, QTimer, QPoint, QCoreApplication, QEventLoop
 from PyQt5.QtGui import QImage, QPainter, QPen, QColor, QPixmap
 from PyQt5.QtWidgets import QFileDialog, QMessageBox
-from sklearn.cluster import AgglomerativeClustering
 
+from GUI.configuration.configuration import CLASS_COMPONENTS
 from GUI.models.Annotation import Annotation
 from GUI.models.ImageDataModel import ImageDataModel
 from GUI.models.ImageProcessor import ImageProcessor
 from GUI.models.UncertaintyRegionSelector import UncertaintyRegionSelector
 from GUI.views.ClusteredCropsView import ClusteredCropsView
+from GUI.workers.AutosaveWorker import AutosaveWorker
+from GUI.workers.ClusteringWorker import ClusteringWorker
+from GUI.workers.ImageProcessingWorker import ImageProcessingWorker
 
 TEMP_DIR = os.path.join(tempfile.gettempdir(), 'my_application_temp')
 os.makedirs(TEMP_DIR, exist_ok=True)
-
-CLASS_COMPONENTS = {
-    0: 'Non-Informative',
-    1: 'Tumour',
-    2: 'Stroma',
-    3: 'Necrosis',
-    4: 'Vessel',
-    5: 'Inflammation',
-    6: 'Tumour-Lumen',
-    7: 'Mucin',
-    8: 'Muscle'
-}
-
-
-class AutosaveWorker(QObject):
-    save_finished = pyqtSignal(bool)
-    save_project_state_signal = pyqtSignal(object, str)
-
-    def __init__(self):
-        super().__init__()
-        self.save_project_state_signal.connect(self.save_project_state)
-
-    @pyqtSlot(object, str)
-    def save_project_state(self, project_state, file_path):
-        """
-        Saves the project state to the specified file path asynchronously, using compression.
-        """
-        try:
-            temp_file_path = file_path + '.tmp'
-            with gzip.open(temp_file_path, 'wt') as f:
-                json.dump(project_state, f, indent=4)
-            os.replace(temp_file_path, file_path)
-            logging.info(f"Autosave completed successfully to {file_path}")
-            self.save_finished.emit(True)  # Signal successful save
-        except TypeError as e:
-            logging.error(f"Serialization error during autosave: {e}")
-            self.save_finished.emit(False)
-        except Exception as e:
-            logging.error(f"Error during async autosave: {e}")
-            self.save_finished.emit(False)  # Signal failed save
-
-
-class ClusteringWorker(QThread):
-    """
-    Worker thread for performing global clustering to keep the UI responsive.
-    """
-    clustering_finished = pyqtSignal(list)
-    progress_updated = pyqtSignal(int)
-
-    def __init__(self, hdf5_file_path: str, labels_acquirer: UncertaintyRegionSelector, parent=None):
-        super().__init__(parent)
-        self.hdf5_file_path = hdf5_file_path  # Pass the file path
-        self.labels_acquirer = labels_acquirer
-        self.model = None  # Will be initialized in the thread
-
-    def process_image(self, idx):
-        """
-        Processes a single image and assigns a cluster_id to each Annotation.
-        """
-        data = self.model.get_image_data(idx)
-        uncertainty_map = data.get('uncertainty', None)
-        logits = data.get('logits', None)
-        filename = data.get('filename', None)
-
-        if uncertainty_map is None or logits is None or filename is None:
-            logging.warning(f"Missing data for image index {idx}. Skipping.")
-            return [], idx
-
-        logit_features, dbscan_coords = self.labels_acquirer.generate_point_labels(
-            uncertainty_map=uncertainty_map,
-            logits=logits
-        )
-
-        annotations = [
-            Annotation(
-                filename=filename,
-                coord=coord,
-                logit_features=logit_feature,
-                class_id=-1,  # Default to -1 (unlabeled)
-                image_index=idx,
-                uncertainty=uncertainty_map[coord[0], coord[1]],
-                cluster_id=None  # Assign the cluster ID here
-            )
-            for coord, logit_feature in zip(dbscan_coords, logit_features)
-        ]
-
-        return annotations, idx
-
-    def run(self):
-        """
-        Executes the clustering process with parallel image processing.
-        """
-        # Initialize the ImageDataModel in this thread
-        self.model = ImageDataModel(self.hdf5_file_path)
-
-        all_annotations = []  # List to collect annotations
-        total_images = self.model.get_number_of_images()
-        logging.info(f"Starting clustering on {total_images} images.")
-
-        with ThreadPoolExecutor() as executor:
-            futures = {executor.submit(self.process_image, idx): idx for idx in range(total_images)}
-
-            for i, future in enumerate(as_completed(futures)):
-                try:
-                    annotations, idx = future.result()
-                    all_annotations.extend(annotations)
-                except Exception as e:
-                    logging.error(f"Error processing image {futures[future]}: {e}")
-                    continue
-
-                # Emit progress update
-                progress = int(((i + 1) / total_images) * 100)
-                self.progress_updated.emit(progress)
-                logging.debug(f"Processed image {idx + 1}/{total_images}. Progress: {progress}%")
-
-        logging.info(f"Total annotations collected: {len(all_annotations)}")
-
-        if not all_annotations:
-            logging.warning("No annotations found across all images.")
-            self.clustering_finished.emit({})
-            return
-
-        # Extract logit features for clustering
-        try:
-            logit_matrix = np.array([anno.logit_features for anno in all_annotations])
-            logging.debug(f"Logit matrix shape: {logit_matrix.shape}")
-        except Exception as e:
-            logging.error(f"Error creating logit matrix: {e}")
-            self.clustering_finished.emit({})
-            return
-
-        # Perform clustering
-        try:
-            clustering = AgglomerativeClustering(
-                n_clusters=None,
-                distance_threshold=self.labels_acquirer.distance_threshold,
-                linkage=self.labels_acquirer.linkage
-            )
-            clustering.fit(logit_matrix)
-            labels = clustering.labels_
-            logging.debug(f"Clustering labels generated: {labels}")
-        except Exception as e:
-            logging.error(f"Clustering failed: {e}")
-            self.clustering_finished.emit({})
-            return
-
-        # Assign cluster IDs to each annotation
-        for label, annotation in zip(labels, all_annotations):
-            annotation.cluster_id = int(label)  # Directly assign cluster_id
-
-        # Close the model's HDF5 file
-        if self.model is not None:
-            self.model.close()
-
-        logging.info(f"Global clustering complete. Number of clusters: {len(set(clustering.labels_))}")
-        self.clustering_finished.emit(all_annotations)
-
-
-class ImageProcessingWorker(QObject):
-    processing_finished = pyqtSignal(list)
-    progress_updated = pyqtSignal(int)  # New signal for progress
-
-    def __init__(self, sampled_annotations, hdf5_file_path: str, image_processor: ImageProcessor):
-        super().__init__()
-        self.sampled_annotations = sampled_annotations
-        self.hdf5_file_path = hdf5_file_path
-        self.image_processor = image_processor
-        self.model = None
-
-    @pyqtSlot()
-    def process_images(self):
-        self.model = ImageDataModel(self.hdf5_file_path)
-        sampled_crops = []
-        total = len(self.sampled_annotations)
-        for idx, anno in enumerate(self.sampled_annotations, 1):
-            result = self.process_single_annotation(anno)
-            if result is not None:
-                sampled_crops.append(result)
-            # Emit progress after each image is processed
-            progress = int((idx / total) * 100)
-            self.progress_updated.emit(progress)
-        if self.model is not None:
-            self.model.close()
-        self.processing_finished.emit(sampled_crops)
-
-    def process_single_annotation(self, anno):
-        cache_key = (anno.image_index, tuple(anno.coord))
-        cached_result = self.image_processor.cache.get(cache_key)
-        if cached_result:
-            processed_crop, coord_pos = cached_result
-        else:
-            # Process the crop
-            image_data = self.model.get_image_data(anno.image_index)
-            image_array = image_data.get('image', None)
-            coord = anno.coord
-            if image_array is None:
-                return None
-
-            processed_crop, coord_pos = self.image_processor.extract_crop_data(
-                image_array, coord, crop_size=512, zoom_factor=2
-            )
-
-            # Store in cache
-            self.image_processor.cache.set(cache_key, (processed_crop, coord_pos))
-
-        return {
-            'annotation': anno,
-            'processed_crop': processed_crop,
-            'coord_pos': coord_pos
-        }
 
 
 class GlobalClusterController(QObject):
