@@ -9,15 +9,10 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QApplication, QMainWindow, QTabWidget
 from PyQt5.QtWidgets import QDialog, QVBoxLayout, QLabel, QPushButton, QFileDialog, QMessageBox
 
-from GUI.controllers.GlobalClusterController import GlobalClusterController
-from GUI.models.ImageDataModel import ImageDataModel
-from GUI.views.ClusteredCropsView import ClusteredCropsView
-
 QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
 QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
 
 app = QApplication(sys.argv)
-
 
 def setup_logging():
     """
@@ -97,9 +92,13 @@ class StartupDialog(QDialog):
 
 
 def main():
-    setup_logging()
+    app = QApplication(sys.argv)
 
     # Initialize views and controller
+    from GUI.views.ClusteredCropsView import ClusteredCropsView
+    from GUI.controllers.GlobalClusterController import GlobalClusterController
+    from GUI.models.ImageDataModel import ImageDataModel
+
     clustered_crops_view = ClusteredCropsView()
     global_cluster_controller = GlobalClusterController(model=None, view=clustered_crops_view)
 
@@ -130,6 +129,7 @@ def main():
             hdf5_file_path = startup_dialog.hdf5_file
             model = ImageDataModel(hdf5_file_path)
             global_cluster_controller.model = model  # Set model in the controller
+
     else:
         # If the dialog was cancelled, exit the application
         sys.exit()
@@ -147,4 +147,5 @@ def main():
 
 
 if __name__ == "__main__":
+    setup_logging()
     main()

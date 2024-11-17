@@ -2,7 +2,7 @@ import logging
 from functools import partial
 from typing import List, Dict, Optional
 
-from PyQt5.QtCore import QRectF, pyqtSignal, Qt, QEvent
+from PyQt5.QtCore import QRectF, pyqtSignal, Qt, QEvent, QSize
 from PyQt5.QtGui import QPen, QPainter, QPixmap, QFont, QFontMetrics
 from PyQt5.QtWidgets import (
     QWidget, QComboBox, QPushButton, QVBoxLayout, QLabel,
@@ -26,6 +26,70 @@ CLASS_COMPONENTS = {
     7: 'Mucin',
     8: 'Muscle'
 }
+
+
+class LabeledSlider(QWidget):
+    valueChanged = pyqtSignal(int)
+
+    def __init__(self, minimum=0, maximum=10, interval=1, orientation=Qt.Horizontal, parent=None):
+        super().__init__(parent)
+        self.slider = QSlider(orientation)
+        self.slider.setMinimum(minimum)
+        self.slider.setMaximum(maximum)
+        self.slider.setTickInterval(interval)
+        self.slider.setTickPosition(QSlider.TicksBelow)
+        self.slider.setSingleStep(1)
+        self.slider.setPageStep(1)
+        self.slider.setFocusPolicy(Qt.NoFocus)
+        self.slider.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.slider.valueChanged.connect(self.valueChanged.emit)
+
+        # Create the main layout
+        self.layout = QVBoxLayout(self)
+        self.layout.setContentsMargins(0, 0, 0, 0)
+        self.layout.addWidget(self.slider)
+
+        self.labels = []  # Store label references for later adjustment
+        self.minimum = minimum
+        self.maximum = maximum
+        self.interval = interval
+
+    def resizeEvent(self, event):
+        """
+        Recalculate label positions when the widget is resized.
+        """
+        super().resizeEvent(event)
+
+    def sizeHint(self):
+        """
+        Provides a recommended size for the widget.
+        """
+        slider_size = self.slider.sizeHint()
+        label_height = max((label.sizeHint().height() for label in self.labels), default=0)
+        total_height = slider_size.height() + label_height + 5  # Add spacing
+        return QSize(slider_size.width(), total_height)
+
+    # Expose QSlider methods
+    def setValue(self, value):
+        self.slider.setValue(value)
+
+    def value(self):
+        return self.slider.value()
+
+    def setMinimum(self, value):
+        self.minimum = value
+        self.slider.setMinimum(value)
+
+    def setMaximum(self, value):
+        self.maximum = value
+        self.slider.setMaximum(value)
+
+    def setTickInterval(self, value):
+        self.interval = value
+        self.slider.setTickInterval(value)
+
+    def setOrientation(self, orientation):
+        self.slider.setOrientation(orientation)
 
 
 class ClickablePixmapItem(QGraphicsObject):
@@ -104,7 +168,15 @@ class ClickablePixmapItem(QGraphicsObject):
         painter.translate(label_x, label_y)
         painter.setFont(self.font)
         painter.setPen(Qt.black)
-        label_text = CLASS_COMPONENTS.get(self.class_id, "Unlabelled") if self.class_id != -1 else "Unlabelled"
+
+        # Display "Unsure" for class_id -2, "Unlabelled" for -1, or the regular class name
+        if self.class_id == -2:
+            label_text = "Unsure"
+        elif self.class_id == -1:
+            label_text = "Unlabelled"
+        else:
+            label_text = CLASS_COMPONENTS.get(self.class_id, "Unlabelled")
+
         painter.drawText(0, 0, label_text)
         painter.restore()
 
@@ -127,12 +199,22 @@ class ClickablePixmapItem(QGraphicsObject):
         self.scene().context_menu_open = True  # Set the flag in the scene
         self.menu = QMenu()
 
+        # Add class actions
         for class_id, class_name in CLASS_COMPONENTS.items():
             action = QAction(class_name, self.menu)
             action.triggered.connect(partial(self.set_crop_class, class_id))
             self.menu.addAction(action)
 
-        unlabel_action = QAction("Unlabel", self.menu)
+        # Add a separator to distinguish the special actions
+        self.menu.addSeparator()
+
+        # Add "Unsure" option with class_id -2
+        unsure_action = QAction("Unsure (?)", self.menu)
+        unsure_action.triggered.connect(partial(self.set_crop_class, -2))
+        self.menu.addAction(unsure_action)
+
+        # Add "Unlabel" option with class_id -1
+        unlabel_action = QAction("Unlabel (-)", self.menu)
         unlabel_action.triggered.connect(partial(self.set_crop_class, -1))
         self.menu.addAction(unlabel_action)
 
@@ -176,7 +258,7 @@ class ClusteredCropsView(QWidget):
     # noinspection PyAttributeOutsideInit
     def init_ui(self):
         """
-        Initializes the user interface components.
+        Initializes the user interface components with control panels and embedded keyboard shortcuts.
         """
         # Create a QSplitter to divide control panel and crop view
         self.splitter = QSplitter(Qt.Horizontal)
@@ -204,7 +286,7 @@ class ClusteredCropsView(QWidget):
         clustering_group.setLayout(clustering_layout)
         control_panel_layout.addWidget(clustering_group)
 
-        ##### Cluster Navigation Group #####
+        ##### Cluster Navigation Group with Hints #####
         cluster_navigation_group = QGroupBox("Cluster Navigation")
         cluster_navigation_layout = QVBoxLayout()
 
@@ -215,7 +297,7 @@ class ClusteredCropsView(QWidget):
         self.auto_next_checkbox.setFocusPolicy(Qt.NoFocus)
         cluster_navigation_layout.addWidget(self.auto_next_checkbox)
 
-        # Cluster Selection Controls
+        # Cluster Selection Controls with Hints
         cluster_selection_layout = QHBoxLayout()
         self.prev_cluster_button = QPushButton("Previous")
         self.prev_cluster_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
@@ -239,6 +321,10 @@ class ClusteredCropsView(QWidget):
         cluster_selection_layout.addWidget(self.next_cluster_button)
 
         cluster_navigation_layout.addLayout(cluster_selection_layout)
+
+        # Keyboard hints for navigation
+        navigation_hint = QLabel("Shortcuts: Enter - Next Cluster, Backspace - Previous Cluster")
+        cluster_navigation_layout.addWidget(navigation_hint)
         cluster_navigation_group.setLayout(cluster_navigation_layout)
         control_panel_layout.addWidget(cluster_navigation_group)
 
@@ -259,34 +345,49 @@ class ClusteredCropsView(QWidget):
         control_panel_layout.addWidget(sampling_group)
 
         ##### Zoom Controls Group #####
+        # Zoom Controls Group
         zoom_group = QGroupBox("Zoom")
         zoom_layout = QVBoxLayout()
 
-        self.zoom_slider = QSlider(Qt.Horizontal)
-        self.zoom_slider.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.zoom_slider.setMinimum(0)
-        self.zoom_slider.setMaximum(10)
+        # Use the updated LabeledSlider
+        self.zoom_slider = LabeledSlider(minimum=0, maximum=10, interval=1)
         self.zoom_slider.setValue(self.zoom_level)
         self.zoom_slider.valueChanged.connect(self.on_zoom_changed)
-        self.zoom_slider.setFocusPolicy(Qt.NoFocus)
         zoom_layout.addWidget(self.zoom_slider)
+
+        zoom_hint = QLabel("Use Ctrl + Mouse Wheel to zoom in/out")
+        zoom_layout.addWidget(zoom_hint)
 
         zoom_group.setLayout(zoom_layout)
         control_panel_layout.addWidget(zoom_group)
 
-        ##### Class Labels Group #####
+        ##### Class Labels Group with Keyboard Hints #####
         class_labels_group = QGroupBox("Class Labels")
         class_labels_layout = QGridLayout()
         row, col = 0, 0
 
-        # Unlabel Button
-        unlabel_button = QPushButton("Unlabel (-)")
-        unlabel_button.clicked.connect(partial(self.on_class_button_clicked, None))
-        unlabel_button.setFocusPolicy(Qt.NoFocus)
-        class_labels_layout.addWidget(unlabel_button, row, col)
-        col += 1
+        # Separate Layout for Special Actions (Unlabel and Unsure)
+        special_actions_layout = QHBoxLayout()
 
-        # Class Buttons
+        # Unlabel Button with Hint
+        unlabel_button = QPushButton("Unlabel (-)")
+        unlabel_button.clicked.connect(partial(self.on_class_button_clicked, -1))
+        unlabel_button.setFocusPolicy(Qt.NoFocus)
+        unlabel_button.setStyleSheet("background-color: #f08080;")  # Light Coral
+        special_actions_layout.addWidget(unlabel_button)
+
+        # Unsure Button with Hint
+        unsure_button = QPushButton("Unsure (?)")
+        unsure_button.clicked.connect(partial(self.on_class_button_clicked, -2))
+        unsure_button.setFocusPolicy(Qt.NoFocus)
+        unsure_button.setStyleSheet("background-color: #ffa500;")  # Orange
+        special_actions_layout.addWidget(unsure_button)
+
+        # Add the special actions layout spanning all columns
+        class_labels_layout.addLayout(special_actions_layout, row, 0, 1, 3)
+        row += 1
+
+        # Class Buttons with Keyboard Hints
         for class_id, class_name in CLASS_COMPONENTS.items():
             button_text = f"{class_name} ({class_id})"
             button = QPushButton(button_text)
@@ -298,6 +399,9 @@ class ClusteredCropsView(QWidget):
                 col = 0
                 row += 1
 
+        # Keyboard shortcut hint for class labeling
+        class_hint = QLabel("Shortcuts: 1-9 for Class Labels, Minus (-) to Unlabel, ? to Unsure")
+        class_labels_layout.addWidget(class_hint, row + 1, 0, 1, 3)  # Span across all columns
         class_labels_group.setLayout(class_labels_layout)
         control_panel_layout.addWidget(class_labels_group)
 
@@ -355,13 +459,9 @@ class ClusteredCropsView(QWidget):
         self.graphics_view.setScene(self.scene)
 
         # Crop Loading Progress Bar
-        self.crop_loading_progress_bar = QProgressBar(self.graphics_view)
-        self.crop_loading_progress_bar.setGeometry(
-            (self.graphics_view.viewport().width() - 300) // 2,
-            (self.graphics_view.viewport().height() - 25) // 2,
-            300,
-            25
-        )
+        # Crop Loading Progress Bar
+        self.crop_loading_progress_bar = QProgressBar(self.graphics_view.viewport())
+        self.crop_loading_progress_bar.setFixedSize(300, 25)
         self.crop_loading_progress_bar.setAlignment(Qt.AlignCenter)
         self.crop_loading_progress_bar.setVisible(False)
 
@@ -371,6 +471,7 @@ class ClusteredCropsView(QWidget):
         self.splitter.setStretchFactor(0, 1)  # Control panel
         self.splitter.setStretchFactor(1, 3)  # Crop view
         self.splitter.splitterMoved.connect(self.arrange_crops)
+        self.splitter.splitterMoved.connect(self.on_splitter_moved)
 
         # Set the layout for the main window
         main_layout = QVBoxLayout(self)
@@ -392,6 +493,11 @@ class ClusteredCropsView(QWidget):
         # Minus key to unlabel
         if key == Qt.Key_Minus or key == Qt.Key_Underscore:
             self.on_class_button_clicked(None)
+            return  # Event handled
+
+        # "?" key for marking as Unsure (-2)
+        if key == Qt.Key_Slash and event.modifiers() == Qt.ShiftModifier:
+            self.on_class_button_clicked(-2)
             return  # Event handled
 
         # Enter key to go to the next cluster
@@ -449,9 +555,10 @@ class ClusteredCropsView(QWidget):
         """
         Shows the progress bar in the center of the graphics view.
         """
-        self.center_crop_loading_progress_bar()
         self.crop_loading_progress_bar.setValue(0)
         self.crop_loading_progress_bar.setVisible(True)
+        QApplication.processEvents()  # Ensure UI is updated
+        self.center_crop_loading_progress_bar()
 
     def center_crop_loading_progress_bar(self):
         """
@@ -543,6 +650,14 @@ class ClusteredCropsView(QWidget):
         self.prev_cluster_button.setEnabled(index > 0)
         self.next_cluster_button.setEnabled(index < self.cluster_combo.count() - 1)
 
+    def on_splitter_moved(self, pos, index):
+        """
+        Slot called when the splitter is moved.
+        """
+        self.arrange_crops()
+        if self.crop_loading_progress_bar.isVisible():
+            self.center_crop_loading_progress_bar()
+
     def on_auto_next_toggle(self, state):
         self.auto_next_cluster = bool(state)
 
@@ -561,7 +676,9 @@ class ClusteredCropsView(QWidget):
         """
         Assigns a class to all visible crops and emits a bulk change signal.
         """
-        if class_id is None:
+        if class_id == -2:
+            logging.info("Classifying current cluster as unsure.")
+        elif class_id == -1:
             logging.info("Unlabeling current cluster.")
         else:
             logging.info(f"Assigning class {class_id} to the current cluster.")
@@ -728,13 +845,17 @@ class ClusteredCropsView(QWidget):
         self.scene.setSceneRect(self.scene.itemsBoundingRect())
         logging.debug("Scene rect set to include all items.")
 
+        # Re-center the crop loading progress bar if it's visible
+        if self.crop_loading_progress_bar.isVisible():
+            self.center_crop_loading_progress_bar()
+
     def on_zoom_changed(self, value: int):
         """
         Handles the zoom level change from the slider.
 
         :param value: The new zoom level.
         """
-        self.zoom_level = max(-10, min(value, 10))  # Limit zoom_level between -10 and 10
+        self.zoom_level = max(0, min(value, 10))  # Limit zoom_level between 0 and 10
         logging.debug(f"Zoom level changed to: {self.zoom_level}")
         self.arrange_crops()
 

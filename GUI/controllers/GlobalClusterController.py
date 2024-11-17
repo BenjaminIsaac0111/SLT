@@ -10,7 +10,7 @@ from functools import partial
 from typing import List, Dict, Optional
 
 import numpy as np
-from PyQt5.QtCore import QObject, pyqtSignal, QThread, pyqtSlot, QTimer, QPoint, QCoreApplication
+from PyQt5.QtCore import QObject, pyqtSignal, QThread, pyqtSlot, QTimer, QPoint, QCoreApplication, QEventLoop
 from PyQt5.QtGui import QImage, QPainter, QPen, QColor, QPixmap
 from PyQt5.QtWidgets import QFileDialog, QMessageBox
 from sklearn.cluster import AgglomerativeClustering
@@ -51,8 +51,10 @@ class AutosaveWorker(QObject):
         Saves the project state to the specified file path asynchronously, using compression.
         """
         try:
-            with gzip.open(file_path, 'wt') as f:
+            temp_file_path = file_path + '.tmp'
+            with gzip.open(temp_file_path, 'wt') as f:
                 json.dump(project_state, f, indent=4)
+            os.replace(temp_file_path, file_path)
             logging.info(f"Autosave completed successfully to {file_path}")
             self.save_finished.emit(True)  # Signal successful save
         except TypeError as e:
@@ -305,6 +307,7 @@ class GlobalClusterController(QObject):
         self.view.load_project_state_requested.connect(self.on_load_project_state)
         self.view.restore_autosave_requested.connect(self.on_restore_autosave_requested)
         self.view.save_project_requested.connect(self.save_project)
+        self.view.save_project_requested.connect(self.save_project)
         self.view.save_project_as_requested.connect(self.save_project_as)
 
         self.clustering_progress.connect(self.view.update_clustering_progress_bar)
@@ -312,7 +315,12 @@ class GlobalClusterController(QObject):
 
     def cleanup(self):
         logging.info("Cleaning up threads before application exit.")
-        # Stop the autosave thread
+        if self.is_saving:
+            logging.info("Autosave in progress. Waiting for it to finish before quitting.")
+            loop = QEventLoop()
+            self.autosave_worker.save_finished.connect(loop.quit)
+            loop.exec_()  # This will block until `save_finished` is emitted
+        # Now, safely quit the autosave thread
         self.autosave_thread.quit()
         self.autosave_thread.wait()
         logging.info("Autosave thread terminated.")
@@ -713,7 +721,7 @@ class GlobalClusterController(QObject):
 
         for cluster_id, annotations in self.clusters.items():
             for anno in annotations:
-                if anno.class_id is not None and anno.class_id != -1:
+                if anno.class_id is not None and anno.class_id != -1 and anno.class_id != -2:
                     annotation_data = {
                         'coord': [int(c) for c in anno.coord],  # Ensure coords are Python ints
                         'class_id': int(anno.class_id),  # Convert class_id to Python int
