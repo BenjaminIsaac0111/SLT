@@ -7,27 +7,15 @@ from PyQt5.QtGui import QPainter, QPixmap
 from PyQt5.QtWidgets import (
     QWidget, QComboBox, QPushButton, QVBoxLayout, QLabel,
     QProgressBar, QSpinBox, QGraphicsView,
-    QGraphicsScene, QGridLayout, QFileDialog,
+    QGraphicsScene, QGridLayout,
     QGroupBox, QSizePolicy, QSplitter, QGraphicsItem, QApplication,
-    QHBoxLayout, QCheckBox
+    QHBoxLayout, QCheckBox, QScrollArea
 )
 
+from GUI.configuration.configuration import CLASS_COMPONENTS
 from GUI.models.Annotation import Annotation
 from GUI.views.ClickablePixmapItem import ClickablePixmapItem
 from GUI.views.LabelSlider import LabeledSlider
-
-# Define class components globally
-CLASS_COMPONENTS = {
-    0: 'Non-Informative',
-    1: 'Tumour',
-    2: 'Stroma',
-    3: 'Necrosis',
-    4: 'Vessel',
-    5: 'Inflammation',
-    6: 'Tumour-Lumen',
-    7: 'Mucin',
-    8: 'Muscle'
-}
 
 
 class ClusteredCropsView(QWidget):
@@ -48,7 +36,7 @@ class ClusteredCropsView(QWidget):
     save_project_requested = pyqtSignal()
     save_project_as_requested = pyqtSignal()
 
-    load_project_state_requested = pyqtSignal(str)  # Emits the filename of the project state to load
+    load_project_state_requested = pyqtSignal()  # Emits the filename of the project state to load
     restore_autosave_requested = pyqtSignal()
 
     def __init__(self):
@@ -71,7 +59,7 @@ class ClusteredCropsView(QWidget):
         # Create a QSplitter to divide control panel and crop view
         self.splitter = QSplitter(Qt.Horizontal)
 
-        # Left Panel (Control Panel)
+        # Left Panel (Control Panel) inside QScrollArea
         control_panel = QWidget()
         control_panel_layout = QVBoxLayout(control_panel)  # Main layout for control panel
 
@@ -247,7 +235,7 @@ class ClusteredCropsView(QWidget):
         # Add a spacer to push everything to the top
         control_panel_layout.addStretch()
 
-        # Labeling Statistics Group
+        ##### Labeling Statistics Group #####
         statistics_group = QGroupBox("Labeling Statistics")
         statistics_layout = QVBoxLayout()
 
@@ -268,21 +256,31 @@ class ClusteredCropsView(QWidget):
             self.class_counts_labels[class_id] = label
 
         # Unlabeled and Unsure counts
-        self.unlabeled_label = QLabel("Unlabeled (-1): 0")
+        self.unlabeled_label = QLabel("Unlabeled: 0")
         statistics_layout.addWidget(self.unlabeled_label)
-        self.unsure_label = QLabel("Unsure (-2): 0")
+        self.unsure_label = QLabel("Unsure ?: 0")
         statistics_layout.addWidget(self.unsure_label)
 
         statistics_group.setLayout(statistics_layout)
         control_panel_layout.addWidget(statistics_group)
 
-        # Add a spacer to push everything to the top
+        # Add another spacer to push everything to the top
         control_panel_layout.addStretch()
 
-        # Add the control panel to the splitter
-        self.splitter.addWidget(control_panel)
+        ##### Wrapping the Control Panel in a QScrollArea #####
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)  # Ensures the scroll area resizes with the window
+        scroll_area.setWidget(control_panel)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)  # Disable horizontal scrolling
 
-        # Right Panel (Crop View)
+        # Set a minimum width for the control panel to prevent it from being obscured
+        control_panel.setMinimumWidth(300)  # Adjust this value as needed
+
+        # Add the scroll area to the splitter
+        self.splitter.addWidget(scroll_area)
+
+        ##### Right Panel (Crop View) #####
         self.graphics_view = QGraphicsView()
         self.graphics_view.setRenderHint(QPainter.Antialiasing)
         self.graphics_view.setRenderHint(QPainter.SmoothPixmapTransform)
@@ -298,7 +296,6 @@ class ClusteredCropsView(QWidget):
         self.graphics_view.setScene(self.scene)
 
         # Crop Loading Progress Bar
-        # Crop Loading Progress Bar
         self.crop_loading_progress_bar = QProgressBar(self.graphics_view.viewport())
         self.crop_loading_progress_bar.setFixedSize(300, 25)
         self.crop_loading_progress_bar.setAlignment(Qt.AlignCenter)
@@ -307,9 +304,11 @@ class ClusteredCropsView(QWidget):
         # Add the crop view to the splitter
         self.splitter.addWidget(self.graphics_view)
 
+        # Configure splitter stretch factors
         self.splitter.setStretchFactor(0, 1)  # Control panel
         self.splitter.setStretchFactor(1, 3)  # Crop view
-        self.splitter.splitterMoved.connect(self.arrange_crops)
+
+        # Connect splitterMoved signal to handle snapping behavior
         self.splitter.splitterMoved.connect(self.on_splitter_moved)
 
         # Set the layout for the main window
@@ -726,16 +725,7 @@ class ClusteredCropsView(QWidget):
         """
         Opens a file dialog to select a project state file to load.
         """
-        options = QFileDialog.Options()
-        filename, _ = QFileDialog.getOpenFileName(
-            self, "Load Project State", "", "JSON Files (*.json);;All Files (*)",
-            options=options
-        )
-        if filename:
-            logging.debug(f"Selected project state file: {filename}")
-            self.load_project_state_requested.emit(filename)
-        else:
-            logging.debug("No project state file selected.")
+        self.load_project_state_requested.emit()
 
     def on_save_project_state(self):
         """
