@@ -46,6 +46,10 @@ class ClusteringController(QObject):
         """
         Initiates the clustering process by starting the ClusteringWorker in a separate thread.
         """
+        if self.clustering_thread and self.clustering_thread.isRunning():
+            logging.warning("Clustering thread is already running. Skipping new start.")
+            return
+
         logging.info("Clustering process initiated.")
         self.clustering_started.emit()
 
@@ -62,8 +66,6 @@ class ClusteringController(QObject):
         self.clustering_worker.progress_updated.connect(self.clustering_progress.emit)
         self.clustering_worker.clustering_finished.connect(self.on_clustering_finished)
         self.clustering_worker.clustering_finished.connect(self.clustering_thread.quit)
-        self.clustering_worker.finished.connect(self.clustering_worker.deleteLater)
-        self.clustering_thread.finished.connect(self.clustering_thread.deleteLater)
 
         # Start the clustering thread
         self.clustering_thread.start()
@@ -84,6 +86,14 @@ class ClusteringController(QObject):
 
         # Compute and emit labeling statistics
         self.compute_labeling_statistics()
+
+    def on_worker_finished(self):
+        self.clustering_worker.deleteLater()
+        self.clustering_worker = None
+
+    def on_thread_finished(self):
+        self.clustering_thread.deleteLater()
+        self.clustering_thread = None
 
     def group_annotations_by_cluster(self, annotations: List[Annotation]) -> Dict[int, List[Annotation]]:
         """
@@ -188,10 +198,20 @@ class ClusteringController(QObject):
         logging.info(f"Crops per cluster set to {num_crops}.")
 
     def cleanup(self):
-        """
-        Cleans up the clustering worker and thread.
-        """
-        if self.clustering_thread and self.clustering_thread.isRunning():
-            self.clustering_thread.quit()
-            self.clustering_thread.wait()
-            logging.info("Clustering thread terminated during cleanup.")
+        if self.clustering_worker:
+            try:
+                self.clustering_worker.progress_updated.disconnect()
+                self.clustering_worker.clustering_finished.disconnect()
+            except TypeError:
+                pass
+            self.clustering_worker.deleteLater()
+            self.clustering_worker = None
+
+        if self.clustering_thread:
+            if self.clustering_thread.isRunning():
+                self.clustering_thread.quit()
+                self.clustering_thread.wait()
+            self.clustering_thread.deleteLater()
+            self.clustering_thread = None
+
+        logging.info("Clustering worker and thread cleaned up.")
