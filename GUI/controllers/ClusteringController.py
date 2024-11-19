@@ -167,7 +167,6 @@ class ClusteringController(QObject):
                 'labeled_percentage': labeled_percentage,
                 'label': self.cluster_labels.get(cluster_id, '')
             }
-        logging.debug(f"Cluster info generated: {cluster_info}")
         return cluster_info
 
     def update_cluster_labels(self, cluster_id: int, label: str):

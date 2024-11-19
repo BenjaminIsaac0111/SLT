@@ -438,8 +438,6 @@ class ClusteredCropsView(QWidget):
                 self.cluster_combo.setCurrentIndex(index)
         self.cluster_combo.blockSignals(False)  # Re-enable signals
 
-        logging.debug(f"Populated cluster selection with IDs: {list(cluster_info.keys())}")
-
         # Update the enabled state of the next and previous buttons
         has_clusters = self.cluster_combo.count() > 0
         current_index = self.cluster_combo.currentIndex()
