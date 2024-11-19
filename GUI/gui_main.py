@@ -114,26 +114,26 @@ def main():
         autosave_files.sort(key=lambda f: os.path.getmtime(os.path.join(temp_dir, f)), reverse=True)
         latest_autosave_file = os.path.join(temp_dir, autosave_files[0])
 
-        # Show the startup dialog
-        startup_dialog = StartupDialog(autosave_file_exists=bool(latest_autosave_file))
-        if startup_dialog.exec_() == QDialog.Accepted:
-            if startup_dialog.selected_option == "continue_last" and latest_autosave_file:
-                # Continue with last autosaved project
-                global_cluster_controller.project_state_controller.load_project_state(latest_autosave_file)
-            elif startup_dialog.selected_option == "load_project":
-                # Load selected project file
-                project_file = startup_dialog.project_file
-                global_cluster_controller.project_state_controller.load_project_state(project_file)
-                # The model will be set in on_project_loaded
-            elif startup_dialog.selected_option == "start_new":
-                # Start new project with selected HDF5 file
-                hdf5_file_path = startup_dialog.hdf5_file
-                model = ImageDataModel(hdf5_file_path)
-                global_cluster_controller.set_model(model)
-            else:
-                sys.exit()
+    # Show the startup dialog
+    startup_dialog = StartupDialog(autosave_file_exists=bool(latest_autosave_file))
+    if startup_dialog.exec_() == QDialog.Accepted:
+        if startup_dialog.selected_option == "continue_last" and latest_autosave_file:
+            # Continue with last autosaved project
+            global_cluster_controller.project_state_controller.load_project_state(latest_autosave_file)
+        elif startup_dialog.selected_option == "load_project":
+            # Load selected project file
+            project_file = startup_dialog.project_file
+            global_cluster_controller.project_state_controller.load_project_state(project_file)
+            # The model will be set in on_project_loaded
+        elif startup_dialog.selected_option == "start_new":
+            # Start new project with selected HDF5 file
+            hdf5_file_path = startup_dialog.hdf5_file
+            model = ImageDataModel(hdf5_file_path)
+            global_cluster_controller.set_model(model)
         else:
             sys.exit()
+    else:
+        sys.exit()
 
     # Create the main application window
     main_window = QMainWindow()
