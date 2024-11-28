@@ -6,7 +6,7 @@ from sklearn.metrics import balanced_accuracy_score, classification_report, cohe
 import numpy as np
 import matplotlib.pyplot as plt
 
-from Model.custom_layers import AttentionBlock, PixelShuffle
+from Model.custom_layers import AttentionBlock
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Set before tf import else tf vomits logging INFO...
 
@@ -52,7 +52,6 @@ if __name__ == '__main__':
         compile=False,
         custom_objects={
             'GroupNormalization': GroupNormalization,
-            'PixelShuffle': PixelShuffle,
             'AttentionBlock': AttentionBlock
         }
     )

@@ -99,6 +99,67 @@ def get_dataset(
     return ds
 
 
+def get_dataset_v2(
+        data_dir,  # Path to the data directory
+        filelists=None,  # Can be a single path (str) or a list of paths
+        repeat=True,
+        transforms=None,
+        shuffle=True,
+        batch_size=None,
+        shuffle_buffer_size=256,  # Default shuffle buffer size, can be overridden
+        out_channels=3  # Default number of output channels, can be overridden
+):
+    # Convert a single filelist path to a list if necessary
+    if isinstance(filelists, str):
+        filelists = [filelists]  # Wrap the single filelist path in a list
+
+    all_files = []  # List to collect all file paths from the .txt files
+
+    # Iterate over each .txt file in the list
+    for filelist in filelists:
+        with open(filelist, 'r') as f:
+            # Read the file paths from the .txt file and prepend the directory from data_dir
+            files_in_list = [os.path.join(data_dir, line.strip()) for line in f.readlines()]
+            files_in_list = [patch.split('\t')[0] for patch in files_in_list]
+            all_files.extend(files_in_list)  # Add to the collective list of file paths
+
+    # Create a dataset from the aggregated list of file paths
+    ds = tf.data.Dataset.from_tensor_slices(all_files)
+
+    if shuffle:
+        # Shuffle using the provided buffer size
+        ds = ds.shuffle(buffer_size=shuffle_buffer_size)
+
+    if repeat:
+        ds = ds.repeat(-1)  # Repeat the dataset indefinitely
+
+    def process_file(filepath):
+        # Process each file path (loading, preprocessing, etc.)
+        image, label = process_path_value_per_class(filepath, out_channels)
+        filename = tf.strings.split(filepath, os.sep)[-1]
+        return filename, image, label
+
+    # Apply processing function to each element in the dataset
+    ds = ds.map(process_file, num_parallel_calls=tf.data.experimental.AUTOTUNE)
+
+    # Batch the dataset
+    ds = ds.batch(batch_size=batch_size, drop_remainder=True)
+
+    if transforms:
+        # Wrap the transforms to ignore the filename
+        def transform_with_filename(filename, image, label):
+            image, label = transforms(image, label)
+            return filename, image, label
+
+        # Apply additional transformations if provided
+        ds = ds.map(transform_with_filename, num_parallel_calls=tf.data.experimental.AUTOTUNE)
+
+    # Prefetch data for optimized data loading
+    ds = ds.prefetch(tf.data.experimental.AUTOTUNE)
+
+    return ds
+
+
 def get_dataset_from_dir(
         cfg=None,
         repeat=True,
