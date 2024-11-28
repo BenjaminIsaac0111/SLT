@@ -131,8 +131,8 @@ class ClusteredCropsView(QWidget):
 
         self.crops_spinbox = QSpinBox()
         self.crops_spinbox.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.crops_spinbox.setRange(1, 1000)
-        self.crops_spinbox.setValue(100)
+        self.crops_spinbox.setRange(1, 32)
+        self.crops_spinbox.setValue(8)
         self.crops_spinbox.valueChanged.connect(self.on_crops_changed)
         self.crops_spinbox.setFocusPolicy(Qt.NoFocus)
         sampling_layout.addWidget(self.crops_spinbox)

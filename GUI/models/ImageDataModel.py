@@ -1,5 +1,3 @@
-# models/image_data_model.py
-
 import logging
 from typing import Dict, Any, List, Optional
 
@@ -26,8 +24,8 @@ class ImageDataModel(QObject):
         self._hdf5_file: Optional[h5py.File] = None
         self._images = None
         self._logits = None
-        self._epistemic_uncertainties = None
-        self._aleatoric_uncertainties = None
+        self._variance_uncertainty = None
+        self._bald_uncertainty = None
         self._filenames = []
         self._current_pixmap: Optional[QPixmap] = None
         logging.info("ImageDataModel initialized.")
@@ -58,16 +56,25 @@ class ImageDataModel(QObject):
             try:
                 self._images = self._hdf5_file['rgb_images']
                 self._logits = self._hdf5_file['logits']
-                self._epistemic_uncertainties = self._hdf5_file['epistemic_uncertainty']
-                self._aleatoric_uncertainties = self._hdf5_file['aleatoric_uncertainty']
+                self._variance_uncertainty = self._hdf5_file['variance']
+                self._bald_uncertainty = self._hdf5_file['bald']
                 self._filenames = list(self._hdf5_file['filenames'].asstr())
                 logging.info("Datasets loaded successfully.")
             except KeyError as e:
                 logging.error(f"Missing dataset in HDF5 file: {e}")
                 raise
 
-    def get_image_data(self, index: int) -> Dict[str, Any]:
-        """Fetches image data, using CacheManager to minimize I/O."""
+    def get_image_data(self, index: int, uncertainty_type: str = 'bald') -> Dict[str, Any]:
+        """
+        Fetches image data, using CacheManager to minimize I/O.
+
+        Parameters:
+            index (int): Index of the image data to retrieve.
+            uncertainty_type (str): Type of uncertainty to retrieve ('variance' or 'bald').
+
+        Returns:
+            Dict[str, Any]: A dictionary containing the image, logits, uncertainty, and filename.
+        """
         self._load_hdf5_file()
         self._load_datasets()
 
@@ -75,25 +82,34 @@ class ImageDataModel(QObject):
             logging.error("Index out of range.")
             raise IndexError("Index out of range.")
 
-        # Generate a unique cache key (in this case, using the index)
-        cache_key = index
+        # Generate a unique cache key using the index and uncertainty type
+        cache_key = (index, uncertainty_type)
 
         # Cache access using CacheManager
         cached_data = self.cache.get(cache_key)
         if cached_data is not None:
-            logging.debug(f"Data for index {index} retrieved from cache.")
+            logging.debug(f"Data for index {index} with uncertainty '{uncertainty_type}' retrieved from cache.")
             return cached_data
+
+        # Select the appropriate uncertainty
+        if uncertainty_type == 'variance':
+            uncertainty = self._variance_uncertainty[index]
+        elif uncertainty_type == 'bald':
+            uncertainty = self._bald_uncertainty[index]
+        else:
+            logging.error(f"Unknown uncertainty type: {uncertainty_type}")
+            raise ValueError(f"Unknown uncertainty type: {uncertainty_type}")
 
         # Data retrieval and caching
         data = {
             'image': self._images[index],
             'logits': self._logits[index],
-            'uncertainty': self._epistemic_uncertainties[index] - self._aleatoric_uncertainties[index][..., np.newaxis],
+            'uncertainty': uncertainty,
             'filename': self._filenames[index]
         }
         # Store data in cache
         self.cache.set(cache_key, data)
-        logging.debug(f"Data for index {index} cached.")
+        logging.debug(f"Data for index {index} with uncertainty '{uncertainty_type}' cached.")
         return data
 
     def get_filenames(self) -> List[str]:

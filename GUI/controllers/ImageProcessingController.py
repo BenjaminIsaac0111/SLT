@@ -44,7 +44,7 @@ class ImageProcessingController(QObject):
         self.prefetch_workers: Dict[int, Tuple[ImageProcessingWorker, QThread]] = {}
         self.prefetching_clusters: set = set()
 
-        self.crops_per_cluster = 100  # Default value, can be updated as needed
+        self.crops_per_cluster = 8  # Default value, can be updated as needed
 
     def set_clusters(self, clusters: Dict[int, List[Annotation]]):
         self.clusters = clusters

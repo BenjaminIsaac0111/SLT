@@ -143,11 +143,6 @@ class GlobalClusterController(QObject):
         logging.info(f"Sampling parameters updated: {crops_per_cluster} crops per cluster.")
         self.image_processing_controller.set_crops_per_cluster(crops_per_cluster)
 
-        # Restart the debounce timer
-        if self.debounce_timer.isActive():
-            self.debounce_timer.stop()
-        self.debounce_timer.start()
-
     def handle_sampling_parameters_changed(self):
         """
         Handles the sampling parameters after debouncing.

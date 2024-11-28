@@ -3,7 +3,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
 from PyQt5.QtCore import QThread, pyqtSignal
-from sklearn.cluster import AgglomerativeClustering
+from sklearn.cluster import AgglomerativeClustering, MiniBatchKMeans
 
 from GUI.models.Annotation import Annotation
 from GUI.models.ImageDataModel import ImageDataModel
@@ -58,7 +58,7 @@ class ClusteringWorker(QThread):
 
     def run(self):
         """
-        Executes the clustering process with parallel image processing.
+        Executes the clustering process using a core-set.
         """
         # Initialize the ImageDataModel in this thread
         self.model = ImageDataModel(self.hdf5_file_path)
@@ -92,35 +92,57 @@ class ClusteringWorker(QThread):
 
         # Extract logit features for clustering
         try:
-            logit_matrix = np.array([anno.logit_features for anno in all_annotations])
+            logit_matrix = np.array(
+                [np.concatenate([anno.logit_features, [anno.uncertainty]]) for anno in all_annotations])
             logging.debug(f"Logit matrix shape: {logit_matrix.shape}")
         except Exception as e:
             logging.error(f"Error creating logit matrix: {e}")
             self.clustering_finished.emit({})
             return
 
-        # Perform clustering
+        # Step 1: Select a core-set using random sampling or k-means++
+        core_set_size = min(10000, len(logit_matrix))  # Adjust size of the core-set
         try:
-            clustering = AgglomerativeClustering(
-                n_clusters=None,
-                distance_threshold=self.labels_acquirer.distance_threshold,
-                linkage=self.labels_acquirer.linkage
+
+            kmeans = MiniBatchKMeans(
+                n_clusters=core_set_size,
+                init='k-means++',
+                random_state=42,
+                batch_size=3072
             )
-            clustering.fit(logit_matrix)
-            labels = clustering.labels_
-            logging.debug(f"Clustering labels generated: {labels}")
+            kmeans.fit(logit_matrix)
+            core_set_indices = np.unique(kmeans.labels_, return_index=True)[1]
+            core_set_features = logit_matrix[core_set_indices]
+            core_set_annotations = [all_annotations[i] for i in core_set_indices]
+            logging.info(f"Core-set selected with {len(core_set_features)} features.")
         except Exception as e:
-            logging.error(f"Clustering failed: {e}")
+            logging.error(f"Error in core-set selection: {e}")
             self.clustering_finished.emit({})
             return
 
-        # Assign cluster IDs to each annotation
-        for label, annotation in zip(labels, all_annotations):
-            annotation.cluster_id = int(label)  # Directly assign cluster_id
+        # Step 2: Perform clustering on the core-set
+        try:
+            clustering = AgglomerativeClustering(
+                n_clusters=None,
+                distance_threshold=1.75,
+                linkage='ward'
+            )
+            clustering.fit(core_set_features)
+            core_set_labels = clustering.labels_
+            logging.info(f"Core-set clustering complete. Number of clusters: {len(set(core_set_labels))}")
+        except Exception as e:
+            logging.error(f"Clustering on core-set failed: {e}")
+            self.clustering_finished.emit({})
+            return
+
+        # Assign cluster IDs to the core-set annotations
+        for label, annotation in zip(core_set_labels, core_set_annotations):
+            annotation.cluster_id = int(label)  # Assign the cluster ID directly
 
         # Close the model's HDF5 file
         if self.model is not None:
             self.model.close()
 
-        logging.info(f"Global clustering complete. Number of clusters: {len(set(clustering.labels_))}")
-        self.clustering_finished.emit(all_annotations)
+        logging.info("Clustering complete for the core-set.")
+        self.clustering_finished.emit(core_set_annotations)
+
