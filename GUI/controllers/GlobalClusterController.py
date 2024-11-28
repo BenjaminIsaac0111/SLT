@@ -132,16 +132,16 @@ class GlobalClusterController(QObject):
             return
         self.image_processing_controller.display_crops(annotations, cluster_id)
 
-    @pyqtSlot(int)
-    def on_sampling_parameters_changed(self, crops_per_cluster: int):
+    @pyqtSlot(int, int)
+    def on_sampling_parameters_changed(self, cluster_id: int, crops_per_cluster: int):
         """
-        Handles changes in sampling parameters.
-        Implements debouncing to prevent excessive sampling.
+        Handles changes in sampling parameters by refreshing the displayed crops.
 
-        :param crops_per_cluster: The new number of crops per cluster.
+        :param cluster_id: The ID of the selected cluster.
+        :param crops_per_cluster: The updated number of crops per cluster.
         """
-        logging.info(f"Sampling parameters updated: {crops_per_cluster} crops per cluster.")
-        self.image_processing_controller.set_crops_per_cluster(crops_per_cluster)
+        logging.info(f"Sampling parameters changed: Cluster {cluster_id}, {crops_per_cluster} crops per cluster.")
+        self.image_processing_controller.set_crops_per_cluster(crops_per_cluster, cluster_id)
 
     def handle_sampling_parameters_changed(self):
         """

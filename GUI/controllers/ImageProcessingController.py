@@ -50,14 +50,16 @@ class ImageProcessingController(QObject):
         self.clusters = clusters
         self.cluster_ids = list(clusters.keys())
 
-    def set_crops_per_cluster(self, num_crops: int):
+    def set_crops_per_cluster(self, num_crops: int, current_cluster_id: Optional[int] = None):
         """
-        Sets the number of crops to sample per cluster.
+        Sets the number of crops to sample per cluster and refreshes the view.
 
         :param num_crops: The number of crops to sample.
+        :param current_cluster_id: The ID of the currently selected cluster, if available.
         """
         self.crops_per_cluster = num_crops
         logging.info(f"Crops per cluster set to {num_crops}.")
+        self.refresh_current_cluster(current_cluster_id)
 
     def display_crops(self, annotations: List[Annotation], cluster_id: int):
         """
@@ -131,6 +133,18 @@ class ImageProcessingController(QObject):
             adjacent_cluster_id = self.cluster_ids[index]
             if not self.is_cluster_cached(adjacent_cluster_id):
                 self.start_background_loading(adjacent_cluster_id)
+
+    def refresh_current_cluster(self, current_cluster_id: Optional[int]):
+        """
+        Refreshes the crops displayed for the currently selected cluster.
+
+        :param current_cluster_id: The ID of the currently selected cluster.
+        """
+        if current_cluster_id is not None and current_cluster_id in self.clusters:
+            annotations = self.clusters[current_cluster_id]
+            self.display_crops(annotations, current_cluster_id)
+        else:
+            logging.warning(f"Invalid or no current cluster ID provided: {current_cluster_id}")
 
     def cancel_image_loading(self):
         """

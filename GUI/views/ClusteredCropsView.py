@@ -496,8 +496,10 @@ class ClusteredCropsView(QWidget):
         """
         current_cluster_id = self.get_selected_cluster_id()
         if current_cluster_id is not None:
-            logging.debug(f"Number of crops per cluster changed to: {value}")
+            logging.debug(f"Number of crops per cluster changed to: {value} for cluster {current_cluster_id}")
             self.sampling_parameters_changed.emit(current_cluster_id, value)
+        else:
+            logging.warning("No cluster is currently selected while changing crops per cluster.")
 
     def on_class_button_clicked(self, class_id: Optional[int]):
         """
