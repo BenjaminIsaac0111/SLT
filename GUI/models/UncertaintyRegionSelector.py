@@ -16,8 +16,8 @@ class UncertaintyRegionSelector:
             self,
             filter_size: int = 48,
             gaussian_sigma: float = 3.0,
-            edge_buffer: int = 128,
-            eps: float = 1.0,  # DBSCAN parameter for spatial clustering
+            edge_buffer: int = 96,
+            eps: float = 2.0,  # DBSCAN parameter for spatial clustering
             min_samples: int = 1,  # DBSCAN parameter for spatial clustering
     ):
         """
@@ -71,12 +71,12 @@ class UncertaintyRegionSelector:
         # Step 1: Ensure uncertainty map is 2D
         uncertainty_map_2d = self._prepare_uncertainty_map(uncertainty_map)
 
-        # # Step 2: Apply Gaussian smoothing
-        # uncertainty_map_smoothed = gaussian_filter(uncertainty_map_2d, sigma=self.gaussian_sigma)
-        # logging.debug("Applied Gaussian filter with sigma=%.2f.", self.gaussian_sigma)
+        # Step 2: Apply Gaussian smoothing
+        uncertainty_map_smoothed = gaussian_filter(uncertainty_map_2d, sigma=self.gaussian_sigma)
+        logging.debug("Applied Gaussian filter with sigma=%.2f.", self.gaussian_sigma)
 
         # Step 3: Identify significant coordinates
-        initial_coords = self._identify_significant_coords(uncertainty_map_2d)
+        initial_coords = self._identify_significant_coords(uncertainty_map_smoothed)
         logging.info("Identified %d significant coordinates.", len(initial_coords))
 
         if not initial_coords:
@@ -84,7 +84,8 @@ class UncertaintyRegionSelector:
             return np.array([]), []
 
         # Step 4: Perform DBSCAN on spatial coordinates to group them
-        dbscan_coords = self._dbscan_cluster_coordinates(initial_coords)
+        dbscan_coords = self._dbscan_cluster_coordinates(coords=initial_coords,
+                                                         uncertainty_map=uncertainty_map_smoothed)
         logging.info("DBSCAN identified %d points in spatial domain.", len(dbscan_coords))
 
         if not dbscan_coords:
@@ -144,12 +145,15 @@ class UncertaintyRegionSelector:
         logging.debug("Filtered out coordinates near edges, %d remaining.", len(valid_coords))
         return valid_coords
 
-    def _dbscan_cluster_coordinates(self, coords: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
+    def _dbscan_cluster_coordinates(self, coords: List[Tuple[int, int]], uncertainty_map: np.ndarray) -> List[
+        Tuple[int, int]]:
         """
-        Clusters the spatial coordinates using DBSCAN to ensure spatial diversity.
+        Clusters the spatial coordinates using DBSCAN and selects the point with the highest uncertainty in each
+        cluster.
 
         :param coords: A list of (row, column) tuples representing significant coordinates.
-        :return: A list of (row, column) tuples after spatial clustering.
+        :param uncertainty_map: A 2D numpy array representing uncertainty values.
+        :return: A list of (row, column) tuples of the points with the highest uncertainty in each cluster.
         """
         if not coords:
             return []
@@ -166,19 +170,29 @@ class UncertaintyRegionSelector:
         labels = dbscan.labels_
         unique_labels = set(labels)
 
+        # Initialize the list to hold the selected coordinates with the highest uncertainty
         clustered_coords = []
 
-        # Select a representative point from each cluster (e.g., the first point)
+        # Select the point with the highest uncertainty in each cluster
         for label in unique_labels:
             if label == -1:
                 # Skip noise points (DBSCAN label -1)
                 continue
-            cluster_indices = np.where(labels == label)[0]
-            # Select the first point in the cluster
-            idx = cluster_indices[0]
-            clustered_coords.append(coords[idx])
 
-        logging.debug("DBSCAN clustering complete. Number of spatial clusters: %d.", len(unique_labels) - (1 if -1 in unique_labels else 0))
+            cluster_indices = np.where(labels == label)[0]
+            cluster_coords = spatial_coords[cluster_indices]
+
+            # Get the uncertainty values for all points in this cluster
+            cluster_uncertainty = uncertainty_map[cluster_coords[:, 0], cluster_coords[:, 1]]
+
+            # Find the index of the point with the highest uncertainty in this cluster
+            highest_uncertainty_idx = np.argmax(cluster_uncertainty)
+
+            # Select the coordinate with the highest uncertainty
+            clustered_coords.append(tuple(cluster_coords[highest_uncertainty_idx]))
+
+        logging.debug("DBSCAN clustering complete. Number of spatial clusters: %d.",
+                      len(unique_labels) - (1 if -1 in unique_labels else 0))
         return clustered_coords
 
     def _extract_logit_features(self, logits: np.ndarray, coords: List[Tuple[int, int]]) -> np.ndarray:

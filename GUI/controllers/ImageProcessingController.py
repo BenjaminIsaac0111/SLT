@@ -176,7 +176,7 @@ class ImageProcessingController(QObject):
             hdf5_file_path=self.model.hdf5_file_path,
             image_processor=self.image_processor
         )
-        self.image_thread = QThread()
+        self.image_thread = QThread(parent=self)
         self.image_worker.moveToThread(self.image_thread)
         self.image_thread.started.connect(self.image_worker.process_images)
 
@@ -299,7 +299,7 @@ class ImageProcessingController(QObject):
             hdf5_file_path=self.model.hdf5_file_path,
             image_processor=self.image_processor
         )
-        prefetch_thread = QThread()
+        prefetch_thread = QThread(parent=self)
         prefetch_worker.moveToThread(prefetch_thread)
         prefetch_thread.started.connect(prefetch_worker.process_images)
         prefetch_worker.processing_finished.connect(

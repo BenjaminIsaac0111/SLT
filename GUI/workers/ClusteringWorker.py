@@ -1,5 +1,4 @@
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
 from PyQt5.QtCore import QThread, pyqtSignal
@@ -67,21 +66,19 @@ class ClusteringWorker(QThread):
         total_images = self.model.get_number_of_images()
         logging.info(f"Starting clustering on {total_images} images.")
 
-        with ThreadPoolExecutor() as executor:
-            futures = {executor.submit(self.process_image, idx): idx for idx in range(total_images)}
+        # Process each image sequentially
+        for i in range(total_images):
+            try:
+                annotations, idx = self.process_image(i)
+                all_annotations.extend(annotations)
+            except Exception as e:
+                logging.error(f"Error processing image {i}: {e}")
+                continue
 
-            for i, future in enumerate(as_completed(futures)):
-                try:
-                    annotations, idx = future.result()
-                    all_annotations.extend(annotations)
-                except Exception as e:
-                    logging.error(f"Error processing image {futures[future]}: {e}")
-                    continue
-
-                # Emit progress update
-                progress = int(((i + 1) / total_images) * 100)
-                self.progress_updated.emit(progress)
-                logging.debug(f"Processed image {idx + 1}/{total_images}. Progress: {progress}%")
+            # Emit progress update
+            progress = int(((i + 1) / total_images) * 100)
+            self.progress_updated.emit(progress)
+            logging.debug(f"Processed image {i + 1}/{total_images}. Progress: {progress}%")
 
         logging.info(f"Total annotations collected: {len(all_annotations)}")
 
@@ -103,7 +100,6 @@ class ClusteringWorker(QThread):
         # Step 1: Select a core-set using random sampling or k-means++
         core_set_size = min(10000, len(logit_matrix))  # Adjust size of the core-set
         try:
-
             kmeans = MiniBatchKMeans(
                 n_clusters=core_set_size,
                 init='k-means++',
@@ -145,4 +141,3 @@ class ClusteringWorker(QThread):
 
         logging.info("Clustering complete for the core-set.")
         self.clustering_finished.emit(core_set_annotations)
-
