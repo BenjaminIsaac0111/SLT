@@ -654,7 +654,11 @@ class ClusteredCropsView(QWidget):
                 continue
 
             # Create pixmap item with reference to the Annotation instance
-            pixmap_item = ClickablePixmapItem(annotation=annotation, pixmap=q_pixmap)
+            pixmap_item = ClickablePixmapItem(
+                annotation=annotation,
+                pixmap=q_pixmap,
+            )
+
             pixmap_item.setFlag(QGraphicsItem.ItemIsSelectable, True)
 
             # Connect the signals

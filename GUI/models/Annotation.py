@@ -13,6 +13,7 @@ class Annotation:
     uncertainty: Union[float, np.ndarray]  # Allow uncertainty to be either a float or array
     class_id: Optional[int] = -1  # Default to -1 (Unlabelled)
     cluster_id: Optional[int] = None  # Default to None if not assigned
+    model_prediction: Optional[str] = None  # Default to None if not available
 
     def to_dict(self) -> dict:
         """
@@ -29,6 +30,7 @@ class Annotation:
                 else float(self.uncertainty)  # Convert scalar to float
             ),
             'cluster_id': int(self.cluster_id) if self.cluster_id is not None else None,
+            'model_prediction': self.model_prediction,  # Include model prediction in serialization
         }
         return data
 
@@ -47,5 +49,6 @@ class Annotation:
                 else float(data['uncertainty'])
             ),
             class_id=int(data.get('class_id', -1)),
-            cluster_id=int(data.get('cluster_id', None)) if 'cluster_id' in data else None
+            cluster_id=int(data.get('cluster_id', None)) if 'cluster_id' in data else None,
+            model_prediction=data.get('model_prediction', None),  # Deserialize model prediction
         )

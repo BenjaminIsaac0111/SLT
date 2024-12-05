@@ -20,6 +20,7 @@ class ClickablePixmapItem(QGraphicsObject):
         self.annotation = annotation
         self.pixmap = pixmap
         self.class_id = annotation.class_id
+        self.model_prediction = annotation.model_prediction  # Use model_prediction from annotation
         self.setAcceptHoverEvents(True)
         self.hovered = False
         self.selected = False
@@ -37,6 +38,10 @@ class ClickablePixmapItem(QGraphicsObject):
         self.font = QFont("Arial", font_size)
         self.font_metrics = QFontMetrics(self.font)
         self.label_height = self.font_metrics.height()
+
+        # Prefixes for labels
+        self.human_prefix = "Human: "
+        self.model_prefix = "Model: "
 
     def setScaleFactor(self, scale):
         """
@@ -57,6 +62,7 @@ class ClickablePixmapItem(QGraphicsObject):
         """
         pixmap_width = self.pixmap.width() * self.scale_factor
         pixmap_height = self.pixmap.height() * self.scale_factor
+        # Adjust the bounding rect to include space for labels above the image
         return QRectF(0, -self.label_height, pixmap_width, pixmap_height + self.label_height)
 
     def paint(self, painter: QPainter, option, widget):
@@ -76,25 +82,42 @@ class ClickablePixmapItem(QGraphicsObject):
         painter.setPen(pen)
         painter.drawRect(QRectF(0, 0, pixmap_width, pixmap_height))
 
-        # Draw label text directly above the image, aligned with its top edge
+        # Draw human label at the top-left corner above the image
         painter.save()
-        # Position the label above the image in the item's local coordinates
-        label_x = 0  # Align text with the left edge of the image
-        label_y = -self.label_height + self.font_metrics.ascent()  # Offset to position text above image
-        painter.translate(label_x, label_y)
         painter.setFont(self.font)
         painter.setPen(Qt.black)
-
-        # Display "Unsure" for class_id -2, "Unlabelled" for -1, or the regular class name
-        if self.class_id == -2:
-            label_text = "Unsure"
-        elif self.class_id == -1:
-            label_text = "Unlabelled"
-        else:
-            label_text = CLASS_COMPONENTS.get(self.class_id, "Unlabelled")
-
-        painter.drawText(0, 0, label_text)
+        human_label_text = self.human_prefix + self.get_human_label_text()
+        label_x = 0  # Left-aligned
+        label_y = -self.font_metrics.descent()  # Slight adjustment for baseline
+        painter.drawText(label_x, label_y, human_label_text)
         painter.restore()
+
+        # Draw model prediction at the top-right corner above the image
+        if self.model_prediction:
+            painter.save()
+            painter.setFont(self.font)
+            painter.setPen(Qt.black)  # Text color set to black
+            prediction_text = self.model_prefix + self.model_prediction
+
+            # Calculate the width of the prediction text
+            text_width = self.font_metrics.width(prediction_text)
+
+            # Position the prediction text at the top-right corner above the image
+            prediction_x = pixmap_width - text_width  # Right-aligned
+            prediction_y = -self.font_metrics.descent()  # Slight adjustment for baseline
+            painter.drawText(prediction_x, prediction_y, prediction_text)
+            painter.restore()
+
+    def get_human_label_text(self) -> str:
+        """
+        Returns the human label text to display based on class_id.
+        """
+        if self.class_id == -2:
+            return "Unsure"
+        elif self.class_id == -1:
+            return "Unlabelled"
+        else:
+            return CLASS_COMPONENTS.get(self.class_id, "Unlabelled")
 
     def hoverEnterEvent(self, event):
         self.hovered = True
@@ -115,9 +138,10 @@ class ClickablePixmapItem(QGraphicsObject):
         self.scene().context_menu_open = True  # Set the flag in the scene
         self.menu = QMenu()
 
-        # Add class actions
-        for class_id, class_name in CLASS_COMPONENTS.items():
-            action = QAction(class_name, self.menu)
+        # Add numbered class actions
+        for index, (class_id, class_name) in enumerate(CLASS_COMPONENTS.items(), start=0):
+            action_text = f"{index}. {class_name}"  # Include the list number
+            action = QAction(action_text, self.menu)
             action.triggered.connect(partial(self.set_crop_class, class_id))
             self.menu.addAction(action)
 

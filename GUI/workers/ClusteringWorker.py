@@ -4,6 +4,7 @@ import numpy as np
 from PyQt5.QtCore import QThread, pyqtSignal
 from sklearn.cluster import AgglomerativeClustering, MiniBatchKMeans
 
+from GUI.configuration.configuration import CLASS_COMPONENTS
 from GUI.models.Annotation import Annotation
 from GUI.models.ImageDataModel import ImageDataModel
 from GUI.models.UncertaintyRegionSelector import UncertaintyRegionSelector
@@ -48,12 +49,24 @@ class ClusteringWorker(QThread):
                 class_id=-1,  # Default to -1 (unlabeled)
                 image_index=idx,
                 uncertainty=uncertainty_map[coord[0], coord[1]],
-                cluster_id=None  # Assign the cluster ID here
+                cluster_id=None,  # Assign the cluster ID here
+                model_prediction=self._get_model_prediction(logit_feature)  # Add model prediction here
             )
             for coord, logit_feature in zip(dbscan_coords, logit_features)
         ]
 
         return annotations, idx
+
+    def _get_model_prediction(self, logit_feature: np.ndarray) -> str:
+        """
+        Determines the model's prediction based on logit features.
+        This example assumes a simple argmax to select the predicted class.
+
+        :param logit_feature: A 1D numpy array of logits for a specific coordinate.
+        :return: The predicted class label as a string.
+        """
+        class_index = np.argmax(logit_feature)
+        return CLASS_COMPONENTS.get(class_index, "None")
 
     def run(self):
         """
