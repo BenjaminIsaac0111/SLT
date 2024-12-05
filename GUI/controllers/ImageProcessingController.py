@@ -2,12 +2,98 @@ import logging
 from typing import Optional, Dict, Tuple, List
 
 from PyQt5.QtCore import QObject, pyqtSignal, QThread, pyqtSlot, QPoint
-from PyQt5.QtGui import QPixmap, QPainter, QPen, QColor
+from PyQt5.QtGui import QPixmap, QPainter, QPen, QColor, QImage
 
 from GUI.models.Annotation import Annotation
 from GUI.models.ImageDataModel import ImageDataModel
 from GUI.models.ImageProcessor import ImageProcessor
 from GUI.workers.ImageProcessingWorker import ImageProcessingWorker
+
+
+class ImageAnnotator:
+    """
+    Handles drawing annotations (circle and crosshair) on images.
+    """
+
+    def __init__(self, circle_color: QColor = QColor(0, 255, 0), circle_width: int = 5,
+                 crosshair_color: QColor = QColor(0, 0, 0), crosshair_width: int = 2):  # Crosshair is now black
+        self.circle_color = circle_color
+        self.circle_width = circle_width
+        self.crosshair_color = crosshair_color
+        self.crosshair_width = crosshair_width
+
+    def draw_annotation(self, image: QImage, coord_pos: Tuple[int, int]) -> QImage:
+        """
+        Draws an annotation (circle and crosshair) on the provided QImage at the specified position.
+
+        :param image: The QImage to draw on.
+        :param coord_pos: The (x, y) position to draw the annotation.
+        :return: The modified QImage.
+        """
+        annotated_image = image.copy()
+        painter = QPainter(annotated_image)
+        painter.setRenderHint(QPainter.Antialiasing)
+
+        pos_x_zoomed, pos_y_zoomed = coord_pos
+
+        # Ensure the position is within the image bounds
+        pos_x_zoomed = min(max(pos_x_zoomed, 0), annotated_image.width() - 1)
+        pos_y_zoomed = min(max(pos_y_zoomed, 0), annotated_image.height() - 1)
+
+        center = QPoint(int(pos_x_zoomed), int(pos_y_zoomed))
+
+        # Define a radius for the circle
+        radius = max(8, min(annotated_image.width(), annotated_image.height()) // 40)
+
+        # Draw the circle
+        self.draw_circle(painter, center, radius)
+
+        # Draw the crosshair with gap
+        image_size = (annotated_image.width(), annotated_image.height())
+        self.draw_crosshair_with_gap(painter, center, radius + self.circle_width // 2, image_size)
+
+        painter.end()
+
+        return annotated_image
+
+    def draw_circle(self, painter, center: QPoint, radius: int):
+        """
+        Draws an unfilled circle at the specified center with the given radius.
+
+        :param painter: QPainter object to draw with.
+        :param center: Center point of the circle.
+        :param radius: Radius of the circle.
+        """
+        pen = QPen(self.circle_color)
+        pen.setWidth(self.circle_width)
+        painter.setPen(pen)
+        painter.drawEllipse(center, radius, radius)
+
+    def draw_crosshair_with_gap(self, painter, center: QPoint, gap_radius: int, image_size: Tuple[int, int]):
+        """
+        Draws crosshairs with a gap at the specified center point.
+
+        :param painter: QPainter object to draw with.
+        :param center: Center point of the crosshair (and circle).
+        :param gap_radius: Radius around the center where the crosshair is not drawn (to create the gap).
+        :param image_size: Tuple (width, height) of the image.
+        """
+        width_img, height_img = image_size
+        pen = QPen(self.crosshair_color)  # Use the black color for the crosshair
+        pen.setWidth(self.crosshair_width)
+        painter.setPen(pen)
+
+        # Vertical line
+        # From top to (center_y - gap_radius)
+        painter.drawLine(center.x(), 0, center.x(), center.y() - gap_radius)
+        # From (center_y + gap_radius) to bottom
+        painter.drawLine(center.x(), center.y() + gap_radius, center.x(), height_img)
+
+        # Horizontal line
+        # From left to (center_x - gap_radius)
+        painter.drawLine(0, center.y(), center.x() - gap_radius, center.y())
+        # From (center_x + gap_radius) to right
+        painter.drawLine(center.x() + gap_radius, center.y(), width_img, center.y())
 
 
 class ImageProcessingController(QObject):
@@ -32,6 +118,7 @@ class ImageProcessingController(QObject):
         self.model = model
         self.image_processor = ImageProcessor()
         self.loading_images = False
+        self.annotator = ImageAnnotator()  # Create an instance of ImageAnnotator
 
         self.clusters = {}  # Initialize clusters as an empty dictionary
         self.cluster_ids = []  # Initialize cluster_ids as an empty list
@@ -216,7 +303,7 @@ class ImageProcessingController(QObject):
                 logging.warning(f"Processed crop or coord_pos is None for annotation: {annotation}")
                 continue
             q_image = self.image_processor.numpy_to_qimage(processed_crop)
-            q_image = self.draw_annotation_on_image(q_image, coord_pos)
+            q_image = self.annotator.draw_annotation(q_image, coord_pos)
             q_pixmap = QPixmap.fromImage(q_image)  # Convert QImage to QPixmap
             sampled_crops.append({
                 'annotation': annotation,
@@ -227,37 +314,6 @@ class ImageProcessingController(QObject):
         logging.info(f"Displayed {len(sampled_crops)} sampled crops.")
         self.crop_loading_finished.emit()
         self.loading_images = False
-
-    def draw_annotation_on_image(self, q_image, coord_pos: Tuple[int, int]):
-        """
-        Draws an annotation (circle) on the provided QImage at the specified position.
-
-        :param q_image: The QImage to draw on.
-        :param coord_pos: The (x, y) position to draw the annotation.
-        :return: The modified QImage.
-        """
-        zoomed_qimage = q_image.copy()
-        painter = QPainter(zoomed_qimage)
-        pen = QPen(QColor(0, 255, 0))  # Green color for the circle
-        pen.setWidth(5)  # Thickness of the circle outline
-        painter.setPen(pen)
-        painter.setRenderHint(QPainter.Antialiasing)
-
-        pos_x_zoomed, pos_y_zoomed = coord_pos
-
-        # Ensure the position is within the image bounds
-        pos_x_zoomed = min(max(pos_x_zoomed, 0), zoomed_qimage.width() - 1)
-        pos_y_zoomed = min(max(pos_y_zoomed, 0), zoomed_qimage.height() - 1)
-
-        # Define a radius for the circle
-        radius = max(8, min(zoomed_qimage.width(), zoomed_qimage.height()) // 40)
-
-        # Draw the unfilled circle
-        painter.drawEllipse(QPoint(int(pos_x_zoomed), int(pos_y_zoomed)), radius, radius)
-
-        painter.end()
-
-        return zoomed_qimage
 
     def is_cluster_cached(self, cluster_id: int) -> bool:
         """
