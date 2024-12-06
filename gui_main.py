@@ -6,6 +6,7 @@ import sys
 import tempfile
 
 from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import QApplication, QMainWindow, QTabWidget
 from PyQt5.QtWidgets import QDialog, QVBoxLayout, QLabel, QPushButton, QFileDialog, QMessageBox
 
@@ -92,6 +93,13 @@ class StartupDialog(QDialog):
 
 def main():
     app = QApplication(sys.argv)
+
+    # Set the application icon
+    icon_path = f"GUI/assets/icons/icons8-point-100.png"  # Replace with your icon file path
+    if os.path.exists(icon_path):
+        app.setWindowIcon(QIcon(icon_path))
+    else:
+        logging.warning(f"Icon file not found at {icon_path}. Application will proceed without an icon.")
 
     # Initialize views and controller
     from GUI.views.ClusteredCropsView import ClusteredCropsView
