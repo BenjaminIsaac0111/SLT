@@ -2,7 +2,7 @@ import logging
 from functools import partial
 from typing import List, Dict, Optional
 
-from PyQt5.QtCore import pyqtSignal, Qt, QEvent, pyqtSlot
+from PyQt5.QtCore import pyqtSignal, Qt, QEvent
 from PyQt5.QtGui import QPainter, QPixmap
 from PyQt5.QtWidgets import (
     QWidget, QComboBox, QPushButton, QVBoxLayout, QLabel,
@@ -119,7 +119,8 @@ class ClusteredCropsView(QWidget):
         cluster_navigation_layout.addLayout(cluster_selection_layout)
 
         # Keyboard hints for navigation
-        navigation_hint = QLabel("Shortcuts: Enter - Next Cluster, Backspace - Previous Cluster")
+        navigation_hint = QLabel(
+            "Shortcuts: Enter - Next Cluster, Backspace - Previous Cluster, Shift + T to Toggle Auto Next")
         cluster_navigation_layout.addWidget(navigation_hint)
         cluster_navigation_group.setLayout(cluster_navigation_layout)
         control_panel_layout.addWidget(cluster_navigation_group)
@@ -194,8 +195,20 @@ class ClusteredCropsView(QWidget):
                 col = 0
                 row += 1
 
+        agree_with_model_button = QPushButton("Agree with Model Predictions (Spacebar)")
+        agree_with_model_button.clicked.connect(self.on_agree_with_model_clicked)
+        agree_with_model_button.setFocusPolicy(Qt.NoFocus)
+
+        # Make the button green with white text
+        agree_with_model_button.setStyleSheet("background-color: green; color: white; font-weight: bold;")
+
+        # Add the button to the layout, spanning all 3 columns to make it wide
+        class_labels_layout.addWidget(agree_with_model_button, row + 1, 0, 1, 3)
+        row += 2
+
         # Keyboard shortcut hint for class labeling
-        class_hint = QLabel("Shortcuts: 1-9 for Class Labels, Minus (-) to Unlabel, ? to Unsure")
+        class_hint = QLabel("Shortcuts: 1-9 for Class Labels, Minus (-) to Unlabel, Shift + ? for Unsure, Agree with "
+                            "Model Predictions (Spacebar)")
         class_labels_layout.addWidget(class_hint, row + 1, 0, 1, 3)  # Span across all columns
         class_labels_group.setLayout(class_labels_layout)
         control_panel_layout.addWidget(class_labels_group)
@@ -246,6 +259,10 @@ class ClusteredCropsView(QWidget):
         # Total Labeled Annotations
         self.total_labeled_label = QLabel("Total Labeled Annotations: 0")
         statistics_layout.addWidget(self.total_labeled_label)
+
+        # Disagreement Statistics
+        self.disagreement_label = QLabel("Disagreements: 0")
+        statistics_layout.addWidget(self.disagreement_label)
 
         # Class Counts
         self.class_counts_labels = {}
@@ -334,8 +351,19 @@ class ClusteredCropsView(QWidget):
             return  # Event handled
 
         # "?" key for marking as Unsure (-2)
-        if key == Qt.Key_Slash and event.modifiers() == Qt.ShiftModifier:
+        if event.text() == '?':
             self.on_class_button_clicked(-2)
+            return  # Event handled
+
+        # Spacebar to agree with model predictions
+        if key == Qt.Key_Space:
+            self.on_agree_with_model_clicked()
+            return  # Event handled
+
+        # Shift + T to toggle auto-next cluster
+        if key == Qt.Key_T and event.modifiers() == Qt.ShiftModifier:
+            self.auto_next_cluster = not self.auto_next_cluster
+            self.auto_next_checkbox.setChecked(self.auto_next_cluster)  # Sync checkbox
             return  # Event handled
 
         # Enter key to go to the next cluster
@@ -501,6 +529,38 @@ class ClusteredCropsView(QWidget):
         else:
             logging.warning("No cluster is currently selected while changing crops per cluster.")
 
+    def on_agree_with_model_clicked(self):
+        """
+        Assigns each visible crop the class predicted by the model, if a corresponding class is found.
+        """
+        changes_made = False
+        for crop_data in self.selected_crops:
+            annotation = crop_data['annotation']
+            model_prediction = annotation.model_prediction
+
+            if model_prediction is not None:
+                model_class_id = self.get_class_id_from_model_prediction(model_prediction)
+                if model_class_id is not None:
+                    old_class_id = annotation.class_id
+                    annotation.class_id = model_class_id
+                    if annotation.class_id != old_class_id:
+                        changes_made = True
+                        # Emit signal to update the system
+                        self.crop_label_changed.emit(annotation.to_dict(), annotation.class_id)
+
+        # If any changes were made, refresh the UI
+        if changes_made:
+            self.arrange_crops()
+
+    def get_class_id_from_model_prediction(self, model_prediction: str) -> Optional[int]:
+        """
+        Given a model prediction (class name), returns the corresponding class_id if found.
+        """
+        for cid, cname in CLASS_COMPONENTS.items():
+            if cname == model_prediction:
+                return cid
+        return None
+
     def on_class_button_clicked(self, class_id: Optional[int]):
         """
         Assigns a class to all visible crops and emits a bulk change signal.
@@ -576,8 +636,18 @@ class ClusteredCropsView(QWidget):
         self.crop_loading_progress_bar.setValue(progress)
         logging.debug(f"Progress updated to: {progress}%")
 
-    @pyqtSlot(dict)
-    def update_labeling_statistics(self, statistics):
+    def update_labeling_statistics(self, statistics: dict):
+        """
+        Updates labeling statistics displayed in the UI, including disagreements.
+        The statistics dict is expected to have keys like:
+        {
+          'total_annotations': int,
+          'total_labeled': int,
+          'class_counts': {class_id: count, ...}
+        }
+
+        We'll add disagreement calculation here based on self.selected_crops.
+        """
         total_annotations = statistics['total_annotations']
         total_labeled = statistics['total_labeled']
         class_counts = statistics['class_counts']
@@ -596,6 +666,34 @@ class ClusteredCropsView(QWidget):
                 self.unlabeled_label.setText(f"Unlabeled (-1): {count}")
             elif class_id == -2:
                 self.unsure_label.setText(f"Unsure (-2): {count}")
+
+        # Compute disagreements and update UI
+        disagreement_count = self.calculate_disagreements()
+
+        # Compute agreement percentage (simple metric)
+        agreement_percentage = 0
+        if total_labeled > 0:
+            agreement_percentage = ((total_labeled - disagreement_count) / total_labeled) * 100
+
+        self.disagreement_label.setText(f"Disagreements: {disagreement_count} (Agreement: {agreement_percentage:.2f}%)")
+
+    def calculate_disagreements(self) -> int:
+        """
+        Counts the number of crops where the current label disagrees with the model prediction.
+        Only consider crops that have both a label and a model prediction.
+        """
+        disagreement_count = 0
+        for crop_data in self.selected_crops:
+            annotation: Annotation = crop_data['annotation']
+            model_prediction = annotation.model_prediction
+
+            if model_prediction is not None:
+                # Get model class_id from prediction name
+                model_class_id = self.get_class_id_from_model_prediction(model_prediction)
+                if model_class_id is not None and annotation.class_id != model_class_id:
+                    disagreement_count += 1
+
+        return disagreement_count
 
     def reset_progress(self):
         """

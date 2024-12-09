@@ -82,7 +82,7 @@ class ClickablePixmapItem(QGraphicsObject):
         painter.setPen(pen)
         painter.drawRect(QRectF(0, 0, pixmap_width, pixmap_height))
 
-        # Draw human label at the top-left corner above the image
+        # Draw human label in the top-left corner above the image
         painter.save()
         painter.setFont(self.font)
         painter.setPen(Qt.black)
@@ -94,15 +94,24 @@ class ClickablePixmapItem(QGraphicsObject):
 
         # Draw model prediction at the top-right corner above the image
         if self.model_prediction:
+            # Determine model_prediction class_id by reverse lookup in CLASS_COMPONENTS
+            model_class_id = None
+            for cid, cname in CLASS_COMPONENTS.items():
+                if cname == self.model_prediction:
+                    model_class_id = cid
+                    break
+
+            # If model_class_id matches human class_id, color is green, else red
             painter.save()
             painter.setFont(self.font)
-            painter.setPen(Qt.black)  # Text color set to black
-            prediction_text = self.model_prefix + self.model_prediction
+            if model_class_id is not None and model_class_id == self.class_id:
+                painter.setPen(Qt.green)  # Agree: green text
+            else:
+                painter.setPen(Qt.red)  # Disagree: red text
 
-            # Calculate the width of the prediction text
+            prediction_text = self.model_prefix + self.model_prediction
             text_width = self.font_metrics.width(prediction_text)
 
-            # Position the prediction text at the top-right corner above the image
             prediction_x = pixmap_width - text_width  # Right-aligned
             prediction_y = -self.font_metrics.descent()  # Slight adjustment for baseline
             painter.drawText(prediction_x, prediction_y, prediction_text)

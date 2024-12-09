@@ -95,7 +95,7 @@ def main():
     app = QApplication(sys.argv)
 
     # Set the application icon
-    icon_path = f"GUI/assets/icons/icons8-point-100.png"  # Replace with your icon file path
+    icon_path = f"GUI/assets/icons/icons8-point-100.png"
     if os.path.exists(icon_path):
         app.setWindowIcon(QIcon(icon_path))
     else:
