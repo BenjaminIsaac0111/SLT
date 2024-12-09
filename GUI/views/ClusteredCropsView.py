@@ -637,20 +637,11 @@ class ClusteredCropsView(QWidget):
         logging.debug(f"Progress updated to: {progress}%")
 
     def update_labeling_statistics(self, statistics: dict):
-        """
-        Updates labeling statistics displayed in the UI, including disagreements.
-        The statistics dict is expected to have keys like:
-        {
-          'total_annotations': int,
-          'total_labeled': int,
-          'class_counts': {class_id: count, ...}
-        }
-
-        We'll add disagreement calculation here based on self.selected_crops.
-        """
         total_annotations = statistics['total_annotations']
         total_labeled = statistics['total_labeled']
         class_counts = statistics['class_counts']
+        disagreement_count = statistics.get('disagreement_count', 0)
+        agreement_percentage = statistics.get('agreement_percentage', 0.0)
 
         self.total_annotations_label.setText(f"Total Annotations: {total_annotations}")
         self.total_labeled_label.setText(f"Total Labeled Annotations: {total_labeled}")
@@ -663,19 +654,14 @@ class ClusteredCropsView(QWidget):
                     class_name = CLASS_COMPONENTS[class_id]
                     label.setText(f"{class_name} ({class_id}): {count}")
             elif class_id == -1:
-                self.unlabeled_label.setText(f"Unlabeled (-1): {count}")
+                self.unlabeled_label.setText(f"Unlabeled: {count}")
             elif class_id == -2:
-                self.unsure_label.setText(f"Unsure (-2): {count}")
+                self.unsure_label.setText(f"Unsure (?): {count}")
 
-        # Compute disagreements and update UI
-        disagreement_count = self.calculate_disagreements()
-
-        # Compute agreement percentage (simple metric)
-        agreement_percentage = 0
-        if total_labeled > 0:
-            agreement_percentage = ((total_labeled - disagreement_count) / total_labeled) * 100
-
-        self.disagreement_label.setText(f"Disagreements: {disagreement_count} (Agreement: {agreement_percentage:.2f}%)")
+        # Display global disagreement stats
+        self.disagreement_label.setText(
+            f"Disagreements: {disagreement_count} (Agreement: {agreement_percentage:.2f}%)"
+        )
 
     def calculate_disagreements(self) -> int:
         """

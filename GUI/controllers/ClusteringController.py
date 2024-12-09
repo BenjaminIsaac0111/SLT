@@ -115,35 +115,66 @@ class ClusteringController(QObject):
     def compute_labeling_statistics(self):
         """
         Computes labeling statistics such as total annotations, total labeled,
-        and class counts, and emits the labeling_statistics_updated signal.
+        class counts, global disagreement count, and agreement percentage.
+        Emits labeling_statistics_updated signal with the statistics dictionary.
         """
+        clusters = self.get_clusters()  # {cluster_id: [Annotation, ...]}
         total_annotations = 0
         total_labeled = 0
-        class_counts = {class_id: 0 for class_id in CLASS_COMPONENTS.keys()}
+        class_counts = {cid: 0 for cid in CLASS_COMPONENTS.keys()}
         class_counts[-1] = 0  # Unlabeled
         class_counts[-2] = 0  # Unsure
 
-        for cluster_id, annotations in self.clusters.items():
+        disagreement_count = 0
+
+        for cluster_id, annotations in clusters.items():
             for anno in annotations:
                 total_annotations += 1
-                class_id = anno.class_id if anno.class_id is not None else -1
+                assigned_class = anno.class_id if anno.class_id is not None else -1
 
-                if class_id in class_counts:
-                    class_counts[class_id] += 1
-                else:
-                    # Handle unexpected class IDs
-                    class_counts[class_id] = 1
+                # Update class counts
+                if assigned_class not in class_counts:
+                    class_counts[assigned_class] = 0
+                class_counts[assigned_class] += 1
 
-                if class_id != -1:
+                # Count labeled (excluding -1 and -2)
+                if assigned_class not in [-1, -2]:
                     total_labeled += 1
 
+                # Compute disagreement if annotation is labeled and model_prediction is available
+                if anno.model_prediction is not None:
+                    model_class_id = self.get_class_id_from_prediction(anno.model_prediction)
+                    # Consider it a disagreement only if annotation is labeled (not -1/-2) and model_class_id found
+                    if model_class_id is not None and assigned_class not in [-1, -2]:
+                        if assigned_class != model_class_id:
+                            disagreement_count += 1
+
+        # Compute agreement percentage
+        agreement_percentage = 0.0
+        if total_labeled > 0:
+            agreement_percentage = ((total_labeled - disagreement_count) / total_labeled) * 100
+
+        # Prepare statistics dictionary
         statistics = {
             'total_annotations': total_annotations,
             'total_labeled': total_labeled,
-            'class_counts': class_counts
+            'class_counts': class_counts,
+            'disagreement_count': disagreement_count,
+            'agreement_percentage': agreement_percentage
         }
-        logging.info(f"Labeling statistics computed: {statistics}")
+
+        logging.info(f"Labeling statistics computed with disagreement: {statistics}")
         self.labeling_statistics_updated.emit(statistics)
+
+    def get_class_id_from_prediction(self, prediction_name: str) -> Optional[int]:
+        """
+        Map the model's predicted class name to a class_id.
+        Adjust this method if needed based on how you map predictions to classes.
+        """
+        for c_id, c_name in CLASS_COMPONENTS.items():
+            if c_name == prediction_name:
+                return c_id
+        return None
 
     def generate_cluster_info(self) -> Dict[int, dict]:
         """
