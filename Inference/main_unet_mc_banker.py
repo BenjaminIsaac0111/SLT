@@ -1,18 +1,20 @@
-import os
+import argparse
 import logging
-import yaml
+import math
+import os
+import sys
+
 import h5py
-import tensorflow as tf
 import numpy as np
+import tensorflow as tf
+import yaml
 from keras import Model
+from tensorflow.keras import mixed_precision
 from tensorflow.keras.models import load_model
 from tqdm import tqdm
+
 from Dataloader.dataloader import get_dataset_v2
 from Model.custom_layers import GroupNormalization, SpatialConcreteDropout, DropoutAttentionBlock
-from tensorflow.keras import mixed_precision
-import argparse
-import sys
-import math
 
 # Suppress TensorFlow's INFO and WARNING logs
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
@@ -52,6 +54,7 @@ def setup_logging(log_level=logging.DEBUG, log_file=None):
     return logger
 
 
+@tf.function
 def mc_infer(x, n_iter=20, model=None, num_classes=10, logger=None):
     """
     Perform MC Dropout inference to obtain various uncertainty measures.
@@ -93,21 +96,14 @@ def mc_infer(x, n_iter=20, model=None, num_classes=10, logger=None):
     variance_probs = tf.math.reduce_variance(probs, axis=0)  # [batch_size, H, W, num_classes]
     variance_uncertainty = tf.reduce_sum(variance_probs, axis=-1)  # [batch_size, H, W]
 
-    # Normalize uncertainties
-    # For entropy-based measures, the maximum entropy occurs when the distribution is uniform
+    # Normalize entropy to [0, 1]
     max_entropy = tf.cast(tf.math.log(float(num_classes)), tf.float16)
     normalized_entropy = entropy_mean / max_entropy  # Normalize to [0, 1]
-    normalized_mutual_information = mutual_information / max_entropy  # BALD normalized to [0, 1]
-
-    # Variance normalization will be done in the main function using global min and max
-
-    if logger:
-        logger.debug("MC inference completed.")
 
     return {
         'entropy': normalized_entropy,
-        'variance': variance_uncertainty,  # Return unnormalized variance
-        'bald': normalized_mutual_information,
+        'variance': variance_uncertainty,
+        'bald': mutual_information,
         'mean_probs': mean_probs,
         'mean_logits': mean_logits
     }
@@ -121,6 +117,7 @@ def predict_logits(x, model):
 def main(config, logger):
     """
     Main function to run MC Inference, adjust uncertainties, and store data.
+    This version uses dynamically resizable HDF5 datasets.
     """
     logger.info("Starting main processing function.")
 
@@ -135,6 +132,16 @@ def main(config, logger):
     input_shape = (INPUT_HEIGHT, INPUT_WIDTH, INPUT_CHANNELS)
     num_classes = config['OUT_CHANNELS']
     logger.debug(f"Number of classes: {num_classes}")
+
+    # Extract classwise uncertainty weights (if used)
+    classwise_uncertainty_weights = config.get('CLASSWISE_UNCERTAINTY_WEIGHTS', None)
+    if classwise_uncertainty_weights is None:
+        logger.error("CLASSWISE_UNCERTAINTY_WEIGHTS not found in config.")
+        raise KeyError("CLASSWISE_UNCERTAINTY_WEIGHTS not found in config.")
+    classwise_uncertainty_weights = np.array(classwise_uncertainty_weights, dtype=np.float16)
+    if len(classwise_uncertainty_weights) != num_classes:
+        logger.error("Length of CLASSWISE_UNCERTAINTY_WEIGHTS must be equal to number of classes.")
+        raise ValueError("Length of CLASSWISE_UNCERTAINTY_WEIGHTS must be equal to number of classes.")
 
     # Load the model
     model_path = os.path.join(config['MODEL_DIR'], f"best_{config['MODEL_NAME']}")
@@ -184,15 +191,16 @@ def main(config, logger):
     )
     logger.info(f"Output will be stored in {output_file}")
 
-    # Calculate total number of samples
+    # Try to read total_samples if provided
     try:
-        N_SAMPLES = int(config.get('N_SAMPLES', -1))  # Ensure it's an integer
+        N_SAMPLES = int(config.get('N_SAMPLES', -1))
     except ValueError:
         logger.error("N_SAMPLES must be an integer.")
         raise ValueError("N_SAMPLES must be an integer.")
 
     if N_SAMPLES == -1:
-        # Read the TRAINING_LIST to count total samples
+        # If not specified, we might not know total_samples upfront; if you want total_samples,
+        # you must read it from the TRAINING_LIST.
         training_list_path = config['TRAINING_LIST']
         if not os.path.isfile(training_list_path):
             logger.error(f"TRAINING_LIST file not found at {training_list_path}")
@@ -205,224 +213,171 @@ def main(config, logger):
         total_samples = N_SAMPLES
         logger.info(f"Total samples to process: {total_samples}")
 
-    # Define chunk sizes
-    chunk_size = config.get('CHUNK_SIZE', 1)  # Adjust chunk size as needed
+    chunk_size = config.get('CHUNK_SIZE', 1)
     logger.debug(f"Chunk size for HDF5 datasets: {chunk_size}")
 
-    # Calculate number of batches
     batch_size = config['BATCH_SIZE']
-    num_batches = math.ceil(total_samples / batch_size)
-    logger.debug(f"Number of batches to process: {num_batches}")
 
-    # Limit the dataset to the required number of batches
-    ds = ds.take(num_batches)
-    logger.debug("Dataset limited to the required number of batches.")
+    # Determine if we can resume from a checkpoint
+    resume_index = 0
+    hdf5_mode = 'a' if os.path.exists(output_file) else 'w'  # 'a' for append mode
 
-    # First Pass: Compute global variance_min and variance_max with delta-based early stopping
-    logger.info("Starting first pass to compute global variance min and max with delta-based early stopping...")
-
-    # Initialize variables
-    global_variance_min = np.inf
-    global_variance_max = -np.inf
-    delta_min_threshold = config.get('DELTA_MIN_THRESHOLD', 1e-6)
-    delta_max_threshold = config.get('DELTA_MAX_THRESHOLD', 1e-6)
-    min_batches_required = config.get('MIN_BATCHES_REQUIRED', 50)
-    max_batches = config.get('MAX_BATCHES', 17600)
-    stable_batches_required = config.get('STABLE_BATCHES_REQUIRED', 500)
-    processed_batches = 0
-    stable_batches = 0  # Counter for consecutive stable batches
+    logger.info("Starting processing to compute uncertainties and store data...")
 
     try:
-        with tqdm(total=total_samples, desc="First pass", unit="samples") as pbar:
-            for batch_idx, (filename_batch, x_batch, y_batch) in enumerate(ds):
-                current_batch_size = x_batch.shape[0]
-                # Perform MC inference
-                uncertainties = mc_infer(
-                    x_batch, n_iter=config['MC_N_ITER'], model=model, num_classes=num_classes, logger=logger
+        with h5py.File(output_file, hdf5_mode) as hdf5_file:
+            logger.info(f"HDF5 file opened in mode '{hdf5_mode}' for storing results.")
+
+            # If datasets don't exist, create them as resizable
+            if 'rgb_images' not in hdf5_file:
+                maxshape_rgb = (None,) + input_shape
+                maxshape_logits = (None,) + input_shape[:2] + (num_classes,)
+                maxshape_2d = (None,) + input_shape[:2]
+
+                rgb_image_dataset = hdf5_file.create_dataset(
+                    'rgb_images',
+                    shape=(0,) + input_shape,
+                    maxshape=maxshape_rgb,
+                    dtype='uint8',
+                    compression='gzip',
+                    compression_opts=4,
+                    chunks=(chunk_size,) + input_shape
                 )
+                logits_dataset = hdf5_file.create_dataset(
+                    'logits',
+                    shape=(0,) + input_shape[:2] + (num_classes,),
+                    maxshape=maxshape_logits,
+                    dtype='float32',
+                    compression='gzip',
+                    compression_opts=4,
+                    chunks=(chunk_size,) + input_shape[:2] + (num_classes,)
+                )
+                variance_dataset = hdf5_file.create_dataset(
+                    'variance',
+                    shape=(0,) + input_shape[:2],
+                    maxshape=maxshape_2d,
+                    dtype='float32',
+                    compression='gzip',
+                    compression_opts=4,
+                    chunks=(chunk_size,) + input_shape[:2]
+                )
+                bald_dataset = hdf5_file.create_dataset(
+                    'bald',
+                    shape=(0,) + input_shape[:2],
+                    maxshape=maxshape_2d,
+                    dtype='float32',
+                    compression='gzip',
+                    compression_opts=4,
+                    chunks=(chunk_size,) + input_shape[:2]
+                )
+                filename_dataset = hdf5_file.create_dataset(
+                    'filenames',
+                    shape=(0,),
+                    maxshape=(None,),
+                    dtype=h5py.string_dtype(encoding='utf-8'),
+                    compression='gzip',
+                    compression_opts=4,
+                    chunks=(chunk_size,)
+                )
+            else:
+                # Datasets already exist, so just open them
+                rgb_image_dataset = hdf5_file['rgb_images']
+                logits_dataset = hdf5_file['logits']
+                variance_dataset = hdf5_file['variance']
+                bald_dataset = hdf5_file['bald']
+                filename_dataset = hdf5_file['filenames']
 
-                variance_uncertainty = uncertainties['variance'].numpy()  # [batch_size, H, W]
+            # Check for checkpoint
+            if 'last_written_index' in hdf5_file.attrs:
+                resume_index = hdf5_file.attrs['last_written_index']
+                logger.info(f"Resuming from index {resume_index}")
+            else:
+                hdf5_file.attrs['last_written_index'] = 0
 
-                batch_variance_min = variance_uncertainty.min()
-                batch_variance_max = variance_uncertainty.max()
+            # Skip samples in the dataset if resuming
+            if resume_index > 0:
+                ds = ds.skip(resume_index)
 
-                # Update global variance min and max
-                old_variance_min = global_variance_min
-                old_variance_max = global_variance_max
-                global_variance_min = min(global_variance_min, batch_variance_min)
-                global_variance_max = max(global_variance_max, batch_variance_max)
+            # If total_samples is known, limit dataset to remaining samples
+            if total_samples > 0:
+                samples_remaining = total_samples - resume_index
+                if samples_remaining <= 0:
+                    logger.info("All samples have already been processed. Exiting.")
+                    return
+                batches_remaining = math.ceil(samples_remaining / batch_size)
+                ds = ds.take(batches_remaining)
 
-                # Calculate deltas
-                delta_min = abs(global_variance_min - old_variance_min) if old_variance_min != np.inf else np.inf
-                delta_max = abs(global_variance_max - old_variance_max) if old_variance_max != -np.inf else np.inf
+                total_to_process = samples_remaining
+            else:
+                # If total_samples not known, you can rely solely on dataset exhaustion
+                total_to_process = None
 
-                # Update progress bar and show current min/max values
-                pbar.set_postfix({
-                    "min": f"{global_variance_min:.6f}",
-                    "max": f"{global_variance_max:.6f}",
-                    "delta_min": f"{delta_min:.6e}",
-                    "delta_max": f"{delta_max:.6e}",
-                })
-                pbar.update(current_batch_size)
-
-                processed_batches += 1
-
-                # Early stopping condition
-                if processed_batches >= min_batches_required:
-                    if delta_min <= delta_min_threshold and delta_max <= delta_max_threshold:
-                        stable_batches += 1  # Increment stable batches counter
-                        if stable_batches >= stable_batches_required:
-                            logger.info(
-                                f"Variance min and max have stabilized over {stable_batches_required} consecutive "
-                                f"batches after {processed_batches} total batches."
-                            )
-                            break
-                    else:
-                        stable_batches = 0  # Reset counter if deltas exceed thresholds
-
-                # Maximum batches condition
-                if processed_batches >= max_batches:
-                    logger.info(f"Reached maximum number of batches ({max_batches}). Stopping first pass.")
-                    break
-
-    except Exception as e:
-        logger.exception("An error occurred during the first pass.")
-        raise e
-
-    logger.info(
-        f"First pass completed. Estimated global variance min: {global_variance_min}, max: {global_variance_max}"
-    )
-
-    # Second Pass: Compute uncertainties, normalize variance, adjust uncertainties, and store data
-    logger.info("Starting second pass to compute uncertainties and store data...")
-
-    # Reset the dataset iterator
-    ds = get_dataset_v2(
-        data_dir=config['DATA_DIR'],
-        filelists=config['TRAINING_LIST'],
-        repeat=False,
-        shuffle=False,
-        batch_size=config['BATCH_SIZE'],
-        shuffle_buffer_size=config['SHUFFLE_BUFFER_SIZE'],
-        out_channels=config['OUT_CHANNELS']
-    )
-    ds = ds.take(num_batches)
-    logger.debug("Dataset iterator reset and limited to the required number of batches.")
-
-    # Create an HDF5 file for storing results
-    try:
-        with h5py.File(output_file, 'w') as hdf5_file:
-            logger.info("HDF5 file created for storing results.")
-
-            # Create datasets with preallocated size to avoid resizing overhead
-            rgb_image_dataset = hdf5_file.create_dataset(
-                'rgb_images',
-                shape=(total_samples,) + input_shape,
-                dtype='uint8',
-                compression='gzip',
-                compression_opts=4,
-                chunks=(chunk_size,) + input_shape
-            )
-            logits_dataset = hdf5_file.create_dataset(
-                'logits',
-                shape=(total_samples,) + input_shape[:2] + (num_classes,),
-                dtype='float32',
-                compression='gzip',
-                compression_opts=4,
-                chunks=(chunk_size,) + input_shape[:2] + (num_classes,)
-            )
-            variance_dataset = hdf5_file.create_dataset(
-                'variance',
-                shape=(total_samples,) + input_shape[:2],
-                dtype='float32',
-                compression='gzip',
-                compression_opts=4,
-                chunks=(chunk_size,) + input_shape[:2]
-            )
-            bald_dataset = hdf5_file.create_dataset(
-                'bald',
-                shape=(total_samples,) + input_shape[:2],
-                dtype='float32',
-                compression='gzip',
-                compression_opts=4,
-                chunks=(chunk_size,) + input_shape[:2]
-            )
-            filename_dataset = hdf5_file.create_dataset(
-                'filenames',
-                shape=(total_samples,),
-                dtype=h5py.string_dtype(encoding='utf-8'),
-                compression='gzip',
-                compression_opts=4,
-                chunks=(chunk_size,)
-            )
-
-            logger.debug("All HDF5 datasets created successfully.")
-
-            index = 0
-            with tqdm(total=total_samples, desc="Second pass", unit="samples") as pbar:
+            index = resume_index
+            with tqdm(total=total_to_process, desc="Processing", unit="samples",
+                      disable=(total_to_process is None)) as pbar:
                 for batch_idx, (filename_batch, x_batch, y_batch) in enumerate(ds):
                     current_batch_size = x_batch.shape[0]
-                    logger.debug(f"Processing batch {batch_idx + 1} with {current_batch_size} samples.")
 
-                    # Perform MC inference
+                    # Compute uncertainties
                     uncertainties = mc_infer(
-                        x_batch, n_iter=config['MC_N_ITER'], model=model, num_classes=num_classes, logger=logger
+                        x_batch, n_iter=config['MC_N_ITER'], model=model, num_classes=num_classes,
+                        logger=logger
                     )
 
                     # Extract uncertainties
-                    entropy_np = uncertainties['entropy'].numpy()  # [batch_size, H, W]
-                    variance_np = uncertainties['variance'].numpy()  # [batch_size, H, W]
-                    bald_np = uncertainties['bald'].numpy()  # [batch_size, H, W]
-                    mean_logits_np = uncertainties['mean_logits'].numpy()  # [batch_size, H, W, num_classes]
+                    entropy_np = uncertainties['entropy'].numpy()
+                    variance_np = uncertainties['variance'].numpy()
+                    bald_np = uncertainties['bald'].numpy()
+                    mean_logits_np = uncertainties['mean_logits'].numpy()
 
-                    # Normalize variance using global min and max
-                    normalized_variance = (variance_np - global_variance_min) / (
-                            global_variance_max - global_variance_min + 1e-8)
-                    # Ensure values are within [0, 1]
-                    normalized_variance = np.clip(normalized_variance, 0, 1)
-
-                    # Adjust uncertainties by weighting with (1 - entropy)
-                    adjusted_variance = normalized_variance * (1 - entropy_np)
+                    # Adjust uncertainties
+                    adjusted_variance = variance_np * (1 - entropy_np)
                     adjusted_bald = bald_np * (1 - entropy_np)
 
-                    # Convert to numpy arrays
-                    x_batch_np = x_batch.numpy()  # [batch_size, H, W, 3]
-                    filename_batch_np = filename_batch.numpy()  # [batch_size]
+                    x_batch_np = x_batch.numpy()
+                    filename_batch_np = filename_batch.numpy()
 
-                    # Scale images to uint8
                     rgb_images_uint8 = (x_batch_np * 255).astype('uint8')
 
-                    # Determine the actual number of samples to write (handle last batch if it has fewer samples)
-                    actual_batch_size = min(current_batch_size, total_samples - index)
+                    # If total_samples is known, ensure we don't exceed it
+                    actual_batch_size = current_batch_size
+                    if total_samples > 0:
+                        actual_batch_size = min(current_batch_size, total_samples - index)
+                        if actual_batch_size <= 0:
+                            logger.warning("No samples left to write, stopping early.")
+                            break
 
-                    # Handle cases where actual_batch_size might be zero or negative
-                    if actual_batch_size <= 0:
-                        logger.warning(f"Batch {batch_idx + 1}: No samples left to write.")
-                        break
+                    # Resize datasets to hold the new samples
+                    new_size = index + actual_batch_size
 
-                    # Write data in batches
-                    rgb_image_dataset[index:index + actual_batch_size] = rgb_images_uint8[:actual_batch_size]
-                    logits_dataset[index:index + actual_batch_size] = mean_logits_np[:actual_batch_size].astype(
-                        'float16')
-                    variance_dataset[index:index + actual_batch_size] = adjusted_variance[:actual_batch_size].astype(
-                        'float16')
-                    bald_dataset[index:index + actual_batch_size] = adjusted_bald[:actual_batch_size].astype('float16')
-                    filename_dataset[index:index + actual_batch_size] = [
+                    rgb_image_dataset.resize((new_size,) + input_shape)
+                    logits_dataset.resize((new_size,) + input_shape[:2] + (num_classes,))
+                    variance_dataset.resize((new_size,) + input_shape[:2])
+                    bald_dataset.resize((new_size,) + input_shape[:2])
+                    filename_dataset.resize((new_size,))
+
+                    # Write data
+                    rgb_image_dataset[index:new_size] = rgb_images_uint8[:actual_batch_size]
+                    logits_dataset[index:new_size] = mean_logits_np[:actual_batch_size].astype('float16')
+                    variance_dataset[index:new_size] = adjusted_variance[:actual_batch_size].astype('float16')
+                    bald_dataset[index:new_size] = adjusted_bald[:actual_batch_size].astype('float16')
+                    filename_dataset[index:new_size] = [
                         fname.decode('utf-8') for fname in filename_batch_np[:actual_batch_size]
                     ]
 
-                    logger.debug(f"Batch {batch_idx + 1}: Data written to HDF5 file.")
+                    index += actual_batch_size
+                    hdf5_file.attrs['last_written_index'] = index
+                    hdf5_file.flush()
 
-                    index += actual_batch_size  # Update index
+                    if total_to_process is not None:
+                        pbar.update(actual_batch_size)
 
-                    # Update progress bar
-                    pbar.update(actual_batch_size)
+                    # If total_samples is known and we've hit the limit, stop
+                    if total_samples > 0 and index >= total_samples:
+                        logger.info("Reached total_samples limit.")
+                        break
 
-            # Handle cases where fewer samples were written than expected
-            if index < total_samples:
-                logger.warning(f"Expected to process {total_samples} samples, but only {index} were processed.")
-
-            # Flush data to ensure all data is written
+            # Flush data one last time
             hdf5_file.flush()
             logger.info("All data written to HDF5 file successfully.")
 
