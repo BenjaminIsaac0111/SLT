@@ -133,7 +133,7 @@ class ClusteredCropsView(QWidget):
         self.crops_spinbox = QSpinBox()
         self.crops_spinbox.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.crops_spinbox.setRange(1, 32)
-        self.crops_spinbox.setValue(8)
+        self.crops_spinbox.setValue(10)
         self.crops_spinbox.valueChanged.connect(self.on_crops_changed)
         self.crops_spinbox.setFocusPolicy(Qt.NoFocus)
         sampling_layout.addWidget(self.crops_spinbox)
@@ -455,9 +455,20 @@ class ClusteredCropsView(QWidget):
         """
         self.cluster_combo.blockSignals(True)  # Block signals to prevent unwanted emissions
         self.cluster_combo.clear()
-        for cluster_id in cluster_info:
-            info = cluster_info[cluster_id]
-            display_text = f"Cluster {cluster_id} - {info['num_annotations']} annotations"
+        for cluster_id, info in cluster_info.items():
+            # Extract info fields
+            num_annotations = info.get('num_annotations', '?')
+            labeled_percentage = info.get('labeled_percentage', '?')
+            avg_uncertainty = info.get('average_uncertainty', 0.0)
+            cluster_label = info.get('label', '')
+
+            # Construct display text with additional info
+            display_text = (f"Cluster {cluster_id} - {num_annotations} annotations, "
+                            f"{labeled_percentage:.2f}% assessed, "
+                            f"Avg Uncertainty: {avg_uncertainty:.2f}")
+            if cluster_label:
+                display_text += f" - label: {cluster_label}"
+
             self.cluster_combo.addItem(display_text, cluster_id)
 
         if selected_cluster_id is not None:
