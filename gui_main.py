@@ -1,5 +1,3 @@
-# gui_main.py
-
 import logging
 import os
 import sys
@@ -136,7 +134,7 @@ def main():
         elif startup_dialog.selected_option == "start_new":
             # Start new project with selected HDF5 file
             hdf5_file_path = startup_dialog.hdf5_file
-            model = ImageDataModel(hdf5_file_path)
+            model = ImageDataModel(hdf5_file_path, 'variance')
             global_cluster_controller.set_model(model)
         else:
             sys.exit()
@@ -149,7 +147,7 @@ def main():
     tab_widget.addTab(clustered_crops_view, "Clustered Crops")
     main_window.setCentralWidget(tab_widget)
     main_window.setWindowTitle("Guided Labelling Tool")
-    main_window.resize(1600, 900)
+    main_window.resize(1920, 1080)
     main_window.show()
 
     sys.exit(app.exec_())

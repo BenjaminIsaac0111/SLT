@@ -1,14 +1,13 @@
 import logging
+from collections import defaultdict
+from typing import List, Dict
 
 import numba
 import numpy as np
 from PyQt5.QtCore import QThread, pyqtSignal
 from sklearn.cluster import AgglomerativeClustering, MiniBatchKMeans
 
-from GUI.configuration.configuration import CLASS_COMPONENTS
 from GUI.models.Annotation import Annotation
-from GUI.models.ImageDataModel import ImageDataModel
-from GUI.models.UncertaintyRegionSelector import UncertaintyRegionSelector
 
 
 @numba.njit
@@ -58,174 +57,98 @@ def k_center_greedy_numba(X, k, random_state=42):
 
 class ClusteringWorker(QThread):
     """
-    Worker thread for performing global clustering to keep the UI responsive.
+    This worker assumes that all annotations are fully prepared (i.e., have logit_features, uncertainty, etc.).
+    It does not acquire or process image data.
     """
-    clustering_finished = pyqtSignal(list)
+    clustering_finished = pyqtSignal(dict)
     progress_updated = pyqtSignal(int)
 
-    def __init__(self,
-                 hdf5_file_path: str,
-                 labels_acquirer: UncertaintyRegionSelector,
-                 use_kcenters_greedy: bool = True,
-                 subsample_ratio: float = 1.0,
-                 parent=None):
+    def __init__(
+            self,
+            annotations: List[Annotation],
+            subsample_ratio: float = 1.0,
+            cluster_method: str = "minibatchkmeans",
+            parent=None
+    ):
         super().__init__(parent)
-        self.hdf5_file_path = hdf5_file_path  # Path to HDF5 file
-        self.labels_acquirer = labels_acquirer
-        self.model = None  # Will be initialized in the thread
-        self.use_kcenters_greedy = use_kcenters_greedy
-        # subsample_ratio: fraction of points to consider for k-center selection to speed things up
+        self.annotations = annotations
         self.subsample_ratio = subsample_ratio
-
-    def process_image(self, idx):
-        """
-        Processes a single image and assigns a cluster_id to each Annotation.
-        """
-        data = self.model.get_image_data(idx)
-        uncertainty_map = data.get('uncertainty', None)
-        logits = data.get('logits', None)
-        filename = data.get('filename', None)
-
-        if uncertainty_map is None or logits is None or filename is None:
-            logging.warning(f"Missing data for image index {idx}. Skipping.")
-            return [], idx
-
-        logit_features, dbscan_coords = self.labels_acquirer.generate_point_labels(
-            uncertainty_map=uncertainty_map,
-            logits=logits
-        )
-
-        annotations = [
-            Annotation(
-                filename=filename,
-                coord=coord,
-                logit_features=logit_feature,
-                class_id=-1,  # Default to -1 (unlabeled)
-                image_index=idx,
-                uncertainty=uncertainty_map[coord[0], coord[1]],
-                cluster_id=None,
-                model_prediction=self._get_model_prediction(logit_feature)
-            )
-            for coord, logit_feature in zip(dbscan_coords, logit_features)
-        ]
-
-        return annotations, idx
-
-    def _get_model_prediction(self, logit_feature: np.ndarray) -> str:
-        """
-        Determines the model's prediction based on logit features.
-        """
-        class_index = np.argmax(logit_feature)
-        return CLASS_COMPONENTS.get(class_index, "None")
+        self.cluster_method = cluster_method.lower()  # 'agglomerative', 'minibatchkmeans', or 'hdbscan'
 
     def run(self):
-        """
-        Executes the clustering process using a core-set selection (either k-means++ or approximate k-center greedy).
-        """
-        # Initialize the ImageDataModel in this thread
-        self.model = ImageDataModel(self.hdf5_file_path)
+        logging.info("ClusteringWorker started.")
+        total_annotations = len(self.annotations)
 
-        all_annotations = []
-        total_images = self.model.get_number_of_images()
-        logging.info(f"Starting clustering on {total_images} images.")
-
-        # Process each image sequentially
-        for i in range(total_images):
-            try:
-                annotations, idx = self.process_image(i)
-                all_annotations.extend(annotations)
-            except Exception as e:
-                logging.error(f"Error processing image {i}: {e}")
-                continue
-
-            # Emit progress update
-            progress = int(((i + 1) / total_images) * 100)
-            self.progress_updated.emit(progress)
-            logging.debug(f"Processed image {i + 1}/{total_images}. Progress: {progress}%")
-
-        logging.info(f"Total annotations collected: {len(all_annotations)}")
-
-        if not all_annotations:
-            logging.warning("No annotations found across all images.")
+        if total_annotations == 0:
+            logging.warning("No annotations provided for clustering.")
             self.clustering_finished.emit({})
             return
 
-        # Extract logit features for clustering
         try:
-            logit_matrix = np.array(
-                [np.concatenate([anno.logit_features, [anno.uncertainty]]) for anno in all_annotations]
-            )
-            logging.debug(f"Logit matrix shape: {logit_matrix.shape}")
+            feature_matrix = np.array([
+                np.concatenate([anno.logit_features, [anno.uncertainty]])
+                for anno in self.annotations
+            ], dtype=np.float32)
         except Exception as e:
-            logging.error(f"Error creating logit matrix: {e}")
+            logging.error(f"Error creating feature matrix: {e}")
             self.clustering_finished.emit({})
             return
 
-        # Determine core set size and subsample
-        core_set_size = min(10000, len(logit_matrix))
-        logging.info(f"Core-set size determined: {core_set_size}")
+        logging.debug(f"Feature matrix shape: {feature_matrix.shape}")
+        self.progress_updated.emit(-1)  # Emit initial progress (5%)
 
-        # If using k-centers greedy, we approximate by subsampling before selection
-        if self.use_kcenters_greedy:
-            subsample_size = int(len(logit_matrix) * self.subsample_ratio)
-            subsample_size = max(subsample_size, core_set_size)  # Ensure we have at least k points
-            if subsample_size < len(logit_matrix):
-                # Subsample indices
-                subsample_indices = np.random.choice(len(logit_matrix), subsample_size, replace=False)
-                subsample_X = logit_matrix[subsample_indices]
+        # Core-Set Selection
+        core_set_size = min(5000, len(feature_matrix))
+        logging.info(f"Core-set size: {core_set_size}")
+        subsample_size = max(int(len(feature_matrix) * self.subsample_ratio), core_set_size)
+
+        subsample_indices = np.random.choice(len(feature_matrix), subsample_size, replace=False)
+        subsample_X = feature_matrix[subsample_indices]
+
+        logging.info(f"Selecting core-set using k-center greedy on {len(subsample_X)} points.")
+        center_indices_subsample = k_center_greedy_numba(subsample_X, core_set_size)
+        core_set_indices = subsample_indices[center_indices_subsample]
+
+        core_set_features = feature_matrix[core_set_indices]
+        core_set_annotations = [self.annotations[i] for i in core_set_indices]
+        self.progress_updated.emit(-1)  # Core-set selection done
+
+        # Clustering Step
+        try:
+            if self.cluster_method == 'minibatchkmeans':
+                num_clusters = max(1, int(len(core_set_features) * 0.1))
+                clustering = MiniBatchKMeans(n_clusters=num_clusters, random_state=42, batch_size=4096)
+                core_set_labels = clustering.fit_predict(core_set_features)
+            elif self.cluster_method == 'agglomerative':
+                clustering = AgglomerativeClustering(n_clusters=None, distance_threshold=5.0, linkage='ward')
+                core_set_labels = clustering.fit(core_set_features)
             else:
-                subsample_indices = np.arange(len(logit_matrix))
-                subsample_X = logit_matrix
+                raise ValueError(f"Unknown clustering method: {self.cluster_method}")
 
-            logging.info(f"Selecting core-set using approximate k-centers greedy from {len(subsample_X)} points.")
-            # Use JIT-optimized k-center greedy on subsample
-            center_indices_subsample = k_center_greedy_numba(subsample_X, core_set_size)
-            # Map back to original indices
-            core_set_indices = subsample_indices[center_indices_subsample]
-
-        else:
-            # Use k-means++ initialization via MiniBatchKMeans
-            logging.info("Selecting core-set using k-means++.")
-            try:
-                kmeans = MiniBatchKMeans(
-                    n_clusters=core_set_size,
-                    init='k-means++',
-                    random_state=42,
-                    batch_size=3072
-                )
-                kmeans.fit(logit_matrix)
-                core_set_indices = np.unique(kmeans.labels_, return_index=True)[1]
-            except Exception as e:
-                logging.error(f"Error in core-set selection with k-means: {e}")
-                self.clustering_finished.emit({})
-                return
-
-        core_set_features = logit_matrix[core_set_indices]
-        core_set_annotations = [all_annotations[i] for i in core_set_indices]
-        logging.info(f"Core-set selected with {len(core_set_features)} features.")
-
-        # Step 2: Perform clustering on the core-set using Agglomerative Clustering
-        try:
-            clustering = AgglomerativeClustering(
-                n_clusters=None,
-                distance_threshold=1.50,
-                linkage='ward'
-            )
-            clustering.fit(core_set_features)
-            core_set_labels = clustering.labels_
-            logging.info(f"Core-set clustering complete. Number of clusters: {len(set(core_set_labels))}")
+            logging.info(f"Clustering complete. Found {len(set(core_set_labels))} clusters.")
+            self.progress_updated.emit(-1)  # Clustering done
         except Exception as e:
-            logging.error(f"Clustering on core-set failed: {e}")
+            logging.error(f"Clustering failed: {e}")
             self.clustering_finished.emit({})
             return
 
-        # Assign cluster IDs to the core-set annotations
-        for label, annotation in zip(core_set_labels, core_set_annotations):
-            annotation.cluster_id = int(label)
+        for label, anno in zip(core_set_labels, core_set_annotations):
+            anno.cluster_id = int(label)
 
-        # Close the model's HDF5 file
-        if self.model is not None:
-            self.model.close()
+        # Finalizing
+        clusters_dict = self.group_annotations_by_cluster(core_set_annotations)
+        self.progress_updated.emit(100)  # Final progress
+        self.clustering_finished.emit(clusters_dict)
 
-        logging.info("Clustering complete for the core-set.")
-        self.clustering_finished.emit(core_set_annotations)
+    @staticmethod
+    def group_annotations_by_cluster(annotations: List[Annotation]) -> Dict[int, List[Annotation]]:
+        """
+        Groups annotations by their cluster IDs.
+
+        :param annotations: A list of Annotation objects.
+        :return: A dictionary mapping cluster IDs to lists of annotations.
+        """
+        clusters = defaultdict(list)
+        for annotation in annotations:
+            clusters[annotation.cluster_id].append(annotation)
+        return dict(clusters)

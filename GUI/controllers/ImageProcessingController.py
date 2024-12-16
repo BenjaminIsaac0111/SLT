@@ -1,5 +1,5 @@
 import logging
-from typing import Optional, Dict, Tuple, List
+from typing import Dict, List, Optional, Tuple
 
 from PyQt5.QtCore import QObject, pyqtSignal, QThread, pyqtSlot, QPoint
 from PyQt5.QtGui import QPixmap, QPainter, QPen, QColor, QImage
@@ -131,7 +131,7 @@ class ImageProcessingController(QObject):
         self.prefetch_workers: Dict[int, Tuple[ImageProcessingWorker, QThread]] = {}
         self.prefetching_clusters: set = set()
 
-        self.crops_per_cluster = 8  # Default value, can be updated as needed
+        self.crops_per_cluster = 10  # Default value, can be updated as needed
 
     def set_clusters(self, clusters: Dict[int, List[Annotation]]):
         self.clusters = clusters
@@ -151,9 +151,7 @@ class ImageProcessingController(QObject):
     def display_crops(self, annotations: List[Annotation], cluster_id: int):
         """
         Selects the top 'n' annotations from a single cluster to display as zoomed-in crops.
-
-        :param annotations: List of Annotation objects in the cluster.
-        :param cluster_id: The ID of the cluster.
+        The annotations are first sorted by their uncertainty from highest to lowest.
         """
         if self.loading_images:
             logging.info("Aborting previous image loading process.")
@@ -162,10 +160,15 @@ class ImageProcessingController(QObject):
         self.loading_images = True
         self.crop_loading_started.emit()
 
+        # Sort annotations by uncertainty (highest to lowest)
+        annotations = sorted(annotations, key=lambda anno: anno.uncertainty, reverse=True)
+
         # Select the top 'n' annotations within the cluster
         num_samples = min(self.crops_per_cluster, len(annotations))
         selected_annotations = annotations[:num_samples]
-        logging.debug(f"Selected top {len(selected_annotations)} annotations from cluster {cluster_id}.")
+        logging.debug(
+            f"Selected top {len(selected_annotations)} annotations from cluster {cluster_id} by highest uncertainty."
+        )
 
         # Check cache and separate cached and uncached annotations
         processed_annotations = []
@@ -250,8 +253,11 @@ class ImageProcessingController(QObject):
                 self.image_thread = None
         self.loading_images = False
 
-    def start_image_processing_worker(self, annotations_to_process: List[Annotation],
-                                      processed_annotations: List[dict]):
+    def start_image_processing_worker(
+            self,
+            annotations_to_process: List[Annotation],
+            processed_annotations: List[dict]
+    ):
         """
         Starts the ImageProcessingWorker in a separate thread to process uncached annotations.
 
@@ -260,7 +266,7 @@ class ImageProcessingController(QObject):
         """
         self.image_worker = ImageProcessingWorker(
             sampled_annotations=annotations_to_process,
-            hdf5_file_path=self.model.hdf5_file_path,
+            image_data_model=self.model,  # Pass the existing ImageDataModel instance
             image_processor=self.image_processor
         )
         self.image_thread = QThread(parent=self)
@@ -352,14 +358,14 @@ class ImageProcessingController(QObject):
 
         prefetch_worker = ImageProcessingWorker(
             sampled_annotations=selected_annotations,
-            hdf5_file_path=self.model.hdf5_file_path,
+            image_data_model=self.model,  # Pass the existing ImageDataModel instance
             image_processor=self.image_processor
         )
         prefetch_thread = QThread(parent=self)
         prefetch_worker.moveToThread(prefetch_thread)
         prefetch_thread.started.connect(prefetch_worker.process_images)
         prefetch_worker.processing_finished.connect(
-            lambda _: self.on_prefetch_finished(cluster_id)
+            lambda new_annotations: self.on_prefetch_finished(cluster_id)
         )
         prefetch_worker.processing_finished.connect(prefetch_thread.quit)
         prefetch_worker.processing_finished.connect(prefetch_worker.deleteLater)

@@ -1,12 +1,69 @@
 import logging
 from collections import OrderedDict
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 
+import numpy as np
 from PyQt5.QtCore import QObject, pyqtSignal, QThread, pyqtSlot
 
 from GUI.configuration.configuration import CLASS_COMPONENTS
 from GUI.models.Annotation import Annotation
+from GUI.models.ImageDataModel import ImageDataModel
+from GUI.models.UncertaintyRegionSelector import UncertaintyRegionSelector
 from GUI.workers.ClusteringWorker import ClusteringWorker
+
+
+class AnnotationExtractionWorker(QThread):
+    progress = pyqtSignal(int)
+    finished = pyqtSignal(list)
+
+    def __init__(self, model, region_selector, parent=None):
+        super().__init__(parent)
+        self.model = model
+        self.region_selector = region_selector
+
+    def run(self):
+        annotations = []
+        total_images = self.model.get_number_of_images()
+        for idx, image_index in enumerate(range(total_images)):
+            # Extract annotations from each image
+            image_data = self.model.get_image_data(image_index)
+            annos = self.extract_annotations_from_image(image_data, image_index)
+            annotations.extend(annos)
+
+            # Emit progress
+            progress = int((idx + 1) / total_images * 100)
+            self.progress.emit(progress)
+
+        self.finished.emit(annotations)
+
+    def extract_annotations_from_image(self, image_data, image_index):
+        # This is similar to your current extract_annotations_from_image code
+        annotations = []
+        uncertainty_map = image_data.get('uncertainty', None)
+        logits = image_data.get('logits', None)
+        filename = image_data.get('filename', None)
+        if uncertainty_map is None or logits is None or filename is None:
+            return annotations
+
+        logit_features, coords = self.region_selector.generate_point_labels(
+            uncertainty_map=uncertainty_map,
+            logits=logits
+        )
+
+        for coord, logit_feature in zip(coords, logit_features):
+            anno = Annotation(
+                filename=filename,
+                coord=coord,
+                logit_features=logit_feature,
+                class_id=-1,
+                image_index=image_index,
+                uncertainty=uncertainty_map[tuple(coord)],
+                cluster_id=None,
+                model_prediction=CLASS_COMPONENTS.get(np.argmax(logit_feature), "None")
+            )
+            annotations.append(anno)
+
+        return annotations
 
 
 class ClusteringController(QObject):
@@ -14,14 +71,17 @@ class ClusteringController(QObject):
     ClusteringController handles clustering operations independently.
     It communicates with GlobalClusterController via signals and slots.
     """
-
-    # Signals to communicate with other controllers or the view
     clustering_started = pyqtSignal()
     clustering_progress = pyqtSignal(int)
     clusters_ready = pyqtSignal(dict)
     labeling_statistics_updated = pyqtSignal(dict)
+    annotation_progress = pyqtSignal(int)
+    annotation_progress_finished = pyqtSignal()
+    clustering_progress_bar_visible = pyqtSignal(bool)
+    show_clustering_progress_bar = pyqtSignal()
+    hide_clustering_progress_bar = pyqtSignal()
 
-    def __init__(self, model, region_selector):
+    def __init__(self, model: ImageDataModel, region_selector: UncertaintyRegionSelector):
         """
         Initializes the ClusteringController.
 
@@ -43,48 +103,122 @@ class ClusteringController(QObject):
 
     @pyqtSlot()
     def start_clustering(self):
-        """
-        Initiates the clustering process by starting the ClusteringWorker in a separate thread.
-        """
         if self.clustering_thread and self.clustering_thread.isRunning():
-            logging.warning("Clustering thread is already running. Skipping new start.")
+            logging.warning("Clustering thread is already running.")
             return
 
-        logging.info("Clustering process initiated.")
+        logging.info("Clustering initiated.")
         self.clustering_started.emit()
 
-        # Initialize and configure the ClusteringWorker
-        self.clustering_worker = ClusteringWorker(
-            hdf5_file_path=self.model.hdf5_file_path,
-            labels_acquirer=self.region_selector
-        )
-        self.clustering_thread = QThread()
-        self.clustering_worker.moveToThread(self.clustering_thread)
+        # Start annotation extraction in the background
+        self.annotation_extraction_worker = AnnotationExtractionWorker(self.model, self.region_selector)
+        self.annotation_extraction_worker.progress.connect(self.annotation_progress.emit)
+        self.annotation_extraction_worker.finished.connect(self.on_annotation_extraction_finished)
 
-        # Connect signals and slots
-        self.clustering_thread.started.connect(self.clustering_worker.run)
-        self.clustering_worker.progress_updated.connect(self.clustering_progress.emit)
-        self.clustering_worker.clustering_finished.connect(self.on_clustering_finished)
-        self.clustering_worker.clustering_finished.connect(self.clustering_thread.quit)
-
-        # Start the clustering thread
-        self.clustering_thread.start()
+        # Begin extraction
+        self.annotation_progress.emit(0)
+        self.annotation_extraction_worker.start()
 
     @pyqtSlot(list)
-    def on_clustering_finished(self, annotations: List[Annotation]):
-        """
-        Handles the completion of the clustering process.
+    def on_annotation_extraction_finished(self, all_annotations):
+        # Once done:
+        self.annotation_progress.emit(100)
+        self.annotation_progress_finished.emit()
 
-        :param annotations: A list of Annotation objects resulting from clustering.
-        """
-        # Organize annotations by cluster_id
-        self.clusters = self.group_annotations_by_cluster(annotations)
-        logging.info(f"Clustering finished with {len(self.clusters)} clusters.")
+        # Instead of self.view.show_clustering_progress_bar(), emit a signal:
+        self.show_clustering_progress_bar.emit()
 
-        # Emit the clusters_ready signal with the clusters data
+        # Instead of self.view.update_clustering_progress_bar(0), just emit clustering_progress(0):
+        self.clustering_progress.emit(0)
+
+        # Now proceed with clustering
+        self.start_clustering_with_annotations(all_annotations)
+
+    def start_clustering_with_annotations(self, all_annotations):
+        self.clustering_worker = ClusteringWorker(
+            annotations=all_annotations,
+            subsample_ratio=1.0,
+            cluster_method="minibatchkmeans"
+        )
+        self.clustering_worker.clustering_finished.connect(self.on_clustering_finished)
+        self.clustering_worker.progress_updated.connect(self.clustering_progress.emit)
+
+        # Start the QThread worker directly
+        self.clustering_worker.start()
+
+    def collect_all_annotations(self) -> List[Annotation]:
+        total_images = self.model.get_number_of_images()
+        annotations = []
+        for idx, image_index in enumerate(range(total_images)):
+            try:
+                image_data = self.model.get_image_data(image_index)
+                annotations.extend(self.extract_annotations_from_image(image_data, image_index))
+            except Exception as e:
+                logging.error(f"Error collecting annotations from image {image_index}: {e}")
+                continue
+
+            # Emit progress for annotation extraction
+            progress = int((idx + 1) / total_images * 100)
+            self.annotation_progress.emit(progress)
+
+        logging.info(f"Total annotations collected: {len(annotations)}")
+        return annotations
+
+    def extract_annotations_from_image(self, image_data: Dict[str, Any], image_index: int) -> List[Annotation]:
+        """
+        Extracts annotations from image data.
+
+        :param image_data: Dictionary containing image data.
+        :param image_index: Index of the image.
+        :return: A list of Annotation objects.
+        """
+        annotations = []
+        uncertainty_map = image_data.get('uncertainty', None)
+        logits = image_data.get('logits', None)
+        filename = image_data.get('filename', None)
+
+        if uncertainty_map is None or logits is None or filename is None:
+            logging.warning(f"Missing data for image index {image_index}. Skipping.")
+            return annotations
+
+        logit_features, coords = self.region_selector.generate_point_labels(
+            uncertainty_map=uncertainty_map,
+            logits=logits
+        )
+
+        for coord, logit_feature in zip(coords, logit_features):
+            annotation = Annotation(
+                filename=filename,
+                coord=coord,
+                logit_features=logit_feature,
+                class_id=-1,  # Default to -1 (unlabeled)
+                image_index=image_index,
+                uncertainty=uncertainty_map[tuple(coord)],
+                cluster_id=None,
+                model_prediction=self._get_model_prediction(logit_feature)
+            )
+            annotations.append(annotation)
+
+        return annotations
+
+    def _get_model_prediction(self, logit_feature: np.ndarray) -> str:
+        """
+        Determines the model's prediction based on logit features.
+
+        :param logit_feature: Numpy array of logit features.
+        :return: Predicted class name.
+        """
+        class_index = np.argmax(logit_feature)
+        return CLASS_COMPONENTS.get(class_index, "None")
+
+    def on_clustering_finished(self, clusters: Dict[int, List[Annotation]]):
+        self.clusters = clusters
         self.clusters_ready.emit(self.clusters)
 
-        # Compute and emit labeling statistics
+        # Instead of self.view.hide_clustering_progress_bar():
+        self.hide_clustering_progress_bar.emit()
+
+        # Compute and emit labeling statistics as before
         self.compute_labeling_statistics()
 
     def on_worker_finished(self):
@@ -163,13 +297,16 @@ class ClusteringController(QObject):
             'agreement_percentage': agreement_percentage
         }
 
-        logging.info(f"Labeling statistics computed with disagreement: {statistics}")
+        logging.info(f"Labeling statistics computed: {statistics}")
         self.labeling_statistics_updated.emit(statistics)
 
     def get_class_id_from_prediction(self, prediction_name: str) -> Optional[int]:
         """
-        Map the model's predicted class name to a class_id.
+        Maps the model's predicted class name to a class_id.
         Adjust this method if needed based on how you map predictions to classes.
+
+        :param prediction_name: The predicted class name.
+        :return: Corresponding class_id or None.
         """
         for c_id, c_name in CLASS_COMPONENTS.items():
             if c_name == prediction_name:
@@ -228,20 +365,4 @@ class ClusteringController(QObject):
         logging.info(f"Crops per cluster set to {num_crops}.")
 
     def cleanup(self):
-        if self.clustering_worker:
-            try:
-                self.clustering_worker.progress_updated.disconnect()
-                self.clustering_worker.clustering_finished.disconnect()
-            except TypeError:
-                pass
-            self.clustering_worker.deleteLater()
-            self.clustering_worker = None
-
-        if self.clustering_thread:
-            if self.clustering_thread.isRunning():
-                self.clustering_thread.quit()
-                self.clustering_thread.wait()
-            self.clustering_thread.deleteLater()
-            self.clustering_thread = None
-
-        logging.info("Clustering worker and thread cleaned up.")
+        pass

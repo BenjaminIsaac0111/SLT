@@ -1,9 +1,7 @@
 import json
 import logging
-import os
-import tempfile
 from collections import OrderedDict
-from typing import Optional
+from typing import Optional, Dict, List
 
 from PyQt5.QtCore import QObject, pyqtSlot, QTimer, QCoreApplication
 from PyQt5.QtWidgets import QFileDialog, QMessageBox
@@ -15,9 +13,6 @@ from GUI.models.Annotation import Annotation
 from GUI.models.ImageDataModel import ImageDataModel
 from GUI.models.UncertaintyRegionSelector import UncertaintyRegionSelector
 from GUI.views.ClusteredCropsView import ClusteredCropsView
-
-TEMP_DIR = os.path.join(tempfile.gettempdir(), 'my_application_temp')
-os.makedirs(TEMP_DIR, exist_ok=True)
 
 
 class GlobalClusterController(QObject):
@@ -35,14 +30,14 @@ class GlobalClusterController(QObject):
         :param view: An instance of the ClusteredCropsView.
         """
         super().__init__()
-        self.model = model
+        self.image_data_model = model
         self.view = view
         self.region_selector = UncertaintyRegionSelector()
 
-        # Instantiate other controllers
-        self.clustering_controller = ClusteringController(self.model, self.region_selector)
-        self.image_processing_controller = ImageProcessingController(self.model)
-        self.project_state_controller = ProjectStateController(self.model)
+        # Instantiate other controllers with the initial model
+        self.clustering_controller = ClusteringController(self.image_data_model, self.region_selector)
+        self.image_processing_controller = ImageProcessingController(self.image_data_model)
+        self.project_state_controller = ProjectStateController(self.image_data_model)
 
         # Autosave timer initialization (do not start it yet)
         self.autosave_timer = QTimer()
@@ -58,14 +53,22 @@ class GlobalClusterController(QObject):
     def set_model(self, model: ImageDataModel):
         """
         Sets the model and starts the autosave timer if not already active.
+
+        :param model: The new ImageDataModel instance to set.
         """
-        self.model = model
+        if self.image_data_model == model:
+            logging.debug("Model is already set. Skipping reassignment.")
+            return
+
+        self.image_data_model = model
         self.clustering_controller.model = model
         self.image_processing_controller.model = model
         self.project_state_controller.model = model
+
         # Start the autosave timer if not already started
         if not self.autosave_timer.isActive():
             self.autosave_timer.start()
+        logging.info("Model has been updated and autosave timer started.")
 
     def connect_signals(self):
         """
@@ -85,8 +88,11 @@ class GlobalClusterController(QObject):
         self.view.save_project_as_requested.connect(self.save_project_as)
 
         # ClusteringController signals to view
-        self.clustering_controller.clustering_started.connect(self.view.show_clustering_progress_bar)
+        self.clustering_controller.show_clustering_progress_bar.connect(self.view.show_clustering_progress_bar)
+        self.clustering_controller.hide_clustering_progress_bar.connect(self.view.hide_clustering_progress_bar)
         self.clustering_controller.clustering_progress.connect(self.view.update_clustering_progress_bar)
+        self.clustering_controller.annotation_progress.connect(self.view.update_annotation_progress_bar)
+        self.clustering_controller.annotation_progress_finished.connect(self.view.hide_annotation_progress_bar)
         self.clustering_controller.clusters_ready.connect(self.on_clusters_ready)
         self.clustering_controller.labeling_statistics_updated.connect(self.view.update_labeling_statistics)
 
@@ -104,7 +110,7 @@ class GlobalClusterController(QObject):
         self.project_state_controller.load_failed.connect(self.on_load_failed)
 
     @pyqtSlot(dict)
-    def on_clusters_ready(self, clusters):
+    def on_clusters_ready(self, clusters: Dict[int, List[Annotation]]):
         """
         Handles when clusters are ready after clustering finishes.
         Updates the ImageProcessingController with the new clusters.
@@ -216,12 +222,12 @@ class GlobalClusterController(QObject):
         self.clustering_controller.compute_labeling_statistics()
 
     def get_current_state(self) -> dict:
-        if self.model is None:
+        if self.image_data_model is None:
             logging.debug("Cannot get current state: model is not initialized.")
             return {}
         clusters = self.clustering_controller.get_clusters()
         project_state = {
-            'hdf5_file_path': self.model.hdf5_file_path,
+            'hdf5_file_path': self.image_data_model.hdf5_file_path,
             'annotations': {},
             'cluster_order': list(clusters.keys()),
             'selected_cluster_id': self.view.get_selected_cluster_id(),
@@ -238,7 +244,7 @@ class GlobalClusterController(QObject):
         """
         Initiates an autosave operation.
         """
-        if self.model is None:
+        if self.image_data_model is None:
             logging.debug("Autosave skipped: model is not initialized.")
             return
         logging.debug("Autosave timer triggered.")
@@ -251,11 +257,12 @@ class GlobalClusterController(QObject):
         Saves the project state to the current file path.
         If the current file path is not set, prompts the user to choose a save location.
         """
-        if self.project_state_controller.get_current_save_path():
+        current_path = self.project_state_controller.get_current_save_path()
+        if current_path:
             project_state = self.get_current_state()
             self.project_state_controller.save_project_state(
                 project_state,
-                self.project_state_controller.get_current_save_path()
+                current_path
             )
         else:
             self.save_project_as()
@@ -359,13 +366,18 @@ class GlobalClusterController(QObject):
             return
 
         # Initialize model if not already initialized or if hdf5_file_path is different
-        if self.model is None or self.model.hdf5_file_path != hdf5_file_path:
-            model = ImageDataModel(hdf5_file_path)
-            self.set_model(model)
+        if self.image_data_model is None or self.image_data_model.hdf5_file_path != hdf5_file_path:
+            # Determine the uncertainty_type from project_state or default to 'variance'
+            uncertainty_type = project_state.get('uncertainty_type', 'variance')
+            image_data_model = ImageDataModel(
+                hdf5_file_path=hdf5_file_path,
+                uncertainty_type=uncertainty_type
+            )
+            self.set_model(image_data_model)
             # Update model in controllers
-            self.clustering_controller.model = self.model
-            self.image_processing_controller.model = self.model
-            self.project_state_controller.model = self.model
+            self.clustering_controller.model = self.image_data_model
+            self.image_processing_controller.model = self.image_data_model
+            self.project_state_controller.model = self.image_data_model
 
         # Update cluster info and UI
         cluster_info = self.clustering_controller.generate_cluster_info()

@@ -3,22 +3,20 @@ from typing import List, Tuple
 
 import numpy as np
 from scipy.ndimage import gaussian_filter, maximum_filter
-from sklearn.cluster import DBSCAN
 
 
 class UncertaintyRegionSelector:
     """
-    The UncertaintyRegionSelector class identifies uncertain regions from an uncertainty map.
-    It uses DBSCAN for spatial clustering of significant points.
+    The UncertaintyRegionSelector class identifies uncertain regions from an uncertainty map
+    by selecting local maxima after optional Gaussian smoothing.
     """
 
     def __init__(
             self,
             filter_size: int = 48,
             gaussian_sigma: float = 3.0,
-            edge_buffer: int = 96,
-            eps: float = 2.0,  # DBSCAN parameter for spatial clustering
-            min_samples: int = 1,  # DBSCAN parameter for spatial clustering
+            edge_buffer: int = 64,
+            use_gaussian: bool = False,
     ):
         """
         Initializes the UncertaintyRegionSelector.
@@ -26,19 +24,17 @@ class UncertaintyRegionSelector:
         :param filter_size: Size for the maximum filter to identify local maxima.
         :param gaussian_sigma: Sigma parameter for the Gaussian filter.
         :param edge_buffer: Buffer from image edges to exclude certain coordinates.
-        :param eps: DBSCAN epsilon parameter for spatial clustering.
-        :param min_samples: DBSCAN minimum samples parameter for spatial clustering.
+        :param use_gaussian: Whether to apply Gaussian smoothing before finding local maxima.
         """
         self.filter_size = filter_size
         self.gaussian_sigma = gaussian_sigma
         self.edge_buffer = edge_buffer
-        self.eps = eps
-        self.min_samples = min_samples
+        self.use_gaussian = use_gaussian
         self._validate_params()
         logging.info(
             "UncertaintyRegionSelector initialized with filter_size=%d, "
-            "gaussian_sigma=%.2f, edge_buffer=%d, eps=%.2f, min_samples=%d.",
-            filter_size, gaussian_sigma, edge_buffer, eps, min_samples
+            "gaussian_sigma=%.2f, edge_buffer=%d, use_gaussian=%s.",
+            filter_size, gaussian_sigma, edge_buffer, use_gaussian
         )
 
     def _validate_params(self):
@@ -51,10 +47,8 @@ class UncertaintyRegionSelector:
             raise ValueError("gaussian_sigma must be a positive float.")
         if not isinstance(self.edge_buffer, int) or self.edge_buffer < 0:
             raise ValueError("edge_buffer must be a non-negative integer.")
-        if not isinstance(self.eps, float) or self.eps <= 0:
-            raise ValueError("eps must be a positive float.")
-        if not isinstance(self.min_samples, int) or self.min_samples <= 0:
-            raise ValueError("min_samples must be a positive integer.")
+        if not isinstance(self.use_gaussian, bool):
+            raise ValueError("use_gaussian must be a boolean.")
 
     def generate_point_labels(
             self,
@@ -62,44 +56,38 @@ class UncertaintyRegionSelector:
             logits: np.ndarray,
     ) -> Tuple[np.ndarray, List[Tuple[int, int]]]:
         """
-        Selects the uncertain regions from the uncertainty map and clusters the coordinates using DBSCAN.
+        Selects uncertain regions from the uncertainty map by identifying local maxima.
+        Optionally applies Gaussian smoothing before selecting maxima.
 
         :param uncertainty_map: A 2D numpy array representing uncertainty values (already normalized).
+                                If it is 3D, it will be averaged along the last axis to form 2D.
         :param logits: A 3D numpy array of logit values per pixel (H, W, num_classes).
-        :return: A tuple containing logit features (numpy array) and list of (row, column) tuples.
+        :return: A tuple containing logit features (numpy array) and a list of (row, column) tuples.
         """
-        # Step 1: Ensure uncertainty map is 2D
+        # Prepare uncertainty map (aggregate if 3D)
         uncertainty_map_2d = self._prepare_uncertainty_map(uncertainty_map)
 
-        # Step 2: Apply Gaussian smoothing
-        uncertainty_map_smoothed = gaussian_filter(uncertainty_map_2d, sigma=self.gaussian_sigma)
-        logging.debug("Applied Gaussian filter with sigma=%.2f.", self.gaussian_sigma)
+        if self.use_gaussian:
+            # Apply Gaussian smoothing
+            uncertainty_map_processed = gaussian_filter(uncertainty_map_2d, sigma=self.gaussian_sigma)
+            logging.debug("Applied Gaussian filter with sigma=%.2f.", self.gaussian_sigma)
+        else:
+            uncertainty_map_processed = uncertainty_map_2d
+            logging.debug("Skipping Gaussian filter as per configuration.")
 
-        # Step 3: Identify significant coordinates
-        initial_coords = self._identify_significant_coords(uncertainty_map_smoothed)
-        logging.info("Identified %d significant coordinates.", len(initial_coords))
+        # Identify local maxima as significant coordinates
+        coords = self._identify_significant_coords(uncertainty_map_processed)
+        logging.info("Identified %d significant coordinates.", len(coords))
 
-        if not initial_coords:
+        if not coords:
             logging.warning("No significant coordinates found.")
             return np.array([]), []
 
-        # Step 4: Perform DBSCAN on spatial coordinates to group them
-        dbscan_coords = self._dbscan_cluster_coordinates(coords=initial_coords,
-                                                         uncertainty_map=uncertainty_map_smoothed)
-        logging.info("DBSCAN identified %d points in spatial domain.", len(dbscan_coords))
-
-        if not dbscan_coords:
-            logging.warning("No coordinates left after DBSCAN clustering.")
-            return np.array([]), []
-
-        # Step 5: Extract logit features at the DBSCAN-clustered coordinates
-        logit_features = self._extract_logit_features(
-            logits=logits,
-            coords=dbscan_coords
-        )
+        # Extract logit features at these coordinates
+        logit_features = self._extract_logit_features(logits, coords)
         logging.debug("Extracted logit features with shape %s.", logit_features.shape)
 
-        return logit_features, dbscan_coords
+        return logit_features, coords
 
     def _prepare_uncertainty_map(self, uncertainty_map: np.ndarray) -> np.ndarray:
         """
@@ -119,7 +107,7 @@ class UncertaintyRegionSelector:
             raise ValueError("Uncertainty map must be a 2D or 3D numpy array.")
         return uncertainty_map_2d.astype(np.float32)
 
-    def _identify_significant_coords(self, uncertainty_map: np.ndarray) -> List[Tuple[int, int]]:
+    def _identify_significant_coords(self, uncertainty_map: np.ndarray) -> List[tuple]:
         """
         Identifies significant coordinates based on local maxima in the uncertainty map.
 
@@ -144,56 +132,6 @@ class UncertaintyRegionSelector:
         valid_coords = [tuple(coord) for coord in valid_coords]
         logging.debug("Filtered out coordinates near edges, %d remaining.", len(valid_coords))
         return valid_coords
-
-    def _dbscan_cluster_coordinates(self, coords: List[Tuple[int, int]], uncertainty_map: np.ndarray) -> List[
-        Tuple[int, int]]:
-        """
-        Clusters the spatial coordinates using DBSCAN and selects the point with the highest uncertainty in each
-        cluster.
-
-        :param coords: A list of (row, column) tuples representing significant coordinates.
-        :param uncertainty_map: A 2D numpy array representing uncertainty values.
-        :return: A list of (row, column) tuples of the points with the highest uncertainty in each cluster.
-        """
-        if not coords:
-            return []
-
-        # Convert list of tuples to NumPy array for DBSCAN
-        spatial_coords = np.array(coords)  # Shape: (n_samples, 2)
-
-        # Initialize DBSCAN with the specified parameters
-        dbscan = DBSCAN(eps=self.eps, min_samples=self.min_samples, metric='euclidean', n_jobs=-1)
-
-        # Fit DBSCAN on spatial coordinates
-        dbscan.fit(spatial_coords)
-
-        labels = dbscan.labels_
-        unique_labels = set(labels)
-
-        # Initialize the list to hold the selected coordinates with the highest uncertainty
-        clustered_coords = []
-
-        # Select the point with the highest uncertainty in each cluster
-        for label in unique_labels:
-            if label == -1:
-                # Skip noise points (DBSCAN label -1)
-                continue
-
-            cluster_indices = np.where(labels == label)[0]
-            cluster_coords = spatial_coords[cluster_indices]
-
-            # Get the uncertainty values for all points in this cluster
-            cluster_uncertainty = uncertainty_map[cluster_coords[:, 0], cluster_coords[:, 1]]
-
-            # Find the index of the point with the highest uncertainty in this cluster
-            highest_uncertainty_idx = np.argmax(cluster_uncertainty)
-
-            # Select the coordinate with the highest uncertainty
-            clustered_coords.append(tuple(cluster_coords[highest_uncertainty_idx]))
-
-        logging.debug("DBSCAN clustering complete. Number of spatial clusters: %d.",
-                      len(unique_labels) - (1 if -1 in unique_labels else 0))
-        return clustered_coords
 
     def _extract_logit_features(self, logits: np.ndarray, coords: List[Tuple[int, int]]) -> np.ndarray:
         """

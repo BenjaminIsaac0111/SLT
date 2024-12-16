@@ -79,6 +79,16 @@ class ClusteredCropsView(QWidget):
         self.clustering_progress_bar.setVisible(False)
         clustering_layout.addWidget(self.clustering_progress_bar)
 
+        # Annotation Progress bar.
+        self.annotation_progress_bar = QProgressBar()
+        self.annotation_progress_bar.setValue(0)
+        self.annotation_progress_bar.setVisible(False)
+        clustering_layout.addWidget(self.annotation_progress_bar)
+
+        # Update clustering progress bar to clearly indicate its purpose
+        self.clustering_progress_bar.setFormat("Clustering: %p%")
+        self.annotation_progress_bar.setFormat("Extracting Annotations: %p%")
+
         clustering_group.setLayout(clustering_layout)
         control_panel_layout.addWidget(clustering_group)
 
@@ -397,15 +407,33 @@ class ClusteredCropsView(QWidget):
                 return False  # Do not filter the event
         return super().eventFilter(obj, event)
 
-    def show_clustering_progress_bar(self):
-        self.clustering_progress_bar.setValue(0)
-        self.clustering_progress_bar.setVisible(True)
+    def update_annotation_progress_bar(self, progress: int):
+        if not self.annotation_progress_bar.isVisible():
+            self.annotation_progress_bar.setVisible(True)
+        self.annotation_progress_bar.setValue(progress)
+        self.annotation_progress_bar.setFormat(f"Extracting Annotations: {progress}%")
+
+    def hide_annotation_progress_bar(self):
+        self.annotation_progress_bar.setVisible(False)
 
     def update_clustering_progress_bar(self, progress: int):
-        self.clustering_progress_bar.setValue(progress)
+        if progress == -1:
+            # Set the progress bar to an indeterminate state or show "Waiting..."
+            self.clustering_progress_bar.setRange(0, 0)  # Indeterminate mode
+            self.clustering_progress_bar.setFormat("Waiting...")
+            self.clustering_progress_bar.setVisible(True)
+        else:
+            # Normal progress update
+            self.clustering_progress_bar.setRange(0, 100)
+            self.clustering_progress_bar.setValue(progress)
+            self.clustering_progress_bar.setFormat(f"Clustering: {progress}%")
 
     def hide_clustering_progress_bar(self):
         self.clustering_progress_bar.setVisible(False)
+
+    def show_clustering_progress_bar(self):
+        self.clustering_progress_bar.setValue(0)
+        self.clustering_progress_bar.setVisible(True)
 
     def show_crop_loading_progress_bar(self):
         """
