@@ -125,11 +125,9 @@ class ClusteringController(QObject):
         self.annotation_progress.emit(100)
         self.annotation_progress_finished.emit()
 
-        # Instead of self.view.show_clustering_progress_bar(), emit a signal:
         self.show_clustering_progress_bar.emit()
 
-        # Instead of self.view.update_clustering_progress_bar(0), just emit clustering_progress(0):
-        self.clustering_progress.emit(0)
+        self.clustering_progress.emit(-1)
 
         # Now proceed with clustering
         self.start_clustering_with_annotations(all_annotations)
@@ -247,17 +245,13 @@ class ClusteringController(QObject):
         return clusters
 
     def compute_labeling_statistics(self):
-        """
-        Computes labeling statistics such as total annotations, total labeled,
-        class counts, global disagreement count, and agreement percentage.
-        Emits labeling_statistics_updated signal with the statistics dictionary.
-        """
         clusters = self.get_clusters()  # {cluster_id: [Annotation, ...]}
         total_annotations = 0
         total_labeled = 0
         class_counts = {cid: 0 for cid in CLASS_COMPONENTS.keys()}
         class_counts[-1] = 0  # Unlabeled
         class_counts[-2] = 0  # Unsure
+        class_counts[-3] = 0  # Artifact
 
         disagreement_count = 0
 
@@ -272,14 +266,14 @@ class ClusteringController(QObject):
                 class_counts[assigned_class] += 1
 
                 # Count labeled (excluding -1 and -2)
-                if assigned_class not in [-1, -2]:
+                if assigned_class not in [-1, -2, -3]:
                     total_labeled += 1
 
                 # Compute disagreement if annotation is labeled and model_prediction is available
                 if anno.model_prediction is not None:
                     model_class_id = self.get_class_id_from_prediction(anno.model_prediction)
-                    # Consider it a disagreement only if annotation is labeled (not -1/-2) and model_class_id found
-                    if model_class_id is not None and assigned_class not in [-1, -2]:
+                    # Consider it a disagreement only if annotation is labeled (not -1/-2/-3) and model_class_id found
+                    if model_class_id is not None and assigned_class not in [-1, -2, -3]:
                         if assigned_class != model_class_id:
                             disagreement_count += 1
 

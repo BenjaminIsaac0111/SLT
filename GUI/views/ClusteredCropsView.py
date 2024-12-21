@@ -6,7 +6,7 @@ from PyQt5.QtCore import pyqtSignal, Qt, QEvent
 from PyQt5.QtGui import QPainter, QPixmap
 from PyQt5.QtWidgets import (
     QWidget, QComboBox, QPushButton, QVBoxLayout, QLabel,
-    QProgressBar, QSpinBox, QGraphicsView,
+    QProgressBar, QGraphicsView,
     QGraphicsScene, QGridLayout,
     QGroupBox, QSizePolicy, QSplitter, QGraphicsItem, QApplication,
     QHBoxLayout, QCheckBox, QScrollArea
@@ -131,25 +131,10 @@ class ClusteredCropsView(QWidget):
         # Keyboard hints for navigation
         navigation_hint = QLabel(
             "Shortcuts: Enter - Next Cluster, Backspace - Previous Cluster, Shift + T to Toggle Auto Next")
+        navigation_hint.setWordWrap(True)
         cluster_navigation_layout.addWidget(navigation_hint)
         cluster_navigation_group.setLayout(cluster_navigation_layout)
         control_panel_layout.addWidget(cluster_navigation_group)
-
-        ##### Sampling Parameters Group #####
-        sampling_group = QGroupBox("Sampling Parameters")
-        sampling_layout = QVBoxLayout()
-        sampling_layout.addWidget(QLabel("Number of Crops per Cluster:"))
-
-        self.crops_spinbox = QSpinBox()
-        self.crops_spinbox.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.crops_spinbox.setRange(1, 32)
-        self.crops_spinbox.setValue(10)
-        self.crops_spinbox.valueChanged.connect(self.on_crops_changed)
-        self.crops_spinbox.setFocusPolicy(Qt.NoFocus)
-        sampling_layout.addWidget(self.crops_spinbox)
-
-        sampling_group.setLayout(sampling_layout)
-        control_panel_layout.addWidget(sampling_group)
 
         ##### Zoom Controls Group #####
         zoom_group = QGroupBox("Zoom")
@@ -162,6 +147,7 @@ class ClusteredCropsView(QWidget):
         zoom_layout.addWidget(self.zoom_slider)
 
         zoom_hint = QLabel("Use Ctrl + Mouse Wheel to zoom in/out")
+        zoom_hint.setWordWrap(True)
         zoom_layout.addWidget(zoom_hint)
 
         zoom_group.setLayout(zoom_layout)
@@ -172,7 +158,7 @@ class ClusteredCropsView(QWidget):
         class_labels_layout = QGridLayout()
         row, col = 0, 0
 
-        # Separate Layout for Special Actions (Unlabel and Unsure)
+        # Separate Layout for Special Actions (Unlabel, Unsure, and Artifact)
         special_actions_layout = QHBoxLayout()
 
         # Unlabel Button with Hint
@@ -188,6 +174,13 @@ class ClusteredCropsView(QWidget):
         unsure_button.setFocusPolicy(Qt.NoFocus)
         unsure_button.setStyleSheet("background-color: #ffa500;")  # Orange
         special_actions_layout.addWidget(unsure_button)
+
+        # Artifact Button with Hint
+        artifact_button = QPushButton("Artifact (!)")
+        artifact_button.clicked.connect(partial(self.on_class_button_clicked, -3))
+        artifact_button.setFocusPolicy(Qt.NoFocus)
+        artifact_button.setStyleSheet("background-color: #d3d3d3;")  # Light Gray for artifact
+        special_actions_layout.addWidget(artifact_button)
 
         # Add the special actions layout spanning all columns
         class_labels_layout.addLayout(special_actions_layout, row, 0, 1, 3)
@@ -217,8 +210,10 @@ class ClusteredCropsView(QWidget):
         row += 2
 
         # Keyboard shortcut hint for class labeling
-        class_hint = QLabel("Shortcuts: 1-9 for Class Labels, Minus (-) to Unlabel, Shift + ? for Unsure, Agree with "
-                            "Model Predictions (Spacebar)")
+        class_hint = QLabel(
+            "Shortcuts: 1-9 for Class Labels, Minus (-) to Unlabel, Shift + ? for Unsure, Shift + ! for Artifact, "
+            "Agree with Model Predictions (Spacebar)")
+        class_hint.setWordWrap(True)
         class_labels_layout.addWidget(class_hint, row + 1, 0, 1, 3)  # Span across all columns
         class_labels_group.setLayout(class_labels_layout)
         control_panel_layout.addWidget(class_labels_group)
@@ -262,17 +257,6 @@ class ClusteredCropsView(QWidget):
         statistics_group = QGroupBox("Labeling Statistics")
         statistics_layout = QVBoxLayout()
 
-        # Total Annotations
-        self.total_annotations_label = QLabel("Total Annotations: 0")
-        statistics_layout.addWidget(self.total_annotations_label)
-
-        # Total Labeled Annotations
-        self.total_labeled_label = QLabel("Total Labeled Annotations: 0")
-        statistics_layout.addWidget(self.total_labeled_label)
-
-        # Disagreement Statistics
-        self.disagreement_label = QLabel("Disagreements: 0")
-        statistics_layout.addWidget(self.disagreement_label)
 
         # Class Counts
         self.class_counts_labels = {}
@@ -283,10 +267,24 @@ class ClusteredCropsView(QWidget):
             self.class_counts_labels[class_id] = label
 
         # Unlabeled and Unsure counts
+        self.artifact_label = QLabel("Artifact: 0")
+        statistics_layout.addWidget(self.artifact_label)
+        self.unsure_label = QLabel("Unsure: 0")
+        statistics_layout.addWidget(self.unsure_label)
         self.unlabeled_label = QLabel("Unlabeled: 0")
         statistics_layout.addWidget(self.unlabeled_label)
-        self.unsure_label = QLabel("Unsure ?: 0")
-        statistics_layout.addWidget(self.unsure_label)
+
+        # Disagreement Statistics
+        self.disagreement_label = QLabel("Disagreements: 0")
+        statistics_layout.addWidget(self.disagreement_label)
+
+        # Total Annotations
+        self.total_annotations_label = QLabel("Total Annotations: 0")
+        statistics_layout.addWidget(self.total_annotations_label)
+
+        # Total Labeled Annotations
+        self.total_labeled_label = QLabel("Total Labeled Annotations: 0")
+        statistics_layout.addWidget(self.total_labeled_label)
 
         statistics_group.setLayout(statistics_layout)
         control_panel_layout.addWidget(statistics_group)
@@ -303,9 +301,6 @@ class ClusteredCropsView(QWidget):
 
         # Set a minimum width for the control panel to prevent it from being obscured
         control_panel.setMinimumWidth(300)  # Adjust this value as needed
-
-        # Add the scroll area to the splitter
-        self.splitter.addWidget(scroll_area)
 
         ##### Right Panel (Crop View) #####
         self.graphics_view = QGraphicsView()
@@ -328,12 +323,9 @@ class ClusteredCropsView(QWidget):
         self.crop_loading_progress_bar.setAlignment(Qt.AlignCenter)
         self.crop_loading_progress_bar.setVisible(False)
 
-        # Add the crop view to the splitter
         self.splitter.addWidget(self.graphics_view)
 
-        # Configure splitter stretch factors
-        self.splitter.setStretchFactor(0, 1)  # Control panel
-        self.splitter.setStretchFactor(1, 3)  # Crop view
+        self.splitter.addWidget(scroll_area)
 
         # Connect splitterMoved signal to handle snapping behavior
         self.splitter.splitterMoved.connect(self.on_splitter_moved)
@@ -357,12 +349,17 @@ class ClusteredCropsView(QWidget):
 
         # Minus key to unlabel
         if key == Qt.Key_Minus or key == Qt.Key_Underscore:
-            self.on_class_button_clicked(None)
+            self.on_class_button_clicked(-1)
             return  # Event handled
 
         # "?" key for marking as Unsure (-2)
         if event.text() == '?':
             self.on_class_button_clicked(-2)
+            return  # Event handled
+
+        # "A" key for marking as Artifact (-3)
+        if event.text() == '!':
+            self.on_class_button_clicked(-3)
             return  # Event handled
 
         # Spacebar to agree with model predictions
@@ -417,22 +414,24 @@ class ClusteredCropsView(QWidget):
         self.annotation_progress_bar.setVisible(False)
 
     def update_clustering_progress_bar(self, progress: int):
+        self.show_clustering_progress_bar()  # Ensure progress bar is visible first
+
         if progress == -1:
-            # Set the progress bar to an indeterminate state or show "Waiting..."
-            self.clustering_progress_bar.setRange(0, 0)  # Indeterminate mode
-            self.clustering_progress_bar.setFormat("Waiting...")
-            self.clustering_progress_bar.setVisible(True)
+            # Indeterminate mode
+            self.clustering_progress_bar.setRange(0, 0)
+            self.clustering_progress_bar.setTextVisible(True)
+            self.clustering_progress_bar.setFormat("Clustering, please wait...")
         else:
-            # Normal progress update
+            # Normal progress mode
             self.clustering_progress_bar.setRange(0, 100)
             self.clustering_progress_bar.setValue(progress)
+            self.clustering_progress_bar.setTextVisible(True)
             self.clustering_progress_bar.setFormat(f"Clustering: {progress}%")
 
     def hide_clustering_progress_bar(self):
         self.clustering_progress_bar.setVisible(False)
 
     def show_clustering_progress_bar(self):
-        self.clustering_progress_bar.setValue(0)
         self.clustering_progress_bar.setVisible(True)
 
     def show_crop_loading_progress_bar(self):
@@ -473,8 +472,10 @@ class ClusteredCropsView(QWidget):
         # Calculate sizes based on the actual window width
         total_width = self.width()
         control_panel_width = total_width // 3  # One-third of the total width
-        graphics_view_width = total_width - control_panel_width
-        self.splitter.setSizes([control_panel_width, graphics_view_width])
+        graphics_view_width = total_width - control_panel_width  # Two-thirds for crop view
+
+        # Set the splitter sizes so that the first widget (crop view) is larger
+        self.splitter.setSizes([graphics_view_width, control_panel_width])
 
     def populate_cluster_selection(self, cluster_info: Dict[int, dict], selected_cluster_id: Optional[int] = None):
         """
@@ -604,7 +605,9 @@ class ClusteredCropsView(QWidget):
         """
         Assigns a class to all visible crops and emits a bulk change signal.
         """
-        if class_id == -2:
+        if class_id == -3:
+            logging.info("Classifying current cluster as artifact.")
+        elif class_id == -2:
             logging.info("Classifying current cluster as unsure.")
         elif class_id == -1:
             logging.info("Unlabeling current cluster.")
@@ -625,15 +628,13 @@ class ClusteredCropsView(QWidget):
         Labels all the currently visible crops with the given class_id.
         If class_id is None, unlabels them.
         """
+        if class_id is None:
+            class_id = -1  # Ensure we always translate None to -1 for unlabeled
+        logging.debug(f"Labeling all visible crops with class_id={class_id}")
         for crop in self.selected_crops:
-            # Update the crop's class_id without emitting individual signals
             annotation: Annotation = crop['annotation']
-            annotation.class_id = class_id if class_id is not None else -1
-
-        # Emit a bulk signal to indicate that all visible crops were updated
+            annotation.class_id = class_id
         self.bulk_label_changed.emit(class_id)
-
-        # Refresh UI once after updating all crops
         self.arrange_crops()
 
     def get_selected_cluster_id(self) -> Optional[int]:
@@ -696,29 +697,13 @@ class ClusteredCropsView(QWidget):
                 self.unlabeled_label.setText(f"Unlabeled: {count}")
             elif class_id == -2:
                 self.unsure_label.setText(f"Unsure (?): {count}")
+            elif class_id == -3:
+                self.artifact_label.setText(f"Artifact: {count}")
 
         # Display global disagreement stats
         self.disagreement_label.setText(
             f"Disagreements: {disagreement_count} (Agreement: {agreement_percentage:.2f}%)"
         )
-
-    def calculate_disagreements(self) -> int:
-        """
-        Counts the number of crops where the current label disagrees with the model prediction.
-        Only consider crops that have both a label and a model prediction.
-        """
-        disagreement_count = 0
-        for crop_data in self.selected_crops:
-            annotation: Annotation = crop_data['annotation']
-            model_prediction = annotation.model_prediction
-
-            if model_prediction is not None:
-                # Get model class_id from prediction name
-                model_class_id = self.get_class_id_from_model_prediction(model_prediction)
-                if model_class_id is not None and annotation.class_id != model_class_id:
-                    disagreement_count += 1
-
-        return disagreement_count
 
     def reset_progress(self):
         """

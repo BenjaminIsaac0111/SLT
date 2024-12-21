@@ -17,16 +17,13 @@ def compute_initial_distances(X, center_index):
     dist = np.sqrt((diff * diff).sum(axis=1))
     return dist
 
-
 @numba.njit
 def update_distances(X, dist_to_closest_center, new_center_index):
-    # Update the distance array using the newly added center
     diff = X - X[new_center_index]
     new_dist = np.sqrt((diff * diff).sum(axis=1))
     for i in range(len(dist_to_closest_center)):
         if new_dist[i] < dist_to_closest_center[i]:
             dist_to_closest_center[i] = new_dist[i]
-
 
 @numba.njit
 def k_center_greedy_numba(X, k, random_state=42):
@@ -57,8 +54,8 @@ def k_center_greedy_numba(X, k, random_state=42):
 
 class ClusteringWorker(QThread):
     """
-    This worker assumes that all annotations are fully prepared (i.e., have logit_features, uncertainty, etc.).
-    It does not acquire or process image data.
+    This worker first performs clustering on a potentially large subset (core-set),
+    then down-samples each cluster to exactly `cluster_size` members.
     """
     clustering_finished = pyqtSignal(dict)
     progress_updated = pyqtSignal(int)
@@ -68,12 +65,14 @@ class ClusteringWorker(QThread):
             annotations: List[Annotation],
             subsample_ratio: float = 1.0,
             cluster_method: str = "minibatchkmeans",
+            cluster_size: int = 6,
             parent=None
     ):
         super().__init__(parent)
         self.annotations = annotations
         self.subsample_ratio = subsample_ratio
-        self.cluster_method = cluster_method.lower()  # 'agglomerative', 'minibatchkmeans', or 'hdbscan'
+        self.cluster_method = cluster_method.lower()  # 'agglomerative', 'minibatchkmeans'
+        self.cluster_size = cluster_size
 
     def run(self):
         logging.info("ClusteringWorker started.")
@@ -95,7 +94,7 @@ class ClusteringWorker(QThread):
             return
 
         logging.debug(f"Feature matrix shape: {feature_matrix.shape}")
-        self.progress_updated.emit(-1)  # Emit initial progress (5%)
+        self.progress_updated.emit(-1)
 
         # Core-Set Selection
         core_set_size = min(5000, len(feature_matrix))
@@ -111,7 +110,7 @@ class ClusteringWorker(QThread):
 
         core_set_features = feature_matrix[core_set_indices]
         core_set_annotations = [self.annotations[i] for i in core_set_indices]
-        self.progress_updated.emit(-1)  # Core-set selection done
+        self.progress_updated.emit(-1)
 
         # Clustering Step
         try:
@@ -119,9 +118,11 @@ class ClusteringWorker(QThread):
                 num_clusters = max(1, int(len(core_set_features) * 0.1))
                 clustering = MiniBatchKMeans(n_clusters=num_clusters, random_state=42, batch_size=4096)
                 core_set_labels = clustering.fit_predict(core_set_features)
+                cluster_centers = clustering.cluster_centers_
             elif self.cluster_method == 'agglomerative':
                 clustering = AgglomerativeClustering(n_clusters=None, distance_threshold=5.0, linkage='ward')
-                core_set_labels = clustering.fit(core_set_features)
+                core_set_labels = clustering.fit_predict(core_set_features)
+                cluster_centers = None
             else:
                 raise ValueError(f"Unknown clustering method: {self.cluster_method}")
 
@@ -132,23 +133,63 @@ class ClusteringWorker(QThread):
             self.clustering_finished.emit({})
             return
 
+        # Assign cluster IDs to annotations
         for label, anno in zip(core_set_labels, core_set_annotations):
             anno.cluster_id = int(label)
 
-        # Finalizing
+        # Group into initial clusters
         clusters_dict = self.group_annotations_by_cluster(core_set_annotations)
-        self.progress_updated.emit(100)  # Final progress
-        self.clustering_finished.emit(clusters_dict)
+
+        # Down-sample each cluster to exactly `cluster_size` members
+        final_clusters_dict = self.downsample_clusters(clusters_dict, cluster_centers)
+
+        self.progress_updated.emit(-1)  # Final progress
+        self.clustering_finished.emit(final_clusters_dict)
 
     @staticmethod
     def group_annotations_by_cluster(annotations: List[Annotation]) -> Dict[int, List[Annotation]]:
         """
         Groups annotations by their cluster IDs.
-
-        :param annotations: A list of Annotation objects.
-        :return: A dictionary mapping cluster IDs to lists of annotations.
         """
         clusters = defaultdict(list)
         for annotation in annotations:
             clusters[annotation.cluster_id].append(annotation)
         return dict(clusters)
+
+    def downsample_clusters(
+            self,
+            clusters_dict: Dict[int, List[Annotation]],
+            cluster_centers: np.ndarray
+    ) -> Dict[int, List[Annotation]]:
+        """
+        Down-sample each cluster to exactly `self.cluster_size` members using either:
+        - Center-based selection if cluster_centers are available (MiniBatchKMeans).
+        - Diversity-based selection (k-center greedy) if no centers are available (AgglomerativeClustering).
+        """
+        final_clusters = {}
+        for cluster_id, annotations in clusters_dict.items():
+            # Extract the features for this cluster
+            cluster_features = np.array([
+                np.concatenate([anno.logit_features, [anno.uncertainty]])
+                for anno in annotations
+            ], dtype=np.float32)
+
+            if len(annotations) <= self.cluster_size:
+                # If cluster has <= self.cluster_size members, take them all
+                final_clusters[cluster_id] = annotations
+                continue
+
+            if cluster_centers is not None:
+                # Center-based selection:
+                center = cluster_centers[cluster_id]
+                dists = np.linalg.norm(cluster_features - center, axis=1)
+                closest_indices = np.argsort(dists)[:self.cluster_size]
+                selected_annotations = [annotations[idx] for idx in closest_indices]
+            else:
+                # Diversity-based selection:
+                selected_indices = k_center_greedy_numba(cluster_features, self.cluster_size, random_state=42)
+                selected_annotations = [annotations[idx] for idx in selected_indices]
+
+            final_clusters[cluster_id] = selected_annotations
+
+        return final_clusters

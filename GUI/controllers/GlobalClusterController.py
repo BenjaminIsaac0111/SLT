@@ -424,23 +424,31 @@ class GlobalClusterController(QObject):
     def export_annotations(self):
         """
         Exports the labeled annotations in a final format for downstream use.
+        This method now offers an option to include or exclude artifacts in the export.
         """
         clusters = self.clustering_controller.get_clusters()
         grouped_annotations = {}
+
+        # First, let's collect all annotations that are labeled
+        # class_id != -1 (unlabeled) and != -2 (unsure)
+        # We'll handle artifacts (-3) separately after asking the user.
         annotations_without_class = False
+        artifacts_present = False
+        all_annotations = []
 
         for cluster_id, annotations in clusters.items():
             for anno in annotations:
-                if anno.class_id is not None and anno.class_id != -1 and anno.class_id != -2:
-                    annotation_data = {
-                        'coord': [int(c) for c in anno.coord],
-                        'class_id': int(anno.class_id),
-                        'cluster_id': int(cluster_id)
-                    }
-                    grouped_annotations.setdefault(anno.filename, []).append(annotation_data)
-                else:
+                if anno.class_id is None or anno.class_id in [-1, -2]:
+                    # Annotated as unlabeled or unsure, or no class set
                     annotations_without_class = True
+                    # We'll handle the user's decision about exporting anyway below
+                elif anno.class_id == -3:
+                    # Artifact detected
+                    artifacts_present = True
+                # Collect all annotations in a structure to process after user decisions
+                all_annotations.append((cluster_id, anno))
 
+        # If there are unlabeled/unsure annotations, ask the user if they want to continue.
         if annotations_without_class:
             reply = QMessageBox.question(
                 self.view,
@@ -453,8 +461,38 @@ class GlobalClusterController(QObject):
                 logging.info("User canceled exporting due to missing class labels.")
                 return
 
+        # If there are artifacts, ask if the user wants to include them.
+        include_artifacts = True
+        if artifacts_present:
+            reply = QMessageBox.question(
+                self.view,
+                "Include Artifacts?",
+                "Artifacts have been detected. Do you want to include them in the export?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes
+            )
+            include_artifacts = (reply == QMessageBox.Yes)
+
+        # Now process annotations according to user's choices
+        for cluster_id, anno in all_annotations:
+            # Skip unlabeled or unsure
+            if anno.class_id is None or anno.class_id in [-1, -2]:
+                continue
+
+            # If artifact and user chose not to include artifacts, skip
+            if anno.class_id == -3 and not include_artifacts:
+                continue
+
+            # At this point, anno.class_id is a labeled class, possibly including artifacts if chosen
+            annotation_data = {
+                'coord': [int(c) for c in anno.coord],
+                'class_id': int(anno.class_id),
+                'cluster_id': int(cluster_id)
+            }
+            grouped_annotations.setdefault(anno.filename, []).append(annotation_data)
+
         if not grouped_annotations:
-            QMessageBox.warning(self.view, "No Annotations", "There are no annotations to export.")
+            QMessageBox.warning(self.view, "No Annotations", "There are no annotations to export given your choices.")
             return
 
         # Ask user where to save the export

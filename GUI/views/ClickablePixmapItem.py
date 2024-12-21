@@ -82,17 +82,29 @@ class ClickablePixmapItem(QGraphicsObject):
         painter.setPen(pen)
         painter.drawRect(QRectF(0, 0, pixmap_width, pixmap_height))
 
+        # Determine the color for the human label based on class_id
+        if self.class_id == -1:
+            human_label_color = Qt.black  # Unlabeled
+        elif self.class_id == -2:
+            human_label_color = Qt.darkYellow  # Unsure/Amber
+        elif self.class_id == -3:
+            human_label_color = Qt.magenta  # Artifact
+        elif self.class_id is not None and self.class_id >= 0 and self.class_id in CLASS_COMPONENTS:
+            human_label_color = Qt.green  # Human-labeled (recognized class)
+        else:
+            human_label_color = Qt.red  # Unknown/error
+
         # Draw human label in the top-left corner above the image
         painter.save()
         painter.setFont(self.font)
-        painter.setPen(Qt.black)
+        painter.setPen(human_label_color)
         human_label_text = self.human_prefix + self.get_human_label_text()
         label_x = 0  # Left-aligned
         label_y = -self.font_metrics.descent()  # Slight adjustment for baseline
         painter.drawText(label_x, label_y, human_label_text)
         painter.restore()
 
-        # Draw model prediction at the top-right corner above the image
+        # Draw model prediction in the top-right corner above the image
         if self.model_prediction:
             # Determine model_prediction class_id by reverse lookup in CLASS_COMPONENTS
             model_class_id = None
@@ -123,10 +135,15 @@ class ClickablePixmapItem(QGraphicsObject):
         """
         if self.class_id == -2:
             return "Unsure"
-        elif self.class_id == -1:
+        elif self.class_id == -1 or None:
             return "Unlabelled"
+        elif self.class_id == -3:
+            return "Artefact"
+        elif self.class_id in CLASS_COMPONENTS:
+            # If it's a recognized class_id in CLASS_COMPONENTS
+            return CLASS_COMPONENTS[self.class_id]
         else:
-            return CLASS_COMPONENTS.get(self.class_id, "Unlabelled")
+            return "ERROR"
 
     def hoverEnterEvent(self, event):
         self.hovered = True
@@ -167,5 +184,11 @@ class ClickablePixmapItem(QGraphicsObject):
         unlabel_action.triggered.connect(partial(self.set_crop_class, -1))
         self.menu.addAction(unlabel_action)
 
+        # Add "Artifact" option with class_id -3
+        artifact_action = QAction("Artifact (!)", self.menu)
+        artifact_action.triggered.connect(partial(self.set_crop_class, -3))
+        self.menu.addAction(artifact_action)
+
         self.menu.exec_(event.screenPos())
         self.scene().context_menu_open = False  # Unset the flag
+
