@@ -19,6 +19,7 @@ class ImageProcessor:
     ImageProcessor handles all image processing tasks, including mask processing, overlay creation,
     uncertainty normalization, and heatmap generation.
     """
+    cache = CacheManager()
 
     def __init__(self, colormap_name: str = 'tab10', heatmap_cmap_name: str = 'Spectral_r'):
         """
@@ -27,7 +28,6 @@ class ImageProcessor:
         :param colormap_name: Name of the matplotlib colormap to use for mask processing.
         :param heatmap_cmap_name: Name of the matplotlib colormap to use for heatmap generation.
         """
-        self.cache = CacheManager()
         self.colormap_name = colormap_name
         self.heatmap_cmap_name = heatmap_cmap_name
         self.colormap: Colormap = plt.get_cmap(self.colormap_name)

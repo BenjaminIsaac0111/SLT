@@ -1,13 +1,10 @@
-from typing import Tuple
-
-from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QListWidgetItem, QSplitter, QGraphicsView, \
-    QGraphicsScene
-from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QPixmap
 import logging
 
-from GUI.views.ZoomedView import ZoomedView
+from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QListWidgetItem, QSplitter
+
 from GUI.views.AnnotationView import AnnotationView
+from GUI.views.ZoomedView import ZoomedView
 
 
 class PatchImageViewer(QWidget):

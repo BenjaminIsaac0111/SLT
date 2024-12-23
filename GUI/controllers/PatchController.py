@@ -4,7 +4,7 @@ from typing import Tuple, List, Dict
 from PyQt5.QtCore import QObject, Qt
 from PyQt5.QtGui import QColor
 
-from GUI.controllers.GlobalClusterController import GlobalClusterController
+from GUI.controllers.MainController import MainController
 from GUI.models.ImageDataModel import ImageDataModel
 from GUI.models.ImageProcessor import ImageProcessor
 from GUI.models.UncertaintyRegionSelector import UncertaintyRegionSelector
@@ -43,7 +43,7 @@ class MainController(QObject):
 
         # Initialize and setup global clustering components
         self.cluster_sample_view = ClusteredCropsView()
-        self.global_cluster_controller = GlobalClusterController(
+        self.global_cluster_controller = MainController(
             model=self.model,
             view=self.cluster_sample_view,
         )

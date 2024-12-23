@@ -15,7 +15,7 @@ from GUI.models.UncertaintyRegionSelector import UncertaintyRegionSelector
 from GUI.views.ClusteredCropsView import ClusteredCropsView
 
 
-class GlobalClusterController(QObject):
+class MainController(QObject):
     """
     GlobalClusterController acts as the main orchestrator of the application.
     It handles user interactions, connects the view with other controllers,
@@ -60,12 +60,8 @@ class GlobalClusterController(QObject):
             logging.debug("Model is already set. Skipping reassignment.")
             return
 
-        self.image_data_model = model
-        self.clustering_controller.model = model
-        self.image_processing_controller.model = model
-        self.project_state_controller.model = model
+        self._assign_model_to_controllers(model)
 
-        # Start the autosave timer if not already started
         if not self.autosave_timer.isActive():
             self.autosave_timer.start()
         logging.info("Model has been updated and autosave timer started.")
@@ -74,7 +70,7 @@ class GlobalClusterController(QObject):
         """
         Connects signals from the view and other controllers to the appropriate methods.
         """
-        # View signals to controller methods
+        # --- View -> Controller ---
         self.view.request_clustering.connect(self.clustering_controller.start_clustering)
         self.view.sample_cluster.connect(self.on_sample_cluster)
         self.view.sampling_parameters_changed.connect(self.on_sampling_parameters_changed)
@@ -83,11 +79,10 @@ class GlobalClusterController(QObject):
         self.view.save_project_state_requested.connect(self.save_project)
         self.view.export_annotations_requested.connect(self.export_annotations)
         self.view.load_project_state_requested.connect(self.load_project)
-        self.view.restore_autosave_requested.connect(self.restore_autosave)
         self.view.save_project_requested.connect(self.save_project)
         self.view.save_project_as_requested.connect(self.save_project_as)
 
-        # ClusteringController signals to view
+        # --- ClusteringController -> View ---
         self.clustering_controller.show_clustering_progress_bar.connect(self.view.show_clustering_progress_bar)
         self.clustering_controller.hide_clustering_progress_bar.connect(self.view.hide_clustering_progress_bar)
         self.clustering_controller.clustering_progress.connect(self.view.update_clustering_progress_bar)
@@ -96,18 +91,22 @@ class GlobalClusterController(QObject):
         self.clustering_controller.clusters_ready.connect(self.on_clusters_ready)
         self.clustering_controller.labeling_statistics_updated.connect(self.view.update_labeling_statistics)
 
-        # ImageProcessingController signals to view
+        # --- ImageProcessingController -> View ---
         self.image_processing_controller.crops_ready.connect(self.view.display_sampled_crops)
         self.image_processing_controller.progress_updated.connect(self.view.update_crop_loading_progress_bar)
         self.image_processing_controller.crop_loading_started.connect(self.view.show_crop_loading_progress_bar)
         self.image_processing_controller.crop_loading_finished.connect(self.view.hide_crop_loading_progress_bar)
 
-        # ProjectStateController signals to methods
+        # --- ProjectStateController -> Slots ---
         self.project_state_controller.autosave_finished.connect(self.on_autosave_finished)
         self.project_state_controller.project_loaded.connect(self.on_project_loaded)
         self.project_state_controller.project_saved.connect(self.on_project_saved)
         self.project_state_controller.save_failed.connect(self.on_save_failed)
         self.project_state_controller.load_failed.connect(self.on_load_failed)
+
+    # -------------------------------------------------------------------------
+    #                           CLUSTERING HANDLERS
+    # -------------------------------------------------------------------------
 
     @pyqtSlot(dict)
     def on_clusters_ready(self, clusters: Dict[int, List[Annotation]]):
@@ -146,7 +145,8 @@ class GlobalClusterController(QObject):
         :param cluster_id: The ID of the selected cluster.
         :param crops_per_cluster: The updated number of crops per cluster.
         """
-        logging.info(f"Sampling parameters changed: Cluster {cluster_id}, {crops_per_cluster} crops per cluster.")
+        logging.info(f"Sampling parameters changed: "
+                     f"Cluster {cluster_id}, {crops_per_cluster} crops per cluster.")
         self.image_processing_controller.set_crops_per_cluster(crops_per_cluster, cluster_id)
 
     def handle_sampling_parameters_changed(self):
@@ -162,6 +162,10 @@ class GlobalClusterController(QObject):
             logging.warning("No cluster is currently selected. Clearing displayed crops.")
             self.view.display_sampled_crops([])
 
+    # -------------------------------------------------------------------------
+    #                       LABELING / ANNOTATION HANDLERS
+    # -------------------------------------------------------------------------
+
     @pyqtSlot(int)
     def on_bulk_label_changed(self, class_id: int):
         """
@@ -174,15 +178,12 @@ class GlobalClusterController(QObject):
         clusters = self.clustering_controller.get_clusters()
         annotations = clusters.get(selected_cluster_id, [])
 
-        # Update class_id for all annotations in the displayed crops
         for anno in annotations[:self.image_processing_controller.crops_per_cluster]:
             anno.class_id = class_id
 
-        # Update cluster info and UI
         cluster_info = self.clustering_controller.generate_cluster_info()
         self.view.populate_cluster_selection(cluster_info, selected_cluster_id=selected_cluster_id)
 
-        # Autosave the project state
         self.autosave_project_state()
         self.clustering_controller.compute_labeling_statistics()
 
@@ -201,30 +202,37 @@ class GlobalClusterController(QObject):
         clusters = self.clustering_controller.get_clusters()
         annotations = clusters.get(cluster_id, [])
 
-        # Update the class_id for the corresponding Annotation instance
         for anno in annotations:
             if anno.image_index == image_index and anno.coord == coord:
                 anno.class_id = class_id
                 label_action = "unlabeled" if class_id == -1 else "labeled"
                 logging.debug(
-                    f"Annotation for image {image_index}, coord {coord} {label_action} with class_id {class_id}"
+                    f"Annotation for image {image_index}, coord {coord} "
+                    f"{label_action} with class_id {class_id}"
                 )
                 break
         else:
-            logging.warning(f"Annotation for image {image_index}, coord {coord} not found in cluster {cluster_id}")
+            logging.warning(f"Annotation for image {image_index}, coord {coord} "
+                            f"not found in cluster {cluster_id}")
 
-        # Refresh the cluster info and UI
         cluster_info = self.clustering_controller.generate_cluster_info()
         self.view.populate_cluster_selection(cluster_info, selected_cluster_id=cluster_id)
 
-        # Autosave the project state
         self.autosave_project_state()
         self.clustering_controller.compute_labeling_statistics()
 
+    # -------------------------------------------------------------------------
+    #                           PROJECT STATE
+    # -------------------------------------------------------------------------
+
     def get_current_state(self) -> dict:
+        """
+        Retrieves the current project state, including cluster and annotation data.
+        """
         if self.image_data_model is None:
             logging.debug("Cannot get current state: model is not initialized.")
             return {}
+
         clusters = self.clustering_controller.get_clusters()
         project_state = {
             'hdf5_file_path': self.image_data_model.hdf5_file_path,
@@ -247,9 +255,14 @@ class GlobalClusterController(QObject):
         if self.image_data_model is None:
             logging.debug("Autosave skipped: model is not initialized.")
             return
+
         logging.debug("Autosave timer triggered.")
         project_state = self.get_current_state()
         self.project_state_controller.autosave_project_state(project_state)
+
+    # -------------------------------------------------------------------------
+    #                               SAVING / LOADING
+    # -------------------------------------------------------------------------
 
     @pyqtSlot()
     def save_project(self):
@@ -260,10 +273,7 @@ class GlobalClusterController(QObject):
         current_path = self.project_state_controller.get_current_save_path()
         if current_path:
             project_state = self.get_current_state()
-            self.project_state_controller.save_project_state(
-                project_state,
-                current_path
-            )
+            self.project_state_controller.save_project_state(project_state, current_path)
         else:
             self.save_project_as()
 
@@ -272,29 +282,21 @@ class GlobalClusterController(QObject):
         """
         Prompts the user to select a location and file name, and then saves the project state.
         """
-        options = QFileDialog.Options()
-        file_path, _ = QFileDialog.getSaveFileName(
-            self.view, "Save Project As", "", "Compressed JSON Files (*.json.gz);;All Files (*)", options=options
-        )
-        if file_path:
-            if not file_path.endswith('.json.gz'):
-                file_path += '.json.gz'
-            self.project_state_controller.set_current_save_path(file_path)
-            project_state = self.get_current_state()
-            self.project_state_controller.save_project_state(project_state, file_path)
-        else:
+        file_path = self._prompt_save_file()
+        if not file_path:
             logging.info("Save As action was canceled by the user.")
+            return
+
+        self.project_state_controller.set_current_save_path(file_path)
+        project_state = self.get_current_state()
+        self.project_state_controller.save_project_state(project_state, file_path)
 
     @pyqtSlot()
     def load_project(self):
         """
         Loads the project state from a saved file to resume the session.
         """
-        options = QFileDialog.Options()
-        project_file, _ = QFileDialog.getOpenFileName(
-            self.view, "Open Project", "", "Compressed JSON Files (*.json.gz);;JSON Files (*.json);;All Files (*)",
-            options=options
-        )
+        project_file = self._prompt_load_file()
         if project_file:
             self.project_state_controller.load_project_state(project_file)
         else:
@@ -310,6 +312,10 @@ class GlobalClusterController(QObject):
             self.project_state_controller.load_project_state(latest_autosave)
         else:
             QMessageBox.information(self.view, "No Autosave Found", "There are no autosave files to restore.")
+
+    # -------------------------------------------------------------------------
+    #                       SAVE / LOAD SLOTS AND CALLBACKS
+    # -------------------------------------------------------------------------
 
     @pyqtSlot(bool)
     def on_autosave_finished(self, success: bool):
@@ -330,67 +336,29 @@ class GlobalClusterController(QObject):
 
         :param project_state: The loaded project state.
         """
-        # Reconstruct clusters from annotations
-        annotations_data = project_state.get('annotations', {})
-        clusters_data = {}
-        for filename, annotations_list in annotations_data.items():
-            for annotation_dict in annotations_list:
-                anno = Annotation.from_dict(annotation_dict)
-                cluster_id = anno.cluster_id
-                clusters_data.setdefault(cluster_id, []).append(anno)
-
-        # If 'cluster_order' is provided, reorder clusters_data
-        cluster_order = project_state.get('cluster_order', None)
-        if cluster_order is not None:
-            ordered_clusters_data = OrderedDict()
-            for cluster_id in cluster_order:
-                if cluster_id in clusters_data:
-                    ordered_clusters_data[cluster_id] = clusters_data[cluster_id]
-                else:
-                    logging.warning(f"Cluster ID {cluster_id} not found in annotations.")
-            # Add any clusters that were not in cluster_order
-            for cluster_id in clusters_data:
-                if cluster_id not in ordered_clusters_data:
-                    ordered_clusters_data[cluster_id] = clusters_data[cluster_id]
-            clusters_data = ordered_clusters_data
-
+        clusters_data = self._rebuild_clusters_from_annotations(project_state)
         self.clustering_controller.clusters = clusters_data
-
-        # Update ImageProcessingController with the clusters
         self.image_processing_controller.set_clusters(clusters_data)
 
         hdf5_file_path = project_state.get('hdf5_file_path', None)
-        if hdf5_file_path is None:
+        if not hdf5_file_path:
             logging.error("No hdf5_file_path in project_state.")
             QMessageBox.critical(self.view, "Error", "Project state does not contain hdf5_file_path.")
             return
 
-        # Initialize model if not already initialized or if hdf5_file_path is different
-        if self.image_data_model is None or self.image_data_model.hdf5_file_path != hdf5_file_path:
-            # Determine the uncertainty_type from project_state or default to 'variance'
-            uncertainty_type = project_state.get('uncertainty_type', 'variance')
-            image_data_model = ImageDataModel(
-                hdf5_file_path=hdf5_file_path,
-                uncertainty_type=uncertainty_type
-            )
-            self.set_model(image_data_model)
-            # Update model in controllers
-            self.clustering_controller.model = self.image_data_model
-            self.image_processing_controller.model = self.image_data_model
-            self.project_state_controller.model = self.image_data_model
+        self._initialize_model_if_needed(hdf5_file_path, project_state)
 
-        # Update cluster info and UI
         cluster_info = self.clustering_controller.generate_cluster_info()
         selected_cluster_id = project_state.get('selected_cluster_id', None)
         self.view.populate_cluster_selection(cluster_info, selected_cluster_id=selected_cluster_id)
 
-        # Display crops of the selected cluster
-        if selected_cluster_id is not None and selected_cluster_id in clusters_data:
+        if selected_cluster_id and selected_cluster_id in clusters_data:
             self.on_sample_cluster(selected_cluster_id)
         else:
             first_cluster_id = next(iter(clusters_data), None)
             if first_cluster_id is not None:
                 self.on_sample_cluster(first_cluster_id)
+
         self.view.hide_progress_bar()
         self.clustering_controller.compute_labeling_statistics()
 
@@ -421,96 +389,53 @@ class GlobalClusterController(QObject):
         """
         QMessageBox.critical(self.view, "Error", f"Failed to load project state: {error_message}")
 
+    # -------------------------------------------------------------------------
+    #                               EXPORT
+    # -------------------------------------------------------------------------
+
     def export_annotations(self):
         """
         Exports the labeled annotations in a final format for downstream use.
-        This method now offers an option to include or exclude artifacts in the export.
+        Offers an option to include or exclude artifacts in the export.
         """
         clusters = self.clustering_controller.get_clusters()
-        grouped_annotations = {}
-
-        # First, let's collect all annotations that are labeled
-        # class_id != -1 (unlabeled) and != -2 (unsure)
-        # We'll handle artifacts (-3) separately after asking the user.
+        all_annotations = []
         annotations_without_class = False
         artifacts_present = False
-        all_annotations = []
 
+        # Collect all annotations
         for cluster_id, annotations in clusters.items():
             for anno in annotations:
-                if anno.class_id is None or anno.class_id in [-1, -2]:
-                    # Annotated as unlabeled or unsure, or no class set
+                if anno.class_id in [None, -1, -2]:
                     annotations_without_class = True
-                    # We'll handle the user's decision about exporting anyway below
                 elif anno.class_id == -3:
-                    # Artifact detected
                     artifacts_present = True
-                # Collect all annotations in a structure to process after user decisions
                 all_annotations.append((cluster_id, anno))
 
-        # If there are unlabeled/unsure annotations, ask the user if they want to continue.
-        if annotations_without_class:
-            reply = QMessageBox.question(
-                self.view,
-                "Annotations Without Class Labels",
-                "Some annotations do not have class labels assigned. Do you want to proceed with exporting?",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No
-            )
-            if reply == QMessageBox.No:
-                logging.info("User canceled exporting due to missing class labels.")
-                return
-
-        # If there are artifacts, ask if the user wants to include them.
-        include_artifacts = True
-        if artifacts_present:
-            reply = QMessageBox.question(
-                self.view,
-                "Include Artifacts?",
-                "Artifacts have been detected. Do you want to include them in the export?",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.Yes
-            )
-            include_artifacts = (reply == QMessageBox.Yes)
-
-        # Now process annotations according to user's choices
-        for cluster_id, anno in all_annotations:
-            # Skip unlabeled or unsure
-            if anno.class_id is None or anno.class_id in [-1, -2]:
-                continue
-
-            # If artifact and user chose not to include artifacts, skip
-            if anno.class_id == -3 and not include_artifacts:
-                continue
-
-            # At this point, anno.class_id is a labeled class, possibly including artifacts if chosen
-            annotation_data = {
-                'coord': [int(c) for c in anno.coord],
-                'class_id': int(anno.class_id),
-                'cluster_id': int(cluster_id)
-            }
-            grouped_annotations.setdefault(anno.filename, []).append(annotation_data)
-
-        if not grouped_annotations:
-            QMessageBox.warning(self.view, "No Annotations", "There are no annotations to export given your choices.")
+        # Check with user if unlabeled/unsure exist
+        if annotations_without_class and not self._confirm_missing_labels():
+            logging.info("User canceled exporting due to missing class labels.")
             return
 
-        # Ask user where to save the export
-        options = QFileDialog.Options()
-        export_file, _ = QFileDialog.getSaveFileName(
-            self.view, "Export Annotations", "", "JSON Files (*.json);;All Files (*)", options=options
-        )
+        # Check with user if artifacts exist
+        include_artifacts = self._confirm_include_artifacts() if artifacts_present else True
+
+        # Build grouped annotations based on user choices
+        grouped_annotations = self._build_grouped_annotations(all_annotations, include_artifacts)
+        if not grouped_annotations:
+            QMessageBox.warning(self.view, "No Annotations", "No annotations to export given your choices.")
+            return
+
+        # Prompt for export file
+        export_file = self._prompt_export_file()
         if export_file:
-            try:
-                with open(export_file, 'w') as f:
-                    json.dump(grouped_annotations, f, indent=4)
-                logging.info(f"Annotations exported to {export_file}")
-                QMessageBox.information(self.view, "Export Successful", f"Annotations exported to {export_file}")
-            except Exception as e:
-                logging.error(f"Error exporting annotations: {e}")
-                QMessageBox.critical(self.view, "Error", f"Failed to export annotations: {e}")
+            self._write_annotations_to_file(export_file, grouped_annotations)
         else:
             logging.debug("Export annotations action was canceled.")
+
+    # -------------------------------------------------------------------------
+    #                               CLEANUP
+    # -------------------------------------------------------------------------
 
     def cleanup(self):
         """
@@ -521,3 +446,182 @@ class GlobalClusterController(QObject):
         self.image_processing_controller.cleanup()
         self.clustering_controller.cleanup()
         self.project_state_controller.cleanup()
+
+    # -------------------------------------------------------------------------
+    #                       PRIVATE / HELPER METHODS
+    # -------------------------------------------------------------------------
+
+    def _assign_model_to_controllers(self, model: ImageDataModel):
+        """
+        Helper method to reassign the model to all sub-controllers.
+        """
+        self.image_data_model = model
+        self.clustering_controller.model = model
+        self.image_processing_controller.model = model
+        self.project_state_controller.model = model
+
+    def _initialize_model_if_needed(self, hdf5_file_path: str, project_state: dict):
+        """
+        Helper to initialize a new ImageDataModel if needed (or update if paths differ).
+        """
+        if (self.image_data_model is None or
+                self.image_data_model.hdf5_file_path != hdf5_file_path):
+            uncertainty_type = project_state.get('uncertainty_type', 'variance')
+            image_data_model = ImageDataModel(
+                hdf5_file_path=hdf5_file_path,
+                uncertainty_type=uncertainty_type
+            )
+            self.set_model(image_data_model)
+
+    def _rebuild_clusters_from_annotations(self, project_state: dict) -> Dict[int, List[Annotation]]:
+        """
+        Helper method to rebuild clusters dict from the annotations in the project state.
+        """
+        annotations_data = project_state.get('annotations', {})
+        clusters_data = {}
+        for filename, annotations_list in annotations_data.items():
+            for annotation_dict in annotations_list:
+                anno = Annotation.from_dict(annotation_dict)
+                cluster_id = anno.cluster_id
+                clusters_data.setdefault(cluster_id, []).append(anno)
+
+        cluster_order = project_state.get('cluster_order', None)
+        if cluster_order is not None:
+            clusters_data = self._reorder_clusters(cluster_order, clusters_data)
+        return clusters_data
+
+    @staticmethod
+    def _reorder_clusters(cluster_order: List[int],
+                          clusters_data: Dict[int, List[Annotation]]) -> OrderedDict:
+        """
+        Reorders a dictionary of clusters based on a given list of cluster IDs.
+        """
+        ordered_clusters_data = OrderedDict()
+        for cid in cluster_order:
+            if cid in clusters_data:
+                ordered_clusters_data[cid] = clusters_data[cid]
+            else:
+                logging.warning(f"Cluster ID {cid} not found in annotations.")
+
+        # Add any clusters that were not in cluster_order
+        for cid in clusters_data:
+            if cid not in ordered_clusters_data:
+                ordered_clusters_data[cid] = clusters_data[cid]
+        return ordered_clusters_data
+
+    def _prompt_save_file(self) -> str:
+        """
+        Prompts the user to choose a location to save a project file.
+        """
+        options = QFileDialog.Options()
+        file_path, _ = QFileDialog.getSaveFileName(
+            self.view,
+            "Save Project As",
+            "",
+            "Compressed JSON Files (*.json.gz);;All Files (*)",
+            options=options
+        )
+        if file_path and not file_path.endswith('.json.gz'):
+            file_path += '.json.gz'
+        return file_path
+
+    def _prompt_load_file(self) -> str:
+        """
+        Prompts the user to open a project file.
+        """
+        options = QFileDialog.Options()
+        project_file, _ = QFileDialog.getOpenFileName(
+            self.view,
+            "Open Project",
+            "",
+            "Compressed JSON Files (*.json.gz);;JSON Files (*.json);;All Files (*)",
+            options=options
+        )
+        return project_file
+
+    def _prompt_export_file(self) -> str:
+        """
+        Prompts the user to select a file location for exporting annotations.
+        """
+        options = QFileDialog.Options()
+        export_file, _ = QFileDialog.getSaveFileName(
+            self.view,
+            "Export Annotations",
+            "",
+            "JSON Files (*.json);;All Files (*)",
+            options=options
+        )
+        return export_file
+
+    @staticmethod
+    def _confirm_missing_labels() -> bool:
+        """
+        Asks the user if they want to proceed if some annotations are unlabeled.
+        """
+        reply = QMessageBox.question(
+            None,
+            "Annotations Without Class Labels",
+            ("Some annotations do not have class labels assigned. "
+             "Do you want to proceed with exporting?"),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        return reply == QMessageBox.Yes
+
+    @staticmethod
+    def _confirm_include_artifacts() -> bool:
+        """
+        Asks the user if they want to include artifacts in the export.
+        """
+        reply = QMessageBox.question(
+            None,
+            "Include Artifacts?",
+            "Artifacts have been detected. Do you want to include them in the export?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes
+        )
+        return (reply == QMessageBox.Yes)
+
+    @staticmethod
+    def _build_grouped_annotations(
+            all_annotations: List[tuple],
+            include_artifacts: bool
+    ) -> Dict[str, List[dict]]:
+        """
+        Builds the grouped annotations dictionary based on user choices.
+
+        :param all_annotations: List of (cluster_id, Annotation) pairs.
+        :param include_artifacts: Whether to include artifacts (class_id == -3).
+        :return: A dictionary of filename -> list of annotation dicts.
+        """
+        grouped = {}
+        for cluster_id, anno in all_annotations:
+            # Skip unlabeled/unsure
+            if anno.class_id is None or anno.class_id in [-1, -2]:
+                continue
+
+            # Skip artifacts if not included
+            if anno.class_id == -3 and not include_artifacts:
+                continue
+
+            annotation_data = {
+                'coord': [int(c) for c in anno.coord],
+                'class_id': int(anno.class_id),
+                'cluster_id': int(cluster_id)
+            }
+            grouped.setdefault(anno.filename, []).append(annotation_data)
+        return grouped
+
+    @staticmethod
+    def _write_annotations_to_file(export_file: str, grouped_annotations: dict):
+        """
+        Writes the grouped annotations to the specified file in JSON format.
+        """
+        try:
+            with open(export_file, 'w') as f:
+                json.dump(grouped_annotations, f, indent=4)
+            logging.info(f"Annotations exported to {export_file}")
+            QMessageBox.information(None, "Export Successful", f"Annotations exported to {export_file}")
+        except Exception as e:
+            logging.error(f"Error exporting annotations: {e}")
+            QMessageBox.critical(None, "Error", f"Failed to export annotations: {e}")

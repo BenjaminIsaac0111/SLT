@@ -1,7 +1,7 @@
 import logging
 from typing import Dict, List, Optional, Tuple
 
-from PyQt5.QtCore import QObject, pyqtSignal, QThread, pyqtSlot, QPoint
+from PyQt5.QtCore import QObject, pyqtSignal, QThreadPool, pyqtSlot, QPoint
 from PyQt5.QtGui import QPixmap, QPainter, QPen, QColor, QImage
 
 from GUI.models.Annotation import Annotation
@@ -15,8 +15,17 @@ class ImageAnnotator:
     Handles drawing annotations (circle and crosshair) on images.
     """
 
-    def __init__(self, circle_color: QColor = QColor(0, 255, 0), circle_width: int = 5,
-                 crosshair_color: QColor = QColor(0, 0, 0), crosshair_width: int = 2):  # Crosshair is now black
+    def __init__(self,
+                 circle_color: QColor = QColor(0, 255, 0),
+                 circle_width: int = 5,
+                 crosshair_color: QColor = QColor(0, 0, 0),
+                 crosshair_width: int = 2):
+        """
+        :param circle_color: The color to use for the annotation circle.
+        :param circle_width: The line width of the annotation circle.
+        :param crosshair_color: The color to use for the crosshair lines.
+        :param crosshair_width: The line width of the crosshair lines.
+        """
         self.circle_color = circle_color
         self.circle_width = circle_width
         self.crosshair_color = crosshair_color
@@ -24,11 +33,7 @@ class ImageAnnotator:
 
     def draw_annotation(self, image: QImage, coord_pos: Tuple[int, int]) -> QImage:
         """
-        Draws an annotation (circle and crosshair) on the provided QImage at the specified position.
-
-        :param image: The QImage to draw on.
-        :param coord_pos: The (x, y) position to draw the annotation.
-        :return: The modified QImage.
+        Draws a circle and crosshair on the provided QImage at coord_pos.
         """
         annotated_image = image.copy()
         painter = QPainter(annotated_image)
@@ -36,7 +41,7 @@ class ImageAnnotator:
 
         pos_x_zoomed, pos_y_zoomed = coord_pos
 
-        # Ensure the position is within the image bounds
+        # Clamp position within image bounds
         pos_x_zoomed = min(max(pos_x_zoomed, 0), annotated_image.width() - 1)
         pos_y_zoomed = min(max(pos_y_zoomed, 0), annotated_image.height() - 1)
 
@@ -45,64 +50,59 @@ class ImageAnnotator:
         # Define a radius for the circle
         radius = max(8, min(annotated_image.width(), annotated_image.height()) // 40)
 
-        # Draw the circle
-        self.draw_circle(painter, center, radius)
-
-        # Draw the crosshair with gap
-        image_size = (annotated_image.width(), annotated_image.height())
-        self.draw_crosshair_with_gap(painter, center, radius + self.circle_width // 2, image_size)
+        self._draw_circle(painter, center, radius)
+        self._draw_crosshair_with_gap(
+            painter,
+            center,
+            radius + self.circle_width // 2,
+            (annotated_image.width(), annotated_image.height())
+        )
 
         painter.end()
-
         return annotated_image
 
-    def draw_circle(self, painter, center: QPoint, radius: int):
+    def _draw_circle(self, painter: QPainter, center, radius: int):
         """
         Draws an unfilled circle at the specified center with the given radius.
-
-        :param painter: QPainter object to draw with.
-        :param center: Center point of the circle.
-        :param radius: Radius of the circle.
         """
         pen = QPen(self.circle_color)
         pen.setWidth(self.circle_width)
         painter.setPen(pen)
         painter.drawEllipse(center, radius, radius)
 
-    def draw_crosshair_with_gap(self, painter, center: QPoint, gap_radius: int, image_size: Tuple[int, int]):
+    def _draw_crosshair_with_gap(self,
+                                 painter: QPainter,
+                                 center,
+                                 gap_radius: int,
+                                 image_size: Tuple[int, int]):
         """
-        Draws crosshairs with a gap at the specified center point.
-
-        :param painter: QPainter object to draw with.
-        :param center: Center point of the crosshair (and circle).
-        :param gap_radius: Radius around the center where the crosshair is not drawn (to create the gap).
-        :param image_size: Tuple (width, height) of the image.
+        Draws a crosshair with a gap around the circle.
         """
         width_img, height_img = image_size
-        pen = QPen(self.crosshair_color)  # Use the black color for the crosshair
+
+        pen = QPen(self.crosshair_color)
         pen.setWidth(self.crosshair_width)
         painter.setPen(pen)
 
-        # Vertical line
-        # From top to (center_y - gap_radius)
-        painter.drawLine(center.x(), 0, center.x(), center.y() - gap_radius)
-        # From (center_y + gap_radius) to bottom
-        painter.drawLine(center.x(), center.y() + gap_radius, center.x(), height_img)
+        cx = center.x()
+        cy = center.y()
 
-        # Horizontal line
-        # From left to (center_x - gap_radius)
-        painter.drawLine(0, center.y(), center.x() - gap_radius, center.y())
-        # From (center_x + gap_radius) to right
-        painter.drawLine(center.x() + gap_radius, center.y(), width_img, center.y())
+        # Vertical lines
+        painter.drawLine(cx, 0, cx, cy - gap_radius)
+        painter.drawLine(cx, cy + gap_radius, cx, height_img)
+
+        # Horizontal lines
+        painter.drawLine(0, cy, cx - gap_radius, cy)
+        painter.drawLine(cx + gap_radius, cy, width_img, cy)
 
 
 class ImageProcessingController(QObject):
     """
-    ImageProcessingController handles image loading and processing operations independently.
-    It communicates with GlobalClusterController via signals and slots.
+    Handles image loading and processing operations, emitting signals to
+    communicate progress and results to the view or other controllers.
     """
 
-    # Signals to communicate with other controllers or the view
+    # Signals
     crops_ready = pyqtSignal(list)
     progress_updated = pyqtSignal(int)
     crop_loading_started = pyqtSignal()
@@ -110,305 +110,247 @@ class ImageProcessingController(QObject):
 
     def __init__(self, model: ImageDataModel):
         """
-        Initializes the ImageProcessingController.
-
-        :param model: An instance of the ImageDataModel.
+        :param model: An ImageDataModel instance for fetching image data.
         """
         super().__init__()
         self.model = model
         self.image_processor = ImageProcessor()
+        self.annotator = ImageAnnotator()
+
+        # Use the global thread pool instead of manual QThreads
+        self.threadpool = QThreadPool.globalInstance()
+
         self.loading_images = False
-        self.annotator = ImageAnnotator()  # Create an instance of ImageAnnotator
+        self.crops_per_cluster = 10
 
-        self.clusters = {}  # Initialize clusters as an empty dictionary
-        self.cluster_ids = []  # Initialize cluster_ids as an empty list
+        self.clusters: Dict[int, List[Annotation]] = {}
+        self.cluster_ids: List[int] = []
 
-        # Worker and thread for image processing
-        self.image_worker: Optional[ImageProcessingWorker] = None
-        self.image_thread: Optional[QThread] = None
+        # Keep track of clusters we’re currently prefetching to avoid duplicates
+        self.prefetching_clusters = set()
 
-        # For preloading adjacent clusters
-        self.prefetch_workers: Dict[int, Tuple[ImageProcessingWorker, QThread]] = {}
-        self.prefetching_clusters: set = set()
-
-        self.crops_per_cluster = 10  # Default value, can be updated as needed
-
+    # -------------------------------------------------------------------------
+    #                              CLUSTER SETUP
+    # -------------------------------------------------------------------------
     def set_clusters(self, clusters: Dict[int, List[Annotation]]):
         self.clusters = clusters
         self.cluster_ids = list(clusters.keys())
 
     def set_crops_per_cluster(self, num_crops: int, current_cluster_id: Optional[int] = None):
         """
-        Sets the number of crops to sample per cluster and refreshes the view.
-
-        :param num_crops: The number of crops to sample.
-        :param current_cluster_id: The ID of the currently selected cluster, if available.
+        Updates the crops-per-cluster and refreshes the current cluster view.
         """
         self.crops_per_cluster = num_crops
         logging.info(f"Crops per cluster set to {num_crops}.")
         self.refresh_current_cluster(current_cluster_id)
 
+    # -------------------------------------------------------------------------
+    #                         DISPLAY & PROCESS CROPS
+    # -------------------------------------------------------------------------
     def display_crops(self, annotations: List[Annotation], cluster_id: int):
         """
-        Selects the top 'n' annotations from a single cluster to display as zoomed-in crops.
-        The annotations are first sorted by their uncertainty from highest to lowest.
+        Displays crops for the top 'n' annotations from a single cluster.
         """
         if self.loading_images:
             logging.info("Aborting previous image loading process.")
-            self.cancel_image_loading()
+            # In a QThreadPool approach, you generally can't forcibly
+            # 'quit' a pool job unless you implement your own stop flag.
 
         self.loading_images = True
         self.crop_loading_started.emit()
 
-        # Sort annotations by uncertainty (highest to lowest)
-        annotations = sorted(annotations, key=lambda anno: anno.uncertainty, reverse=True)
+        sorted_annotations = self._sort_annotations_by_uncertainty(annotations)
+        selected = sorted_annotations[:min(self.crops_per_cluster, len(sorted_annotations))]
 
-        # Select the top 'n' annotations within the cluster
-        num_samples = min(self.crops_per_cluster, len(annotations))
-        selected_annotations = annotations[:num_samples]
-        logging.debug(
-            f"Selected top {len(selected_annotations)} annotations from cluster {cluster_id} by highest uncertainty."
-        )
+        processed_annos, uncached_annos = self._split_cached_and_uncached(selected)
 
-        # Check cache and separate cached and uncached annotations
-        processed_annotations = []
-        annotations_to_process = []
-
-        for anno in selected_annotations:
-            cache_key = (anno.image_index, tuple(anno.coord))
-            cached_result = self.image_processor.cache.get(cache_key)
-            if cached_result:
-                processed_crop, coord_pos = cached_result
-                processed_annotations.append({
-                    'annotation': anno,
-                    'processed_crop': processed_crop,
-                    'coord_pos': coord_pos
-                })
-            else:
-                annotations_to_process.append(anno)
-
-        if annotations_to_process:
-            # Start the image processing worker for uncached annotations
-            self.start_image_processing_worker(annotations_to_process, processed_annotations)
+        # If anything is uncached, launch a worker; otherwise, just display
+        if uncached_annos:
+            self._start_processing_worker(uncached_annos, processed_annos)
         else:
-            # All data is cached; proceed to display
-            self.display_processed_annotations(processed_annotations)
+            self._display_processed_annotations(processed_annos)
 
-        # Optionally, preload adjacent clusters if needed
-        self.preload_adjacent_clusters(cluster_id)
-
-    def preload_adjacent_clusters(self, cluster_id: int):
-        """
-        Preloads images for adjacent clusters.
-
-        :param cluster_id: The current cluster ID.
-        """
-        if not self.cluster_ids:
-            logging.warning("No cluster IDs available. Ensure clusters are set before preloading.")
-            return
-
-        if cluster_id not in self.cluster_ids:
-            logging.warning(f"Cluster ID {cluster_id} not found in cluster IDs.")
-            return
-
-        current_index = self.cluster_ids.index(cluster_id)
-
-        adjacent_indices = []
-        if current_index > 0:
-            adjacent_indices.append(current_index - 1)
-        if current_index < len(self.cluster_ids) - 1:
-            adjacent_indices.append(current_index + 1)
-
-        for index in adjacent_indices:
-            adjacent_cluster_id = self.cluster_ids[index]
-            if not self.is_cluster_cached(adjacent_cluster_id):
-                self.start_background_loading(adjacent_cluster_id)
+        # Prefetch neighbors
+        self._preload_adjacent_clusters(cluster_id)
 
     def refresh_current_cluster(self, current_cluster_id: Optional[int]):
         """
-        Refreshes the crops displayed for the currently selected cluster.
-
-        :param current_cluster_id: The ID of the currently selected cluster.
+        Reloads crops for the specified cluster, if valid.
         """
         if current_cluster_id is not None and current_cluster_id in self.clusters:
-            annotations = self.clusters[current_cluster_id]
-            self.display_crops(annotations, current_cluster_id)
+            self.display_crops(self.clusters[current_cluster_id], current_cluster_id)
         else:
-            logging.warning(f"Invalid or no current cluster ID provided: {current_cluster_id}")
+            logging.warning(f"Invalid cluster ID for refresh: {current_cluster_id}")
 
-    def cancel_image_loading(self):
-        """
-        Cancels any ongoing image loading process.
-        """
-        if self.image_thread:
-            try:
-                if self.image_thread.isRunning():
-                    self.image_thread.quit()
-                    self.image_thread.wait()
-                    logging.info("Image loading process canceled.")
-            except RuntimeError as e:
-                logging.warning(f"Attempted to cancel a thread that was already deleted: {e}")
-            finally:
-                # Ensure the thread reference is cleared
-                self.image_thread = None
-        self.loading_images = False
-
-    def start_image_processing_worker(
+    # -------------------------------------------------------------------------
+    #                           WORKER CREATION
+    # -------------------------------------------------------------------------
+    def _start_processing_worker(
             self,
             annotations_to_process: List[Annotation],
             processed_annotations: List[dict]
     ):
         """
-        Starts the ImageProcessingWorker in a separate thread to process uncached annotations.
-
-        :param annotations_to_process: List of uncached Annotation objects to process.
-        :param processed_annotations: List of already processed annotations.
+        Creates and starts a QRunnable worker to process uncached annotations.
         """
-        self.image_worker = ImageProcessingWorker(
+        worker = ImageProcessingWorker(
             sampled_annotations=annotations_to_process,
-            image_data_model=self.model,  # Pass the existing ImageDataModel instance
-            image_processor=self.image_processor
+            image_data_model=self.model,
+            image_processor=self.image_processor,
+            already_processed=processed_annotations
         )
-        self.image_thread = QThread(parent=self)
-        self.image_worker.moveToThread(self.image_thread)
-        self.image_thread.started.connect(self.image_worker.process_images)
+        # Connect the worker's signals
+        worker.signals.processing_finished.connect(self.on_image_processing_finished)
+        worker.signals.progress_updated.connect(self.progress_updated)
 
-        # Use a lambda to pass both cached and newly processed annotations
-        self.image_worker.processing_finished.connect(
-            lambda new_annotations: self.on_image_processing_finished(
-                processed_annotations + new_annotations
-            )
-        )
-        self.image_worker.processing_finished.connect(self.image_thread.quit)
-        self.image_worker.processing_finished.connect(self.image_worker.deleteLater)
-        self.image_worker.progress_updated.connect(self.progress_updated.emit)
-        self.image_thread.finished.connect(self.image_thread.deleteLater)
-        self.image_thread.start()
+        # Launch it on the thread pool
+        self.threadpool.start(worker)
 
     @pyqtSlot(list)
     def on_image_processing_finished(self, total_annotations: List[dict]):
         """
-        Handles the completion of image processing and displays the processed crops.
-
-        :param total_annotations: List of dictionaries containing annotations and processed images.
+        Called when the worker finishes processing. Displays final results.
         """
-        self.display_processed_annotations(total_annotations)
+        self._display_processed_annotations(total_annotations)
 
-    def display_processed_annotations(self, annotations: List[dict]):
+    # -------------------------------------------------------------------------
+    #                         CROP DISPLAY LOGIC
+    # -------------------------------------------------------------------------
+    def _display_processed_annotations(self, annotations_data: List[dict]):
         """
-        Converts processed annotations to QPixmap and emits the crops_ready signal.
-
-        :param annotations: List of dictionaries with processed annotations.
+        Converts the processed numpy arrays into QPixmaps and emits the
+        crops_ready signal.
         """
         sampled_crops = []
-        for data in annotations:
-            annotation = data['annotation']
-            processed_crop = data['processed_crop']
+        for data in annotations_data:
+            anno = data['annotation']
+            np_image = data['processed_crop']
             coord_pos = data['coord_pos']
-            if processed_crop is None or coord_pos is None:
-                logging.warning(f"Processed crop or coord_pos is None for annotation: {annotation}")
+
+            if np_image is None or coord_pos is None:
+                logging.warning(f"Missing image or coords for annotation: {anno}")
                 continue
-            q_image = self.image_processor.numpy_to_qimage(processed_crop)
-            q_image = self.annotator.draw_annotation(q_image, coord_pos)
-            q_pixmap = QPixmap.fromImage(q_image)  # Convert QImage to QPixmap
+
+            q_image = self.image_processor.numpy_to_qimage(np_image)
+            q_annotated = self.annotator.draw_annotation(q_image, coord_pos)
+            q_pixmap = QPixmap.fromImage(q_annotated)
+
             sampled_crops.append({
-                'annotation': annotation,
+                'annotation': anno,
                 'processed_crop': q_pixmap,
                 'coord_pos': coord_pos
             })
+
         self.crops_ready.emit(sampled_crops)
         logging.info(f"Displayed {len(sampled_crops)} sampled crops.")
         self.crop_loading_finished.emit()
         self.loading_images = False
 
-    def is_cluster_cached(self, cluster_id: int) -> bool:
+    # -------------------------------------------------------------------------
+    #                          PREFETCH LOGIC
+    # -------------------------------------------------------------------------
+    def _preload_adjacent_clusters(self, cluster_id: int):
         """
-        Checks if all annotations in a cluster are cached.
+        Triggers background loading for adjacent clusters.
+        """
+        if not self.cluster_ids:
+            logging.warning("No cluster IDs set; skipping prefetch.")
+            return
 
-        :param cluster_id: The cluster ID to check.
-        :return: True if all annotations are cached, False otherwise.
-        """
-        annotations = self.clusters.get(cluster_id, [])
-        for anno in annotations[:self.crops_per_cluster]:
-            cache_key = (anno.image_index, tuple(anno.coord))
-            if not self.image_processor.cache.get(cache_key):
-                return False
-        return True
+        if cluster_id not in self.cluster_ids:
+            logging.warning(f"Cluster ID {cluster_id} not found in cluster list.")
+            return
 
-    def start_background_loading(self, cluster_id: int):
-        """
-        Starts preloading images for a cluster in the background.
+        index = self.cluster_ids.index(cluster_id)
+        neighbors = []
+        if index > 0:
+            neighbors.append(self.cluster_ids[index - 1])
+        if index < len(self.cluster_ids) - 1:
+            neighbors.append(self.cluster_ids[index + 1])
 
-        :param cluster_id: The cluster ID to preload.
-        """
+        for neighbor_id in neighbors:
+            if not self._is_cluster_cached(neighbor_id):
+                self._start_background_prefetch(neighbor_id)
+
+    def _start_background_prefetch(self, cluster_id: int):
         if cluster_id in self.prefetching_clusters:
-            logging.debug(f"Already preloading cluster {cluster_id}.")
+            logging.debug(f"Already prefetching cluster {cluster_id}.")
+            return
+
+        annos = self.clusters.get(cluster_id, [])
+        selected = annos[:min(self.crops_per_cluster, len(annos))]
+        if not selected:
+            logging.debug(f"No annotations to preload for cluster {cluster_id}.")
             return
 
         self.prefetching_clusters.add(cluster_id)
 
-        annotations = self.clusters.get(cluster_id, [])
-        num_samples = min(self.crops_per_cluster, len(annotations))
-        selected_annotations = annotations[:num_samples]
-
-        if not selected_annotations:
-            logging.debug(f"No annotations to preload for cluster {cluster_id}.")
-            self.prefetching_clusters.discard(cluster_id)
-            return
-
-        prefetch_worker = ImageProcessingWorker(
-            sampled_annotations=selected_annotations,
-            image_data_model=self.model,  # Pass the existing ImageDataModel instance
+        worker = ImageProcessingWorker(
+            sampled_annotations=selected,
+            image_data_model=self.model,
             image_processor=self.image_processor
         )
-        prefetch_thread = QThread(parent=self)
-        prefetch_worker.moveToThread(prefetch_thread)
-        prefetch_thread.started.connect(prefetch_worker.process_images)
-        prefetch_worker.processing_finished.connect(
-            lambda new_annotations: self.on_prefetch_finished(cluster_id)
+        worker.signals.processing_finished.connect(
+            lambda _: self._on_prefetch_finished(cluster_id)
         )
-        prefetch_worker.processing_finished.connect(prefetch_thread.quit)
-        prefetch_worker.processing_finished.connect(prefetch_worker.deleteLater)
-        prefetch_thread.finished.connect(prefetch_thread.deleteLater)
-        prefetch_thread.start()
-
-        self.prefetch_workers[cluster_id] = (prefetch_worker, prefetch_thread)
+        self.threadpool.start(worker)
 
     @pyqtSlot()
-    def on_prefetch_finished(self, cluster_id: int):
+    def _on_prefetch_finished(self, cluster_id: int):
         """
-        Handles the completion of background preloading for a cluster.
-
-        :param cluster_id: The cluster ID that was preloaded.
+        Marks the cluster as done prefetching.
         """
         self.prefetching_clusters.discard(cluster_id)
-        self.prefetch_workers.pop(cluster_id, None)
-        logging.info(f"Prefetching completed for cluster {cluster_id}.")
+        logging.info(f"Prefetch completed for cluster {cluster_id}.")
 
+    # -------------------------------------------------------------------------
+    #                           PRIVATE HELPERS
+    # -------------------------------------------------------------------------
+    @staticmethod
+    def _sort_annotations_by_uncertainty(annotations: List[Annotation]) -> List[Annotation]:
+        """
+        Sorts annotations by their uncertainty in descending order.
+        """
+        return sorted(annotations, key=lambda a: a.uncertainty, reverse=True)
+
+    def _is_cluster_cached(self, cluster_id: int) -> bool:
+        """
+        Checks if all required annotations in a cluster are cached.
+        """
+        annotations = self.clusters.get(cluster_id, [])
+        for anno in annotations[:self.crops_per_cluster]:
+            if not self.image_processor.cache.get((anno.image_index, tuple(anno.coord))):
+                return False
+        return True
+
+    def _split_cached_and_uncached(self, annotations: List[Annotation]) -> Tuple[List[dict], List[Annotation]]:
+        """
+        Splits annotations into already cached (processed) and those that need processing.
+        Returns (processed_list, uncached_list).
+        """
+        processed_list = []
+        uncached_list = []
+        for anno in annotations:
+            cache_key = (anno.image_index, tuple(anno.coord))
+            result = self.image_processor.cache.get(cache_key)
+            if result:
+                np_image, coord_pos = result
+                processed_list.append({
+                    'annotation': anno,
+                    'processed_crop': np_image,
+                    'coord_pos': coord_pos
+                })
+            else:
+                uncached_list.append(anno)
+        return processed_list, uncached_list
+
+    # -------------------------------------------------------------------------
+    #                           CLEANUP (Optional)
+    # -------------------------------------------------------------------------
     def cleanup(self):
         """
-        Cleans up the image processing worker and thread.
+        If you don't need to forcibly stop tasks in progress, this can be no-op.
+        Otherwise, implement logic such as a cooperative stop for the workers.
         """
-        if self.image_thread:
-            try:
-                self.cancel_image_loading()
-            except RuntimeError as e:
-                logging.warning(f"Thread cleanup encountered an issue: {e}")
-            finally:
-                self.image_thread = None  # Clear the reference after cleanup
-
-        # Clean up prefetch workers
-        for cluster_id, (worker, thread) in self.prefetch_workers.items():
-            if thread:
-                try:
-                    if thread.isRunning():
-                        thread.quit()
-                        thread.wait()
-                        logging.info(f"Prefetch thread for cluster {cluster_id} terminated during cleanup.")
-                except RuntimeError as e:
-                    logging.warning(f"Prefetch thread for cluster {cluster_id} already deleted: {e}")
-                finally:
-                    # Clear the worker and thread references
-                    self.prefetch_workers[cluster_id] = (None, None)
-
-        self.prefetch_workers.clear()
+        self.loading_images = False
+        logging.info("ImageProcessingController cleanup done.")

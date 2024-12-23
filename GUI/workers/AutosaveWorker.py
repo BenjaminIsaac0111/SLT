@@ -3,32 +3,48 @@ import json
 import logging
 import os
 
-from PyQt5.QtCore import QObject, pyqtSignal, pyqtSlot
+from PyQt5.QtCore import QRunnable, QObject, pyqtSignal
 
 
-class AutosaveWorker(QObject):
+class AutosaveWorkerSignals(QObject):
+    """
+    Defines the signals available from the autosave worker.
+    Because QRunnable is not a QObject, we store signals in a separate object.
+    """
     save_finished = pyqtSignal(bool)
-    save_project_state_signal = pyqtSignal(object, str)
 
-    def __init__(self):
+
+class AutosaveWorker(QRunnable):
+    """
+    A QRunnable-based worker that saves a project state to a file asynchronously
+    using compression. Designed to be used with QThreadPool.
+    """
+
+    def __init__(self, project_state: dict, file_path: str):
         super().__init__()
-        self.save_project_state_signal.connect(self.save_project_state)
+        self.signals = AutosaveWorkerSignals()
+        self.project_state = project_state
+        self.file_path = file_path
 
-    @pyqtSlot(object, str)
-    def save_project_state(self, project_state, file_path):
+    def run(self):
         """
-        Saves the project state to the specified file path asynchronously, using compression.
+        Performs the autosave operation in a background thread (managed by QThreadPool).
+        Emits save_finished (True/False) upon completion or error.
         """
         try:
-            temp_file_path = file_path + '.tmp'
+            temp_file_path = self.file_path + '.tmp'
             with gzip.open(temp_file_path, 'wt') as f:
-                json.dump(project_state, f, indent=4)
-            os.replace(temp_file_path, file_path)
-            logging.info(f"Autosave completed successfully to {file_path}")
-            self.save_finished.emit(True)  # Signal successful save
-        except TypeError as e:
-            logging.error(f"Serialization error during autosave: {e}")
-            self.save_finished.emit(False)
+                json.dump(self.project_state, f, indent=4)
+
+            # Safely replace the final file with the temp
+            os.replace(temp_file_path, self.file_path)
+
+            logging.info(f"Autosave completed successfully to {self.file_path}")
+            self.signals.save_finished.emit(True)
+
+        except (TypeError, OSError, json.JSONDecodeError) as e:
+            logging.error(f"Error during autosave: {e}")
+            self.signals.save_finished.emit(False)
         except Exception as e:
-            logging.error(f"Error during async autosave: {e}")
-            self.save_finished.emit(False)  # Signal failed save
+            logging.error(f"Unexpected exception during autosave: {e}")
+            self.signals.save_finished.emit(False)
