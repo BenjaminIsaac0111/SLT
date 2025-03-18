@@ -24,8 +24,8 @@ tf.config.optimizer.set_jit(True)
 # -----------------------------
 # Global Parameters & Hyperparameters
 # -----------------------------
-EPOCHS = 5
-MC_PASSES = 5  # Number of stochastic passes for MC Concrete dropout uncertainty.
+EPOCHS = 8
+MC_PASSES = 8  # Number of stochastic passes for MC Concrete dropout uncertainty.
 BATCH_SIZE = 32
 # Base directory for saving all results.
 BASE_RESULTS_DIR = "all_results"
@@ -37,7 +37,7 @@ os.makedirs(BASE_RESULTS_DIR, exist_ok=True)
 datasets_to_test = {
     "oxford_iiit_pet": {
         "tfds_name": "oxford_iiit_pet",
-        "input_size": (64, 64),
+        "input_size": (128, 128),
         "num_classes": 3,  # labels 0,1,2 after subtracting 1.
         "preprocess_fn": None  # use default preprocessing below.
     },
@@ -63,7 +63,9 @@ def default_preprocess(example, input_size, num_classes):
 
 
 def get_dataset(config, split: str) -> tf.data.Dataset:
-    ds = tfds.load(config["tfds_name"], split=split, as_supervised=False)
+    ds = tfds.load(config["tfds_name"], split=split, as_supervised=False,
+                   # data_dir=r"Z:\tensorflow_datasets"  # Comment out to use default download path.
+                   )
     preprocess_fn = config.get("preprocess_fn", None)
     if preprocess_fn is None:
         ds = ds.map(lambda ex: default_preprocess(ex, config["input_size"], config["num_classes"]),
@@ -121,7 +123,7 @@ def mc_dropout_predict(model: keras.Model, x: tf.Tensor, mc_passes: int = MC_PAS
     print("MC inference for current batch complete.")
     predictions = tf.stack(predictions, axis=0)
     mean_probs = tf.reduce_mean(predictions, axis=0)
-    var_probs = tf.math.reduce_variance(predictions, axis=0)
+    var_probs = tf.reduce_sum(tf.math.reduce_variance(predictions, axis=0), axis=-1)
     return mean_probs.numpy(), var_probs.numpy()
 
 
@@ -135,29 +137,45 @@ def ensemble_predict(model: EnsembleMCDropoutUnetBuilder, x: tf.Tensor) -> Tuple
     return overall_mean.numpy(), ensemble_uncertainty
 
 
-def mc_dropout_predict_combined(model: EnsembleMCDropoutUnetBuilder,
-                                x: tf.Tensor,
-                                mc_passes: int = MC_PASSES) -> Tuple[np.ndarray, np.ndarray]:
-    ensemble_preds = []
-    for m in range(mc_passes):
-        preds = [submodel(x, training=True) for submodel in model.submodels]
-        preds = tf.stack(preds, axis=0)
-        ensemble_preds.append(preds)
-    ensemble_preds = tf.stack(ensemble_preds, axis=0)
-    dropout_var_per_member = tf.math.reduce_variance(ensemble_preds, axis=0)
-    dropout_uncertainty = tf.reduce_mean(dropout_var_per_member, axis=[0, -1]).numpy()
-    mean_preds_per_member = tf.reduce_mean(ensemble_preds, axis=0)
-    overall_mean = tf.reduce_mean(mean_preds_per_member, axis=0)
-    overall_entropy = compute_entropy(overall_mean.numpy())
-    entropies = [compute_entropy(mean_preds_per_member[i].numpy()) for i in range(mean_preds_per_member.shape[0])]
-    avg_member_entropy = np.mean(np.stack(entropies, axis=0), axis=0)
-    ensemble_uncertainty = overall_entropy - avg_member_entropy
-    dropout_min, dropout_max = np.min(dropout_uncertainty), np.max(dropout_uncertainty)
-    ensemble_min, ensemble_max = np.min(ensemble_uncertainty), np.max(ensemble_uncertainty)
-    dropout_norm = (dropout_uncertainty - dropout_min) / (dropout_max - dropout_min + 1e-10)
-    ensemble_norm = (ensemble_uncertainty - ensemble_min) / (ensemble_max - ensemble_min + 1e-10)
-    combined_uncertainty = dropout_norm + ensemble_norm
-    return overall_mean.numpy(), combined_uncertainty
+def mc_dropout_predict_combined_v2(model: EnsembleMCDropoutUnetBuilder,
+                                   x: tf.Tensor,
+                                   mc_passes: int = MC_PASSES) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Compute combined uncertainty based on the law of total variance.
+    For each ensemble member, perform multiple MC dropout passes to obtain:
+        - The within-model variance (aleatoric uncertainty).
+        - The predictive mean.
+    Then, compute:
+        - The variance of the ensemble means (epistemic uncertainty).
+    The total uncertainty is the sum of the within-model and between-model variances.
+    """
+    ensemble_means = []
+    ensemble_dropout_vars = []
+    for submodel in model.submodels:
+        # Run MC dropout for the current ensemble member.
+        dropout_preds = [submodel(x, training=True) for _ in range(mc_passes)]
+        dropout_preds = tf.stack(dropout_preds, axis=0)
+        # Mean prediction for this submodel.
+        mean_pred = tf.reduce_mean(dropout_preds, axis=0)
+        # Average dropout variance per pixel (across the channel dimension).
+        dropout_var = tf.reduce_mean(tf.math.reduce_variance(dropout_preds, axis=0), axis=-1)
+        ensemble_means.append(mean_pred)
+        ensemble_dropout_vars.append(dropout_var)
+
+    ensemble_means = tf.stack(ensemble_means, axis=0)
+    ensemble_dropout_vars = tf.stack(ensemble_dropout_vars, axis=0)
+
+    # Compute the between-model (ensemble) uncertainty.
+    variance_between = tf.math.reduce_variance(ensemble_means, axis=0)
+    variance_between = tf.reduce_mean(variance_between, axis=-1)
+
+    # Compute the average within-model (MC dropout) uncertainty across ensemble members.
+    variance_within = tf.reduce_mean(ensemble_dropout_vars, axis=0)
+
+    total_uncertainty = variance_within + variance_between
+    overall_mean = tf.reduce_mean(ensemble_means, axis=0)
+
+    return overall_mean.numpy(), total_uncertainty.numpy()
 
 
 # -----------------------------
@@ -185,7 +203,7 @@ def compute_reliability_data(probs: np.ndarray, labels: np.ndarray, num_bins: in
 
 
 def plot_reliability_diagram(bin_confidences: np.ndarray, bin_accuracies: np.ndarray, ece: float,
-                             num_bins: int = 15, title: str = "Reliability Diagram", save_path=None):
+                             title: str = "Reliability Diagram", save_path=None):
     plt.figure(figsize=(6, 6))
     plt.plot(bin_confidences, bin_accuracies, marker='o', label='Reliability')
     plt.plot([0, 1], [0, 1], 'k--', label='Perfect Calibration')
@@ -203,8 +221,7 @@ def plot_reliability_diagram(bin_confidences: np.ndarray, bin_accuracies: np.nda
         plt.show()
 
 
-def plot_results(image, mask, mean_pred, combined_uncertainty, idx: int, save_path: str = None,
-                 num_classes: int = None):
+def plot_results(image, mask, mean_pred, uncertainty, save_path: str = None):
     plt.figure(figsize=(16, 3))
     plt.subplot(1, 5, 1)
     plt.imshow(image)
@@ -220,14 +237,9 @@ def plot_results(image, mask, mean_pred, combined_uncertainty, idx: int, save_pa
     plt.title("Prediction")
     plt.axis("off")
     plt.subplot(1, 5, 4)
-    plt.imshow(combined_uncertainty, cmap='hot')
+    plt.imshow(uncertainty, cmap='hot')
     plt.title("Uncertainty")
     plt.axis("off")
-    plt.subplot(1, 5, 5)
-    plt.imshow(combined_uncertainty, cmap='hot')
-    plt.title("Adjusted Uncertainty")
-    plt.axis("off")
-    plt.suptitle(f"Example {idx}")
     if save_path:
         plt.savefig(save_path)
         plt.close()
@@ -235,45 +247,87 @@ def plot_results(image, mask, mean_pred, combined_uncertainty, idx: int, save_pa
         plt.show()
 
 
-def plot_uncertainty_vs_correctness(uncertainties, ious, dices, num_bins: int = 10, save_path: str = None):
+def plot_uncertainty_vs_correctness(uncertainties, ious, dices, num_quantiles: int = 20, save_path: str = None):
+    """
+    Plots the relationship between uncertainty and segmentation performance (IoU and Dice)
+    using quantile-based binning. This version uses a line plot for the mean metrics with a
+    shaded area indicating ±1 standard deviation.
+
+    Parameters:
+        uncertainties (list or np.ndarray): Array of uncertainty values for each image.
+        ious (list or np.ndarray): Array of IoU values corresponding to the images.
+        dices (list or np.ndarray): Array of Dice coefficient values corresponding to the images.
+        num_quantiles (int): Number of quantile bins to use.
+        save_path (str): Base path to save plots; if None, plots are displayed instead.
+    """
     uncertainties = np.array(uncertainties)
     ious = np.array(ious)
     dices = np.array(dices)
-    bins = np.linspace(uncertainties.min(), uncertainties.max(), num_bins + 1)
-    bin_centers = (bins[:-1] + bins[1:]) / 2
+
+    # Compute quantile bin edges
+    quantile_edges = np.quantile(uncertainties, np.linspace(0, 1, num_quantiles + 1))
+    # Ensure last bin includes its upper boundary
+    quantile_edges[-1] += 1e-6  # Small epsilon to include max value
+
+    # Compute bin centers dynamically
+    quantile_centers = (quantile_edges[:-1] + quantile_edges[1:]) / 2.0
+
+    # Initialize lists to store mean and std for each quantile
     iou_means, iou_stds = [], []
     dice_means, dice_stds = [], []
-    for i in range(num_bins):
-        indices = np.where((uncertainties >= bins[i]) & (uncertainties < bins[i + 1]))[0]
+
+    # Compute mean and standard deviation per bin
+    for i in range(num_quantiles):
+        lower_edge = quantile_edges[i]
+        upper_edge = quantile_edges[i + 1]
+        indices = np.where((uncertainties >= lower_edge) & (uncertainties < upper_edge))[0]
+
         if len(indices) > 0:
             iou_means.append(np.mean(ious[indices]))
             iou_stds.append(np.std(ious[indices]))
             dice_means.append(np.mean(dices[indices]))
             dice_stds.append(np.std(dices[indices]))
         else:
-            iou_means.append(0)
-            iou_stds.append(0)
-            dice_means.append(0)
-            dice_stds.append(0)
-    plt.figure(figsize=(12, 5))
-    bar_width = bins[1] - bins[0]
-    plt.subplot(1, 2, 1)
-    plt.bar(bin_centers, iou_means, width=bar_width, alpha=0.6, label='Mean IoU')
-    plt.errorbar(bin_centers, iou_means, yerr=iou_stds, fmt='none', ecolor='black', capsize=5, label='Std. Dev.')
-    plt.xlabel("Avg Uncertainty")
+            # Use NaN to avoid misleading 0s in visualization
+            iou_means.append(np.nan)
+            iou_stds.append(np.nan)
+            dice_means.append(np.nan)
+            dice_stds.append(np.nan)
+
+    # IoU Plot: Line plot with shaded ±1 standard deviation area.
+    plt.figure(figsize=(6, 5))
+    plt.plot(quantile_centers, iou_means, marker='o', color='blue', label='Mean IoU')
+    plt.fill_between(quantile_centers,
+                     np.array(iou_means) - np.array(iou_stds),
+                     np.array(iou_means) + np.array(iou_stds),
+                     color='blue', alpha=0.2, label='±1 Std Dev')
+    plt.xlabel("Uncertainty (Quantile Bin Centers)")
     plt.ylabel("IoU")
-    plt.title("Uncertainty vs IoU")
-    plt.legend()
-    plt.subplot(1, 2, 2)
-    plt.bar(bin_centers, dice_means, width=bar_width, alpha=0.6, color='green', label='Mean Dice')
-    plt.errorbar(bin_centers, dice_means, yerr=dice_stds, fmt='none', ecolor='black', capsize=5, label='Std. Dev.')
-    plt.xlabel("Avg Uncertainty")
-    plt.ylabel("Dice")
-    plt.title("Uncertainty vs Dice")
+    plt.ylim(0.0, 1.0)
+    plt.title("Uncertainty vs IoU (Line Plot with Std Dev)")
     plt.legend()
     plt.tight_layout()
     if save_path:
-        plt.savefig(save_path)
+        plt.savefig(f"{os.path.splitext(save_path)[0]}_iou_line.png", dpi=300)
+        plt.close()
+    else:
+        plt.show()
+
+    # Dice Plot: Line plot with shaded ±1 standard deviation area.
+    plt.figure(figsize=(6, 5))
+    plt.plot(quantile_centers, dice_means, marker='o', color='green', label='Mean Dice')
+    plt.fill_between(quantile_centers,
+                     np.array(dice_means) - np.array(dice_stds),
+                     np.array(dice_means) + np.array(dice_stds),
+                     color='green', alpha=0.2, label='±1 Std Dev')
+    plt.xlabel("Uncertainty (Quantile Bin Centers)")
+    plt.ylabel("Dice")
+    plt.ylim(0.0, 1.0)
+    plt.title("Uncertainty vs Dice (Line Plot with Std Dev)")
+    plt.legend()
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(f"{os.path.splitext(save_path)[0]}_dice_line.png", dpi=300)
         plt.close()
     else:
         plt.show()
@@ -282,65 +336,99 @@ def plot_uncertainty_vs_correctness(uncertainties, ious, dices, num_bins: int = 
 # -----------------------------
 # Ablation Study Pipeline for a Single Dataset
 # -----------------------------
-def run_pipeline_for_dataset(config_name: str, config: dict, ablation_mode: str = "combined") -> Dict:
+def run_pipeline_for_dataset(config_name: str, config: dict, ablation_mode: str = "combined",
+                             force_train: bool = False) -> Dict:
     """
-    ablation_mode: "dropout", "ensemble", or "combined"
+    Runs the training and evaluation pipeline for a given dataset configuration.
+
+    Parameters:
+        config_name (str): Name of the dataset.
+        config (dict): Dataset configuration parameters.
+        ablation_mode (str): One of "dropout", "ensemble", or "combined" indicating the model type.
+        force_train (bool): If True, retrains the model even if a saved model exists.
+
+    Returns:
+        Dict: A dictionary containing performance metrics for the dataset.
     """
     print(f"\n--- Running pipeline for dataset: {config_name} | Mode: {ablation_mode} ---")
     results_dir = os.path.join(BASE_RESULTS_DIR, f"{config_name}_{ablation_mode}")
     os.makedirs(results_dir, exist_ok=True)
-    ds_train = get_dataset(config, split="train")
-    ds_val = get_dataset(config, split="test")
-    if ablation_mode == "dropout":
-        builder = MCDropoutUnetBuilder(
-            input_size=(config["input_size"][0], config["input_size"][1], 3),
-            num_classes=config["num_classes"],
-            num_levels=2,
-            num_conv_per_level=2,
-            num_filters=32,
-            regularisation=None,
-            use_attention=True,
-            activation=tf.keras.layers.LeakyReLU(),
-            return_logits=False
-        )
-        inference_fn = mc_dropout_predict
-    else:
-        builder = EnsembleMCDropoutUnetBuilder(
-            n_models=3,
-            input_size=(config["input_size"][0], config["input_size"][1], 3),
-            num_classes=config["num_classes"],
-            num_levels=2,
-            num_conv_per_level=2,
-            num_filters=32,
-            regularisation=None,
-            use_attention=True,
-            activation=tf.keras.layers.LeakyReLU(),
-            return_logits=False
-        )
-        if ablation_mode == "ensemble":
+
+    # Define model file path.
+    model_filepath = os.path.join(results_dir, f"model_{config_name}.tf")
+
+    # Check if a pre-trained model exists.
+    if os.path.exists(model_filepath) and not force_train:
+        print("Pre-trained model found. Loading model...")
+        model = tf.keras.models.load_model(model_filepath)
+        # Ensure inference_fn is defined even when loading a model.
+        if ablation_mode == "dropout":
+            inference_fn = mc_dropout_predict
+        elif ablation_mode == "ensemble":
             inference_fn = ensemble_predict
         else:
-            inference_fn = mc_dropout_predict_combined
+            inference_fn = mc_dropout_predict_combined_v2
+    else:
+        print("No pre-trained model found or force_train=True. Training a new model from scratch...")
+        ds_train = get_dataset(config, split="train")
+        ds_val = get_dataset(config, split="test")
 
-    model = builder.build_model()
-    model.summary()
-    base_optimizer = tf.keras.optimizers.Adam(learning_rate=1e-3)
-    optimizer = mixed_precision.LossScaleOptimizer(base_optimizer)
-    model.compile(
-        optimizer=optimizer,
-        loss=keras.losses.SparseCategoricalCrossentropy(),
-        metrics=['accuracy']
-    )
-    model.fit(ds_train, validation_data=ds_val, epochs=EPOCHS)
-    model.save(filepath=os.path.join(results_dir, f"model_{config_name}.tf"), save_format="tf")
+        if ablation_mode == "dropout":
+            builder = MCDropoutUnetBuilder(
+                input_size=(config["input_size"][0], config["input_size"][1], 3),
+                num_classes=config["num_classes"],
+                num_levels=4,
+                num_conv_per_level=4,
+                num_filters=32,
+                regularisation=None,
+                use_attention=True,
+                activation=tf.keras.layers.LeakyReLU(),
+                return_logits=False
+            )
+            inference_fn = mc_dropout_predict
+        else:
+            builder = EnsembleMCDropoutUnetBuilder(
+                n_models=3,
+                input_size=(config["input_size"][0], config["input_size"][1], 3),
+                num_classes=config["num_classes"],
+                num_levels=2,
+                num_conv_per_level=2,
+                num_filters=32,
+                regularisation=None,
+                use_attention=True,
+                activation=tf.keras.layers.LeakyReLU(),
+                return_logits=False
+            )
+            if ablation_mode == "ensemble":
+                inference_fn = ensemble_predict
+            else:
+                inference_fn = mc_dropout_predict_combined_v2
+
+        model = builder.build_model()
+        model.summary()
+        base_optimizer = tf.keras.optimizers.Adam(learning_rate=1e-3)
+        optimizer = mixed_precision.LossScaleOptimizer(base_optimizer)
+        model.compile(
+            optimizer=optimizer,
+            loss=keras.losses.SparseCategoricalCrossentropy(),
+            metrics=['accuracy'],
+            run_eagerly=False
+        )
+        model.fit(ds_train, validation_data=ds_val, epochs=EPOCHS)
+        model.save(filepath=model_filepath, save_format="tf")
+
+    # Continue with inference and evaluation using the (loaded or newly trained) model.
     uncertainties = []
     ious = []
     dices = []
     results_list = []
     all_mean_probs = []
     all_labels = []
+
     print("Starting inference on the test set...")
+    ds_val = get_dataset(config, split="test")
     total_batches = sum(1 for _ in ds_val)
+
     for batch_idx, (images, masks) in enumerate(ds_val):
         mean_probs, uncertainty_map = inference_fn(model, images)
         all_mean_probs.append(mean_probs.reshape(-1, config["num_classes"]))
@@ -359,20 +447,23 @@ def run_pipeline_for_dataset(config_name: str, config: dict, ablation_mode: str 
             dices.append(dice)
             results_list.append([avg_uncertainty, iou, dice])
         print(f"Batch {batch_idx + 1} processed.")
+
     print("Inference complete.")
     all_mean_probs = np.concatenate(all_mean_probs, axis=0)
     all_labels = np.concatenate(all_labels, axis=0)
     bin_confidences, bin_accuracies, ece = compute_reliability_data(
         probs=all_mean_probs, labels=all_labels, num_bins=15
     )
+
     scatter_plot_path = os.path.join(results_dir, "reliability_diagram.png")
     plot_reliability_diagram(bin_confidences, bin_accuracies, ece,
-                             num_bins=15,
                              title=f"Reliability Diagram for {config_name} | {ablation_mode}",
                              save_path=scatter_plot_path)
+
     scatter_plot_path = os.path.join(results_dir, "uncertainty_vs_correctness.png")
     plot_uncertainty_vs_correctness(uncertainties, ious, dices, save_path=scatter_plot_path)
     print(f"Scatter plot saved to {scatter_plot_path}")
+
     csv_path = os.path.join(results_dir, "metrics.csv")
     with open(csv_path, "w", newline="") as csvfile:
         writer = csv.writer(csvfile)
@@ -380,6 +471,7 @@ def run_pipeline_for_dataset(config_name: str, config: dict, ablation_mode: str 
         for idx, (unc, iou, d) in enumerate(results_list):
             writer.writerow([idx, unc, iou, d])
     print(f"Metrics saved to {csv_path}")
+
     # Save example visualizations using a fixed seed for reproducibility.
     fixed_example_seed = 42
     tf.random.set_seed(fixed_example_seed)
@@ -391,9 +483,9 @@ def run_pipeline_for_dataset(config_name: str, config: dict, ablation_mode: str 
             gt_mask = masks[i].numpy()
             mean_pred = mean_probs[i]
             save_path = os.path.join(results_dir, f"example_{i}.png")
-            plot_results(img, gt_mask, mean_pred, uncertainty_map[i],
-                         i, save_path=save_path, num_classes=config["num_classes"])
+            plot_results(img, gt_mask, mean_pred, uncertainty_map[i], save_path=save_path)
             print(f"Example {i} saved to {save_path}")
+
     dataset_metrics = {
         "Dataset": config_name,
         "Avg_Uncertainty": np.mean(uncertainties),
@@ -410,12 +502,19 @@ def run_pipeline_for_dataset(config_name: str, config: dict, ablation_mode: str 
 # Main Loop: Run Ablation Studies and Consolidate Results
 # -----------------------------
 def main():
-    ablation_modes = ["dropout", "ensemble", "combined"]
+    ablation_modes = [
+        "dropout",
+        "ensemble",
+        "combined"
+    ]
     consolidated_results = []
+    # Change this flag to True to force retraining even if a saved model exists.
+    force_train = False
     for mode in ablation_modes:
         print(f"\n=== Running Ablation: {mode} ===")
         for dataset_name, config in datasets_to_test.items():
-            dataset_metrics = run_pipeline_for_dataset(dataset_name, config, ablation_mode=mode)
+            dataset_metrics = run_pipeline_for_dataset(dataset_name, config, ablation_mode=mode,
+                                                       force_train=force_train)
             consolidated_results.append((mode, dataset_metrics))
     consolidated_csv_path = os.path.join(BASE_RESULTS_DIR, "consolidated_results.csv")
     with open(consolidated_csv_path, "w", newline="") as csvfile:

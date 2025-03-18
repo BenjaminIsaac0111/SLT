@@ -1,12 +1,17 @@
+import tensorflow as tf
 from keras import Model, Input
 from keras.layers import Softmax, Conv2D, Add, Concatenate, UpSampling2D, AvgPool2D
-from tensorflow.keras.regularizers import l2
-import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
+from tensorflow.keras.regularizers import l2
+
 from .custom_layers import AttentionBlock, SpatialConcreteDropout, DropoutAttentionBlock, GroupNormalization
 
 
+# ---
+# NOTE: This is legacy code for the U-Net models and will be removed eventually.
+# New versions are found in Model/models.py
+# ---
 def build_unet(
         input_size=(1024, 512, 3),
         num_classes=9,
