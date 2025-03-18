@@ -65,7 +65,7 @@ class ClusteringWorkerSignals(QObject):
     progress_updated = pyqtSignal(int)  # Emitted to update progress (e.g., -1 means stage done)
 
 
-class ClusteringWorker(QRunnable):
+class AnnotationClusteringWorker(QRunnable):
     """
     Performs clustering on a potentially large subset (core-set),
     then down-samples each cluster to exactly 'cluster_size' members.

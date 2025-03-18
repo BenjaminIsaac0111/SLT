@@ -6,12 +6,12 @@ from typing import Optional, Dict, List
 from PyQt5.QtCore import QObject, pyqtSlot, QTimer, QCoreApplication
 from PyQt5.QtWidgets import QFileDialog, QMessageBox
 
-from GUI.controllers.ClusteringController import ClusteringController
+from GUI.controllers.AnnotationClusteringController import AnnotationClusteringController
 from GUI.controllers.ImageProcessingController import ImageProcessingController
 from GUI.controllers.ProjectStateController import ProjectStateController
 from GUI.models.Annotation import Annotation
 from GUI.models.ImageDataModel import ImageDataModel
-from GUI.models.PointAnnotationGenerator import PointAnnotationGenerator
+from GUI.models.PointAnnotationGenerator import LocalMaximaPointAnnotationGenerator, EquidistantPointAnnotationGenerator
 from GUI.views.ClusteredCropsView import ClusteredCropsView
 
 
@@ -32,10 +32,10 @@ class MainController(QObject):
         super().__init__()
         self.image_data_model = model
         self.view = view
-        self.region_selector = PointAnnotationGenerator()
+        self.annotation_generator = LocalMaximaPointAnnotationGenerator()
 
         # Instantiate other controllers with the initial model
-        self.clustering_controller = ClusteringController(self.image_data_model, self.region_selector)
+        self.clustering_controller = AnnotationClusteringController(self.image_data_model, self.annotation_generator)
         self.image_processing_controller = ImageProcessingController(self.image_data_model)
         self.project_state_controller = ProjectStateController(self.image_data_model)
 
@@ -74,6 +74,7 @@ class MainController(QObject):
         self.view.request_clustering.connect(self.clustering_controller.start_clustering)
         self.view.sample_cluster.connect(self.on_sample_cluster)
         self.view.sampling_parameters_changed.connect(self.on_sampling_parameters_changed)
+        self.view.annotation_method_changed.connect(self.on_annotation_method_changed)
         self.view.bulk_label_changed.connect(self.on_bulk_label_changed)
         self.view.crop_label_changed.connect(self.on_crop_label_changed)
         self.view.save_project_state_requested.connect(self.save_project)
@@ -107,6 +108,27 @@ class MainController(QObject):
     # -------------------------------------------------------------------------
     #                           CLUSTERING HANDLERS
     # -------------------------------------------------------------------------
+
+    @pyqtSlot(str)
+    def on_annotation_method_changed(self, method: str):
+        """
+        Instantiates the appropriate annotation generator based on the selected method,
+        and updates the clustering controller accordingly.
+        """
+        if method == "Local Maxima":
+            self.annotation_generator = LocalMaximaPointAnnotationGenerator(
+                filter_size=48, gaussian_sigma=4.0, use_gaussian=False
+            )
+        elif method == "Equidistant Spots":
+            self.annotation_generator = EquidistantPointAnnotationGenerator(grid_spacing=48)
+        else:
+            self.annotation_generator = LocalMaximaPointAnnotationGenerator(
+                filter_size=48, gaussian_sigma=4.0, use_gaussian=False
+            )
+            logging.warning("Unknown annotation method selected; defaulting to Local Maxima.")
+
+        self.clustering_controller.annotation_generator = self.annotation_generator
+        logging.info("Annotation generator updated to method: %s", method)
 
     @pyqtSlot(dict)
     def on_clusters_ready(self, clusters: Dict[int, List[Annotation]]):

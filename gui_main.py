@@ -165,7 +165,8 @@ def _show_startup_dialog(latest_autosave_file: str, controller) -> bool:
 
 def _create_main_window(clustered_crops_view: QDialog) -> QMainWindow:
     """
-    Creates and returns the main QMainWindow with a QTabWidget.
+    Creates and returns the main QMainWindow with a QTabWidget,
+    and centers the main window on the screen.
     """
     main_window = QMainWindow()
     tab_widget = QTabWidget()
@@ -174,6 +175,12 @@ def _create_main_window(clustered_crops_view: QDialog) -> QMainWindow:
     main_window.setCentralWidget(tab_widget)
     main_window.setWindowTitle("Guided Labelling Tool")
     main_window.resize(1920, 1080)
+
+    frame_geom = main_window.frameGeometry()
+    screen_center = QApplication.primaryScreen().availableGeometry().center()
+    frame_geom.moveCenter(screen_center)
+    main_window.move(frame_geom.topLeft())
+
     main_window.show()
     return main_window
 

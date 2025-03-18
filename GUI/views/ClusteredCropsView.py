@@ -8,7 +8,7 @@ from PyQt5.QtWidgets import (
     QWidget, QComboBox, QPushButton, QVBoxLayout, QLabel,
     QProgressBar, QGraphicsView, QGraphicsScene, QGridLayout,
     QGroupBox, QSizePolicy, QSplitter, QGraphicsItem, QApplication,
-    QHBoxLayout, QCheckBox, QScrollArea
+    QHBoxLayout, QScrollArea
 )
 
 from GUI.configuration.configuration import CLASS_COMPONENTS
@@ -90,23 +90,16 @@ class ClusteringControlsWidget(QGroupBox):
 class NavigationControlsWidget(QGroupBox):
     sample_cluster = pyqtSignal(int)
 
-    def __init__(self, auto_next: bool = False):
+    def __init__(self):
         super().__init__("Cluster Navigation")
-        self.auto_next_cluster = auto_next
         self._init_ui()
 
     def _init_ui(self):
         layout = QVBoxLayout()
-        # Auto-Next Checkbox
-        self.auto_next_checkbox = QCheckBox("Auto Next Cluster")
-        self.auto_next_checkbox.setChecked(self.auto_next_cluster)
-        self.auto_next_checkbox.stateChanged.connect(self.on_auto_next_toggle)
-        self.auto_next_checkbox.setFocusPolicy(Qt.NoFocus)
-        layout.addWidget(self.auto_next_checkbox)
 
         # Navigation Buttons and Combo Box
         nav_layout = QHBoxLayout()
-        self.prev_cluster_button = QPushButton("Previous")
+        self.prev_cluster_button = QPushButton("Previous (Backspace)")
         self.prev_cluster_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.prev_cluster_button.clicked.connect(self.on_prev_cluster)
         self.prev_cluster_button.setEnabled(False)
@@ -117,7 +110,7 @@ class NavigationControlsWidget(QGroupBox):
         self.cluster_combo.currentIndexChanged.connect(self.on_cluster_selected)
         self.cluster_combo.setFocusPolicy(Qt.NoFocus)
 
-        self.next_cluster_button = QPushButton("Next")
+        self.next_cluster_button = QPushButton("Next (Enter)")
         self.next_cluster_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.next_cluster_button.clicked.connect(self.on_next_cluster)
         self.next_cluster_button.setEnabled(False)
@@ -128,20 +121,7 @@ class NavigationControlsWidget(QGroupBox):
         nav_layout.addWidget(self.next_cluster_button)
         layout.addLayout(nav_layout)
 
-        # Navigation Hint
-        navigation_hint = QLabel(
-            "Shortcuts:\n"
-            "Enter = Next Cluster\n"
-            "Backspace = Previous Cluster\n"
-            "Shift + T = Toggle Auto Next"
-        )
-        navigation_hint.setWordWrap(True)
-        layout.addWidget(navigation_hint)
-
         self.setLayout(layout)
-
-    def on_auto_next_toggle(self, state):
-        self.auto_next_cluster = bool(state)
 
     def on_cluster_selected(self, index: int):
         cluster_id = self.cluster_combo.itemData(index)
@@ -236,7 +216,7 @@ class ClassLabelsWidget(QGroupBox):
     agree_with_model = pyqtSignal()
 
     def __init__(self):
-        super().__init__("Class Labels")
+        super().__init__("Labelling Controls")
         self._init_ui()
 
     def _init_ui(self):
@@ -287,7 +267,7 @@ class ClassLabelsWidget(QGroupBox):
         # Hint Label
         hint_label = QLabel(
             "Shortcuts:\n"
-            "1-9 = Class Labels\n"
+            "Number Keys 1-9 = Main Class Labels\n"
             "- = Unlabel\n"
             "? = Unsure\n"
             "! = Artifact\n"
@@ -421,12 +401,26 @@ class CropGraphicsView(QGraphicsView):
             super().wheelEvent(event)
 
 
+class AnnotationMethodWidget(QGroupBox):
+    # Emit the selected method as a string, e.g., "Local Maxima" or "Equidistant Spots"
+    annotation_method_changed = pyqtSignal(str)
+
+    def __init__(self, parent=None):
+        super().__init__("Annotation Method", parent)
+        layout = QVBoxLayout(self)
+        self.combo_box = QComboBox()
+        self.combo_box.addItems(["Local Uncertainty Maxima", "Equidistant Spots"])
+        self.combo_box.currentTextChanged.connect(self.annotation_method_changed.emit)
+        layout.addWidget(self.combo_box)
+
+
 # ---------------------------------------------------------------------------
 # Main ClusteredCropsView Class
 # ---------------------------------------------------------------------------
 class ClusteredCropsView(QWidget):
     # Aggregate signals from child widgets
     request_clustering = pyqtSignal()
+    annotation_method_changed = pyqtSignal(str)
     sample_cluster = pyqtSignal(int)
     sampling_parameters_changed = pyqtSignal(int, int)  # (cluster_id, crops_per_cluster)
     bulk_label_changed = pyqtSignal(int)  # class_id for all visible crops
@@ -441,7 +435,6 @@ class ClusteredCropsView(QWidget):
         super().__init__()
         self.zoom_level = 5
         self.selected_crops: List[dict] = []
-        self.auto_next_cluster = False
 
         self._init_ui()
         self.setFocusPolicy(Qt.StrongFocus)
@@ -472,12 +465,15 @@ class ClusteredCropsView(QWidget):
         control_panel = QWidget()
         control_panel_layout = QVBoxLayout(control_panel)
 
-        # Instantiate and add each modular widget
+        self.annotation_method_widget = AnnotationMethodWidget()
+        self.annotation_method_widget.annotation_method_changed.connect(self.annotation_method_changed.emit)
+        control_panel_layout.addWidget(self.annotation_method_widget)
+
         self.clustering_widget = ClusteringControlsWidget()
         self.clustering_widget.request_clustering.connect(self.request_clustering.emit)
         control_panel_layout.addWidget(self.clustering_widget)
 
-        self.navigation_widget = NavigationControlsWidget(auto_next=self.auto_next_cluster)
+        self.navigation_widget = NavigationControlsWidget()
         self.navigation_widget.sample_cluster.connect(self.sample_cluster.emit)
         control_panel_layout.addWidget(self.navigation_widget)
 
@@ -546,10 +542,6 @@ class ClusteredCropsView(QWidget):
             return
         if key == Qt.Key_Space:
             self.on_agree_with_model_clicked()
-            return
-        if key == Qt.Key_T and event.modifiers() == Qt.ShiftModifier:
-            self.auto_next_cluster = not self.auto_next_cluster
-            self.navigation_widget.auto_next_checkbox.setChecked(self.auto_next_cluster)
             return
         if key in (Qt.Key_Return, Qt.Key_Enter):
             self.navigation_widget.on_next_cluster()
@@ -719,9 +711,6 @@ class ClusteredCropsView(QWidget):
             logging.info(f"Assigning class {class_id} to current cluster.")
 
         self._label_all_visible_crops(class_id)
-
-        if self.auto_next_cluster:
-            self.navigation_widget.on_next_cluster()
         self.setFocus()
 
     def _label_all_visible_crops(self, class_id: Optional[int]):
