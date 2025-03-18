@@ -8,7 +8,7 @@ from PyQt5.QtCore import QObject, pyqtSignal, QThread, pyqtSlot, QThreadPool
 from GUI.configuration.configuration import CLASS_COMPONENTS
 from GUI.models.Annotation import Annotation
 from GUI.models.ImageDataModel import ImageDataModel
-from GUI.models.UncertaintyRegionSelector import UncertaintyRegionSelector
+from GUI.models.PointAnnotationGenerator import PointAnnotationGenerator
 from GUI.workers.ClusteringWorker import ClusteringWorker
 
 
@@ -19,10 +19,10 @@ class AnnotationExtractionWorker(QThread):
     progress = pyqtSignal(int)
     finished = pyqtSignal(list)
 
-    def __init__(self, model: ImageDataModel, region_selector: UncertaintyRegionSelector, parent=None):
+    def __init__(self, model: ImageDataModel, annotation_generator: PointAnnotationGenerator, parent=None):
         super().__init__(parent)
         self.model = model
-        self.region_selector = region_selector
+        self.annotation_generator = annotation_generator
 
     def run(self):
         annotations = []
@@ -50,7 +50,7 @@ class AnnotationExtractionWorker(QThread):
         if uncertainty_map is None or logits is None or filename is None:
             return annotations
 
-        logit_features, coords = self.region_selector.generate_point_labels(
+        logit_features, coords = self.annotation_generator.generate_annotations(
             uncertainty_map=uncertainty_map,
             logits=logits
         )
@@ -93,16 +93,16 @@ class ClusteringController(QObject):
     show_clustering_progress_bar = pyqtSignal()
     hide_clustering_progress_bar = pyqtSignal()
 
-    def __init__(self, model: ImageDataModel, region_selector: UncertaintyRegionSelector):
+    def __init__(self, model: ImageDataModel, annotation_generator: PointAnnotationGenerator):
         """
         Initializes the ClusteringController.
 
         :param model: An instance of ImageDataModel.
-        :param region_selector: An instance of UncertaintyRegionSelector.
+        :param annotation_generator: An instance of some annotation generator.
         """
         super().__init__()
         self.model = model
-        self.region_selector = region_selector
+        self.region_selector = annotation_generator
 
         self.clusters: Dict[int, List[Annotation]] = {}
         self.cluster_labels: Dict[int, str] = {}
@@ -317,7 +317,7 @@ class ClusteringController(QObject):
             logging.warning(f"Missing data for image index {image_index}. Skipping.")
             return annotations
 
-        logit_features, coords = self.region_selector.generate_point_labels(
+        logit_features, coords = self.region_selector.generate_annotations(
             uncertainty_map=uncertainty_map,
             logits=logits
         )

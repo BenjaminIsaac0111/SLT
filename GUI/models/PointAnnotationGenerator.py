@@ -2,10 +2,11 @@ import logging
 from typing import List, Tuple
 
 import numpy as np
+from numpy import ndarray
 from scipy.ndimage import gaussian_filter, maximum_filter
 
 
-class UncertaintyRegionSelector:
+class PointAnnotationGenerator:
     """
     The UncertaintyRegionSelector class identifies uncertain regions from an uncertainty map
     by selecting local maxima after optional Gaussian smoothing.
@@ -14,7 +15,7 @@ class UncertaintyRegionSelector:
     def __init__(
             self,
             filter_size: int = 48,
-            gaussian_sigma: float = 3.0,
+            gaussian_sigma: float = 4.0,
             edge_buffer: int = 64,
             use_gaussian: bool = False,
     ):
@@ -50,11 +51,11 @@ class UncertaintyRegionSelector:
         if not isinstance(self.use_gaussian, bool):
             raise ValueError("use_gaussian must be a boolean.")
 
-    def generate_point_labels(
+    def generate_annotations(
             self,
             uncertainty_map: np.ndarray,
             logits: np.ndarray,
-    ) -> Tuple[np.ndarray, List[Tuple[int, int]]]:
+    ) -> Tuple[ndarray, List[tuple]]:
         """
         Selects uncertain regions from the uncertainty map by identifying local maxima.
         Optionally applies Gaussian smoothing before selecting maxima.

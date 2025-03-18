@@ -11,7 +11,7 @@ from GUI.controllers.ImageProcessingController import ImageProcessingController
 from GUI.controllers.ProjectStateController import ProjectStateController
 from GUI.models.Annotation import Annotation
 from GUI.models.ImageDataModel import ImageDataModel
-from GUI.models.UncertaintyRegionSelector import UncertaintyRegionSelector
+from GUI.models.PointAnnotationGenerator import PointAnnotationGenerator
 from GUI.views.ClusteredCropsView import ClusteredCropsView
 
 
@@ -32,7 +32,7 @@ class MainController(QObject):
         super().__init__()
         self.image_data_model = model
         self.view = view
-        self.region_selector = UncertaintyRegionSelector()
+        self.region_selector = PointAnnotationGenerator()
 
         # Instantiate other controllers with the initial model
         self.clustering_controller = ClusteringController(self.image_data_model, self.region_selector)
@@ -41,7 +41,7 @@ class MainController(QObject):
 
         # Autosave timer initialization (do not start it yet)
         self.autosave_timer = QTimer()
-        self.autosave_timer.setInterval(60000)  # 60 seconds
+        self.autosave_timer.setInterval(30000)  # 30 seconds
         self.autosave_timer.timeout.connect(self.autosave_project_state)
 
         # Connect signals and slots
