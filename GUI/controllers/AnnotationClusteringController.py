@@ -4,6 +4,7 @@ from typing import Dict, List, Optional, Any
 
 import numpy as np
 from PyQt5.QtCore import QObject, pyqtSignal, QThread, pyqtSlot, QThreadPool
+from sklearn.utils.class_weight import compute_class_weight
 
 from GUI.configuration.configuration import CLASS_COMPONENTS
 from GUI.models.Annotation import Annotation
@@ -196,7 +197,9 @@ class AnnotationClusteringController(QObject):
 
     def compute_labeling_statistics(self):
         """
-        Computes and emits updated labeling statistics (counts, disagreements, etc.).
+        Computes and emits updated labeling statistics (counts, disagreements, etc.),
+        and computes class weights using sklearn's compute_class_weight, ignoring
+        special classes (-1, -2, -3).
         """
         clusters = self.get_clusters()
         total_annotations = 0
@@ -209,21 +212,24 @@ class AnnotationClusteringController(QObject):
         class_counts[-3] = 0  # Artifact
 
         disagreement_count = 0
+        all_labels = []  # For computing class weights
 
         for cluster_id, annotations in clusters.items():
             for anno in annotations:
                 total_annotations += 1
+                # Use -1 if class_id is None
                 assigned_class = anno.class_id if anno.class_id is not None else -1
+                all_labels.append(assigned_class)
 
                 if assigned_class not in class_counts:
                     class_counts[assigned_class] = 0
                 class_counts[assigned_class] += 1
 
-                # Count labeled (excluding -1, -2, -3)
+                # Count labeled (excluding special IDs)
                 if assigned_class not in (-1, -2, -3):
                     total_labeled += 1
 
-                # Check for disagreements if labeled
+                # Count disagreements if labeled
                 if anno.model_prediction:
                     model_class_id = self._get_class_id_from_prediction(anno.model_prediction)
                     if model_class_id is not None and assigned_class not in (-1, -2, -3):
@@ -234,12 +240,22 @@ class AnnotationClusteringController(QObject):
         if total_labeled > 0:
             agreement_percentage = ((total_labeled - disagreement_count) / total_labeled) * 100
 
+        # Filter out special labels (-1, -2, -3) before computing weights
+        filtered_labels = [label for label in all_labels if label not in (-1, -2, -3)]
+        class_weights = {}
+        if filtered_labels:
+            # Compute weights for the unique classes in filtered_labels
+            classes = np.unique(filtered_labels)
+            weights = compute_class_weight(class_weight='balanced', classes=classes, y=filtered_labels)
+            class_weights = dict(zip(classes, weights))
+
         statistics = {
             'total_annotations': total_annotations,
             'total_labeled': total_labeled,
             'class_counts': class_counts,
             'disagreement_count': disagreement_count,
             'agreement_percentage': agreement_percentage,
+            'class_weights': class_weights,  # Added class weights (excluding special classes)
         }
         logging.info(f"Labeling statistics computed: {statistics}")
         self.labeling_statistics_updated.emit(statistics)

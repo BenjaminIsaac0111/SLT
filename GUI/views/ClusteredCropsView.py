@@ -8,7 +8,7 @@ from PyQt5.QtWidgets import (
     QWidget, QComboBox, QPushButton, QVBoxLayout, QLabel,
     QProgressBar, QGraphicsView, QGraphicsScene, QGridLayout,
     QGroupBox, QSizePolicy, QSplitter, QGraphicsItem, QApplication,
-    QHBoxLayout, QScrollArea
+    QHBoxLayout, QScrollArea, QTableWidget, QTableWidgetItem, QHeaderView
 )
 
 from GUI.configuration.configuration import CLASS_COMPONENTS
@@ -343,59 +343,80 @@ class LabelingStatisticsWidget(QGroupBox):
     def __init__(self):
         super().__init__("Labeling Statistics")
         self._init_ui()
+        # Make the widget expand to use available space.
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
     def _init_ui(self):
         layout = QVBoxLayout()
-        self.class_counts_labels = {}
-        for class_id in sorted(CLASS_COMPONENTS.keys()):
-            class_name = CLASS_COMPONENTS[class_id]
-            label = QLabel(f"{class_name}: 0")
-            layout.addWidget(label)
-            self.class_counts_labels[class_id] = label
+        # Create a table for per-class statistics.
+        self.table = QTableWidget()
+        # Three columns: Class (with ID), Count, and Weight.
+        self.table.setColumnCount(3)
+        self.table.setHorizontalHeaderLabels(["Class (ID)", "Count", "Weight"])
+        # Set row count based on primary classes only.
+        num_primary = len(CLASS_COMPONENTS)
+        self.table.setRowCount(num_primary)
+        # Make the table fill available space.
+        self.table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        # Ensure that columns stretch to fill the available horizontal space.
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.Stretch)
+        layout.addWidget(self.table)
 
-        self.artifact_label = QLabel("Artifact: 0")
-        layout.addWidget(self.artifact_label)
-        self.unsure_label = QLabel("Unsure: 0")
-        layout.addWidget(self.unsure_label)
-        self.unlabeled_label = QLabel("Unlabeled: 0")
-        layout.addWidget(self.unlabeled_label)
-        self.disagreement_label = QLabel("Disagreements: 0")
-        layout.addWidget(self.disagreement_label)
-        self.total_annotations_label = QLabel("Total Annotations: 0")
-        layout.addWidget(self.total_annotations_label)
-        self.total_labeled_label = QLabel("Total Labeled Annotations: 0")
-        layout.addWidget(self.total_labeled_label)
+        # A label for overall summary statistics.
+        self.summary_label = QLabel("")
+        # Allow the summary label to expand horizontally.
+        self.summary_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.summary_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        layout.addWidget(self.summary_label)
 
         self.setLayout(layout)
 
     def update_statistics(self, statistics: dict):
-        total_annotations = statistics['total_annotations']
-        total_labeled = statistics['total_labeled']
-        class_counts = statistics['class_counts']
+        """
+        Update the table and summary label with new statistics.
+        Expects a statistics dict containing:
+         - 'total_annotations'
+         - 'total_labeled'
+         - 'class_counts': dict mapping class id to count
+         - 'disagreement_count'
+         - 'agreement_percentage'
+         - 'class_weights': dict mapping class id (for primary classes) to weight
+        """
+        # Update table rows for primary classes (from CLASS_COMPONENTS)
+        primary_ids = sorted(CLASS_COMPONENTS.keys())
+        for row, cid in enumerate(primary_ids):
+            class_name = CLASS_COMPONENTS[cid]
+            count = statistics.get('class_counts', {}).get(cid, 0)
+            # Only show weights for primary classes (ignore special ones).
+            weight = statistics.get('class_weights', {}).get(cid, None)
+            weight_str = f"{weight:.2f}" if weight is not None else "N/A"
+
+            # Create/update the table items.
+            class_item = QTableWidgetItem(f"{class_name} ({cid})")
+            count_item = QTableWidgetItem(str(count))
+            weight_item = QTableWidgetItem(weight_str)
+
+            self.table.setItem(row, 0, class_item)
+            self.table.setItem(row, 1, count_item)
+            self.table.setItem(row, 2, weight_item)
+
+        # Format summary for special classes and overall counts.
+        special_counts = []
+        for special_id, label in [(-1, "Unlabeled"), (-2, "Unsure"), (-3, "Artifact")]:
+            cnt = statistics.get('class_counts', {}).get(special_id, 0)
+            special_counts.append(f"{label}: {cnt}")
+        total_annotations = statistics.get('total_annotations', 0)
+        total_labeled = statistics.get('total_labeled', 0)
         disagreement_count = statistics.get('disagreement_count', 0)
         agreement_percentage = statistics.get('agreement_percentage', 0.0)
 
-        self.total_annotations_label.setText(f"Total Annotations: {total_annotations}")
-        self.total_labeled_label.setText(f"Total Labeled Annotations: {total_labeled}")
-
-        for cid, count in class_counts.items():
-            if cid in CLASS_COMPONENTS:
-                label = self.class_counts_labels.get(cid)
-                if label:
-                    cname = CLASS_COMPONENTS[cid]
-                    label.setText(f"{cname} ({cid}): {count}")
-            elif cid == -1:
-                self.unlabeled_label.setText(f"Unlabeled: {count}")
-            elif cid == -2:
-                self.unsure_label.setText(f"Unsure: {count}")
-            elif cid == -3:
-                self.artifact_label.setText(f"Artifact: {count}")
-
-        self.disagreement_label.setText(
-            f"Disagreements: {disagreement_count} (Agreement: {agreement_percentage:.2f}%)"
+        summary_text = (
+                f"Total Annotations: {total_annotations} | Total Labeled: {total_labeled}\n" +
+                ", ".join(special_counts) + "\n" +
+                f"Disagreements: {disagreement_count} (Agreement: {agreement_percentage:.2f}%)"
         )
-
-
+        self.summary_label.setText(summary_text)
 # ---------------------------------------------------------------------------
 # Custom Graphics View for Crop Display and Zoom Handling
 # ---------------------------------------------------------------------------
@@ -485,7 +506,6 @@ class ClusteredCropsView(QWidget):
         control_panel_layout = QVBoxLayout(control_panel)
 
         self.annotation_method_widget = AnnotationMethodWidget()
-        self.annotation_method_widget.annotation_method_changed.connect(self.annotation_method_changed.emit)
         control_panel_layout.addWidget(self.annotation_method_widget)
 
         self.clustering_widget = ClusteringControlsWidget()
@@ -512,12 +532,9 @@ class ClusteredCropsView(QWidget):
         self.file_ops_widget.export_annotations_requested.connect(self.on_export_annotations)
         control_panel_layout.addWidget(self.file_ops_widget)
 
-        control_panel_layout.addStretch()
-
+        # Remove the extra stretches and add the statistics widget with a stretch factor.
         self.statistics_widget = LabelingStatisticsWidget()
-        control_panel_layout.addWidget(self.statistics_widget)
-
-        control_panel_layout.addStretch()
+        control_panel_layout.addWidget(self.statistics_widget, stretch=1)
 
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
