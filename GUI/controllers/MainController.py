@@ -32,7 +32,7 @@ class MainController(QObject):
         super().__init__()
         self.image_data_model = model
         self.view = view
-        self.annotation_generator = LocalMaximaPointAnnotationGenerator()
+        self.annotation_generator = LocalMaximaPointAnnotationGenerator()  # Default
 
         # Instantiate other controllers with the initial model
         self.clustering_controller = AnnotationClusteringController(self.image_data_model, self.annotation_generator)

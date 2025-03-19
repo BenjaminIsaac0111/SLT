@@ -35,7 +35,7 @@ class StartupDialog(QDialog):
     load a project, or start a new project.
     """
 
-    def __init__(self, autosave_file_exists: bool):
+    def __init__(self, autosave_file_exists: bool, icon_path: str):
         super().__init__()
         self.selected_option = None  # Track the user’s selection
         self.project_file = None
@@ -43,6 +43,11 @@ class StartupDialog(QDialog):
 
         self.setWindowTitle("Welcome to Smart Annotation Tool")
         self.setFixedSize(400, 200)
+
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
+        else:
+            logging.warning(f"Icon file not found at {icon_path}. Proceeding without an icon.")
 
         layout = QVBoxLayout()
         layout.addWidget(QLabel("Please choose how you'd like to start:", alignment=Qt.AlignCenter))
@@ -137,14 +142,14 @@ def _check_latest_autosave() -> str:
     return latest_autosave_file
 
 
-def _show_startup_dialog(latest_autosave_file: str, controller) -> bool:
+def _show_startup_dialog(latest_autosave_file: str, controller, icon_path: str) -> bool:
     """
     Shows the StartupDialog and handles the user's choice.
     Returns False if the user canceled the dialog (exiting the app).
     """
     from GUI.models.ImageDataModel import ImageDataModel  # Imported here to avoid circular imports
 
-    dialog = StartupDialog(autosave_file_exists=bool(latest_autosave_file))
+    dialog = StartupDialog(autosave_file_exists=bool(latest_autosave_file), icon_path=icon_path)
     if dialog.exec_() != QDialog.Accepted:
         return False  # User canceled
 
@@ -208,7 +213,7 @@ def main():
     latest_autosave_file = _check_latest_autosave()
 
     # 7) Show startup dialog
-    if not _show_startup_dialog(latest_autosave_file, global_cluster_controller):
+    if not _show_startup_dialog(latest_autosave_file, global_cluster_controller, icon_path):
         sys.exit()  # Exit if user canceled or no selection
 
     # 8) Create and show the main window
