@@ -38,21 +38,37 @@ class ClusteringControlsWidget(QGroupBox):
     def _init_ui(self):
         layout = QVBoxLayout()
 
-        # Clustering Button
+        # Clustering Button remains unchanged.
         self.clustering_button = QPushButton("Start Clustering")
         self.clustering_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.clustering_button.clicked.connect(self.request_clustering.emit)
         self.clustering_button.setFocusPolicy(Qt.NoFocus)
         layout.addWidget(self.clustering_button)
 
+        # Create a container for the progress bar and overlaid label
+        progress_container = QWidget()
+        progress_container_layout = QGridLayout(progress_container)
+        progress_container_layout.setContentsMargins(0, 0, 0, 0)
+        progress_container_layout.setSpacing(0)
+
         # Clustering Progress Bar
         self.clustering_progress_bar = QProgressBar()
         self.clustering_progress_bar.setValue(0)
         self.clustering_progress_bar.setVisible(False)
-        self.clustering_progress_bar.setFormat("Clustering: %p%")
-        layout.addWidget(self.clustering_progress_bar)
+        # Hide its own text since we will use the overlay label instead.
+        self.clustering_progress_bar.setTextVisible(False)
+        progress_container_layout.addWidget(self.clustering_progress_bar, 0, 0)
 
-        # Annotation Progress Bar
+        # Overlay QLabel for displaying text
+        self.clustering_progress_label = QLabel("Clustering annotations")
+        self.clustering_progress_label.setAlignment(Qt.AlignCenter)
+        self.clustering_progress_label.setStyleSheet("background: transparent; color: black;")
+        self.clustering_progress_label.setVisible(False)
+        progress_container_layout.addWidget(self.clustering_progress_label, 0, 0)
+
+        layout.addWidget(progress_container)
+
+        # Annotation Progress Bar (unchanged)
         self.annotation_progress_bar = QProgressBar()
         self.annotation_progress_bar.setValue(0)
         self.annotation_progress_bar.setVisible(False)
@@ -63,16 +79,19 @@ class ClusteringControlsWidget(QGroupBox):
 
     def update_clustering_progress(self, progress: int):
         self.clustering_progress_bar.setVisible(True)
+        self.clustering_progress_label.setVisible(True)
         if progress == -1:
+            # Use a determinate range but indicate waiting
             self.clustering_progress_bar.setRange(0, 0)
-            self.clustering_progress_bar.setFormat("Clustering, please wait...")
+            self.clustering_progress_label.setText("Clustering annotations, please wait...")
         else:
             self.clustering_progress_bar.setRange(0, 100)
             self.clustering_progress_bar.setValue(progress)
-            self.clustering_progress_bar.setFormat(f"Clustering: {progress}%")
+            self.clustering_progress_label.setText(f"Clustering annotations: {progress}%")
 
     def hide_clustering_progress(self):
         self.clustering_progress_bar.setVisible(False)
+        self.clustering_progress_label.setVisible(False)
 
     def update_annotation_progress(self, progress: int):
         if not self.annotation_progress_bar.isVisible():
@@ -580,6 +599,7 @@ class ClusteredCropsView(QWidget):
 
     def hide_clustering_progress_bar(self):
         self.clustering_widget.clustering_progress_bar.setVisible(False)
+        self.clustering_widget.clustering_progress_label.setVisible(False)
 
     def update_clustering_progress_bar(self, progress: int):
         self.clustering_widget.update_clustering_progress(progress)
