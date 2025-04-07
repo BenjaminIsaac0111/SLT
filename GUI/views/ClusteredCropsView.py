@@ -756,6 +756,9 @@ class ClusteredCropsView(QWidget):
         for crop in self.selected_crops:
             annotation: Annotation = crop['annotation']
             annotation.class_id = class_id
+            # If unlabeling, restore adjusted_uncertainty from original uncertainty.
+            if class_id == -1:
+                annotation.adjusted_uncertainty = annotation.uncertainty
         self.bulk_label_changed.emit(class_id)
         self.arrange_crops()
 

@@ -11,7 +11,7 @@ from PyQt5.QtCore import QObject, pyqtSignal, pyqtSlot, QThreadPool
 from GUI.models.ImageDataModel import ImageDataModel
 from GUI.workers.AutosaveWorker import AutosaveWorker
 
-TEMP_DIR = os.path.join(tempfile.gettempdir(), 'my_application_temp')
+TEMP_DIR = os.path.join(tempfile.gettempdir(), 'SLT_Temp')
 os.makedirs(TEMP_DIR, exist_ok=True)
 
 

@@ -3,8 +3,11 @@ import logging
 from collections import OrderedDict
 from typing import Optional, Dict, List
 
+import numpy as np
 from PyQt5.QtCore import QObject, pyqtSlot, QTimer, QCoreApplication
 from PyQt5.QtWidgets import QFileDialog, QMessageBox
+from sklearn.mixture import GaussianMixture
+from sklearn.preprocessing import StandardScaler
 
 from GUI.controllers.AnnotationClusteringController import AnnotationClusteringController
 from GUI.controllers.ImageProcessingController import ImageProcessingController
@@ -30,6 +33,8 @@ class MainController(QObject):
         :param view: An instance of the ClusteredCropsView.
         """
         super().__init__()
+        self.feature_matrix = None
+        self.gmm = None
         self.image_data_model = model
         self.view = view
         self.annotation_generator = LocalMaximaPointAnnotationGenerator()  # Default
@@ -130,12 +135,16 @@ class MainController(QObject):
         self.clustering_controller.annotation_generator = self.annotation_generator
         logging.info("Annotation generator updated to method: %s", method)
 
-    @pyqtSlot(dict)
-    def on_clusters_ready(self, clusters: Dict[int, List[Annotation]]):
+    @pyqtSlot(dict, object, object)
+    def on_clusters_ready(self, clusters: Dict[int, List[Annotation]], clustering_model, feature_matrix):
         """
         Handles when clusters are ready after clustering finishes.
         Updates the ImageProcessingController with the new clusters.
         """
+        self.set_feature_matrix(feature_matrix)
+        if isinstance(clustering_model, GaussianMixture):
+            self.gmm = clustering_model
+            logging.info("GMM has been set in Main Controller.")
         self.image_processing_controller.set_clusters(clusters)
         cluster_info = self.clustering_controller.generate_cluster_info()
         first_cluster_id = list(cluster_info.keys())[0] if cluster_info else None
@@ -190,24 +199,221 @@ class MainController(QObject):
 
     @pyqtSlot(int)
     def on_bulk_label_changed(self, class_id: int):
-        """
-        Handles a bulk update for all visible crops' labels.
-        Refreshes UI and saves the project state.
-
-        :param class_id: The new class ID to apply.
-        """
         selected_cluster_id = self.view.get_selected_cluster_id()
         clusters = self.clustering_controller.get_clusters()
-        annotations = clusters.get(selected_cluster_id, [])
+        labeled_annotations = clusters.get(selected_cluster_id, [])
 
-        for anno in annotations[:self.image_processing_controller.crops_per_cluster]:
-            anno.class_id = class_id
+        if class_id == -1:
+            for anno in labeled_annotations[:self.image_processing_controller.crops_per_cluster]:
+                anno.class_id = class_id
+                anno.adjusted_uncertainty = anno.uncertainty
+        else:
+            for anno in labeled_annotations[:self.image_processing_controller.crops_per_cluster]:
+                anno.class_id = class_id
+                # Initially set to zero; uncertainty will be updated via propagation.
+                anno.adjusted_uncertainty = 0.0
 
-        cluster_info = self.clustering_controller.generate_cluster_info()
-        self.view.populate_cluster_selection(cluster_info, selected_cluster_id=selected_cluster_id)
+        # Propagate uncertainty for both unlabeling and labeling.
+        self.propagate_labeling_changes(alpha=0.7)
 
-        self.autosave_project_state()
+        # Continue with statistics and cluster selection as before.
         self.clustering_controller.compute_labeling_statistics()
+        next_cluster_id = self.select_next_cluster_based_on_greedy_metric()
+        if next_cluster_id is not None:
+            updated_cluster_info = self.clustering_controller.generate_cluster_info()
+            self.view.populate_cluster_selection(updated_cluster_info, selected_cluster_id=next_cluster_id)
+            self.on_sample_cluster(next_cluster_id)
+        else:
+            logging.info("No next cluster recommendation available.")
+        self.autosave_project_state()
+
+    def _get_all_annotations(self) -> List[Annotation]:
+        """
+        Retrieves all annotations from the current clusters.
+        Returns:
+            A list of Annotation objects from all clusters.
+        """
+        clusters = self.clustering_controller.get_clusters()
+        return [anno for cluster in clusters.values() for anno in cluster]  # Flatten
+
+    def _update_annotation_uncertainties(self, updated_uncertainties: np.ndarray):
+        """
+        Updates each annotation's adjusted_uncertainty attribute using updated_uncertainties.
+        The annotations are retrieved from the current clusters.
+        """
+        all_annos = self._get_all_annotations()
+        for anno, new_u in zip(all_annos, updated_uncertainties):
+            anno.adjusted_uncertainty = new_u
+
+    def _get_component_for_cluster(self, cluster_id: int) -> int:
+        """
+        Determines the GMM component index corresponding to the given cluster ID.
+        This mapping can be established by comparing the cluster center (from MiniBatchKMeans)
+        with the means of the GMM components.
+
+        For simplicity, this placeholder returns cluster_id directly.
+        In practice, adjust this method based on your actual mapping.
+        """
+        return cluster_id
+
+    def set_feature_matrix(self, feature_matrix: np.ndarray):
+        """
+        Sets the feature matrix used for uncertainty propagation.
+        """
+        self.feature_matrix = feature_matrix
+        logging.info("Feature matrix has been updated in the Main Controller.")
+
+    def propagate_uncertainty_with_gmm(self, X, uncertainties, labeled_cluster_center, alpha=0.7):
+        """
+        Propagates uncertainty reduction using a GMM with improvements in feature scaling,
+        component mapping, and clipping of updated uncertainties.
+
+        Parameters:
+            X : np.ndarray
+                The original feature matrix (concatenation of logit features and uncertainty).
+            uncertainties : np.ndarray
+                Array of original uncertainty values for each candidate.
+            labeled_cluster_center : np.ndarray
+                The center (or representative feature vector) of the manually labeled cluster.
+            alpha : float, default=0.7
+                Propagation strength hyperparameter.
+
+        Returns:
+            np.ndarray
+                Updated uncertainties after propagation, clipped to valid bounds.
+        """
+        # 1. Standardize the feature matrix to ensure features are on the same scale.
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X)
+
+        # 2. Compute posterior probabilities using the scaled features.
+        responsibilities = self.gmm.predict_proba(X_scaled)  # shape: (n_samples, n_components)
+
+        # 3. Map the labeled cluster to the closest GMM component.
+        # Compare the labeled cluster center to the GMM means (scaled as well).
+        gmm_means_scaled = scaler.transform(self.gmm.means_)
+        distances = np.linalg.norm(gmm_means_scaled - labeled_cluster_center, axis=1)
+        labeled_component = np.argmin(distances)
+
+        # 4. Retrieve the posterior probability for the labeled component.
+        p_labeled = responsibilities[:, labeled_component]
+
+        # 5. Update uncertainties with the propagation rule.
+        updated_uncertainties = uncertainties * (1 - alpha * p_labeled)
+
+        # 6. Clip the updated uncertainties to ensure they remain within [0, original uncertainty].
+        updated_uncertainties = np.clip(updated_uncertainties, 0, uncertainties)
+
+        return updated_uncertainties
+
+    def propagate_labeling_changes(self, alpha=0.7):
+        """
+        Updates uncertainties across all annotations based on the current manual labels.
+        Both bulk and individual label changes should call this method to propagate uncertainty.
+        """
+        # Retrieve the flattened list of current annotations from clusters.
+        all_annos = self._get_all_annotations()
+
+        # Recompute the feature matrix for the currently active annotations.
+        local_feature_matrix = np.array([
+            np.concatenate([anno.logit_features, [anno.uncertainty]])
+            for anno in all_annos
+        ], dtype=np.float32)
+
+        # Build the current uncertainties array.
+        current_uncertainties = np.array([anno.uncertainty for anno in all_annos])
+
+        # Determine the GMM component corresponding to the selected cluster.
+        selected_cluster_id = self.view.get_selected_cluster_id()
+        labeled_component = self._get_component_for_cluster(selected_cluster_id)
+
+        # Propagate uncertainty using the locally computed feature matrix.
+        updated_uncertainties = self.propagate_uncertainty_with_gmm(
+            local_feature_matrix, current_uncertainties, labeled_component, alpha
+        )
+
+        # Update annotations with the new uncertainties.
+        self._update_annotation_uncertainties(updated_uncertainties)
+
+    def debug_analyze_uncertainty_propagation(self):
+        """
+        Debugging method to analyze uncertainty propagation.
+
+        Computes summary statistics and generates plots (a histogram and a scatter plot)
+        to compare original uncertainties versus adjusted uncertainties.
+        """
+        # Import matplotlib only when needed
+        import matplotlib.pyplot as plt
+        import numpy as np
+
+        # Retrieve all current annotations (flattened list from clusters)
+        annotations = self._get_all_annotations()
+        if not annotations:
+            logging.warning("No annotations available for uncertainty propagation analysis.")
+            return
+
+        # Extract original and updated uncertainties
+        original_uncertainties = np.array([anno.uncertainty for anno in annotations])
+        updated_uncertainties = np.array([anno.adjusted_uncertainty for anno in annotations])
+
+        # Compute summary statistics
+        mean_orig = np.mean(original_uncertainties)
+        std_orig = np.std(original_uncertainties)
+        mean_updated = np.mean(updated_uncertainties)
+        std_updated = np.std(updated_uncertainties)
+        correlation = np.corrcoef(original_uncertainties, updated_uncertainties)[0, 1]
+
+        # Print summary statistics to the console
+        print("=== Uncertainty Propagation Debug Summary ===")
+        print(f"Original Uncertainty: Mean = {mean_orig:.4f}, Std = {std_orig:.4f}")
+        print(f"Updated  Uncertainty: Mean = {mean_updated:.4f}, Std = {std_updated:.4f}")
+        print(f"Correlation (Original vs. Updated): {correlation:.4f}")
+
+        # Plot histograms of original and updated uncertainties
+        plt.figure(figsize=(12, 5))
+
+        plt.subplot(1, 2, 1)
+        plt.hist(original_uncertainties, bins=30, alpha=0.7, label="Original")
+        plt.hist(updated_uncertainties, bins=30, alpha=0.7, label="Updated")
+        plt.xlabel("Uncertainty")
+        plt.ylabel("Frequency")
+        plt.title("Histogram of Uncertainties")
+        plt.legend()
+
+        # Scatter plot comparing original and updated uncertainties
+        plt.subplot(1, 2, 2)
+        plt.scatter(original_uncertainties, updated_uncertainties, alpha=0.5)
+        plt.xlabel("Original Uncertainty")
+        plt.ylabel("Updated Uncertainty")
+        plt.title("Original vs. Updated Uncertainty")
+
+        plt.tight_layout()
+        plt.show()
+
+    def select_next_cluster_based_on_greedy_metric(self) -> Optional[int]:
+        """
+        Computes an aggregated uncertainty score for each cluster based on the adjusted uncertainties,
+        and returns the ID of the cluster with the highest average adjusted uncertainty.
+
+        This serves as the greedy criterion for selecting the next cluster to label.
+
+        Returns:
+            The cluster ID with the highest mean adjusted uncertainty, or None if no clusters exist.
+        """
+        clusters = self.clustering_controller.get_clusters()
+        best_score = -float("inf")
+        best_cluster_id = None
+
+        for cid, annotations in clusters.items():
+            if annotations:  # Only consider non-empty clusters
+                # Compute the mean adjusted uncertainty for the cluster.
+                aggregated_uncertainty = np.mean([anno.adjusted_uncertainty for anno in annotations])
+                if aggregated_uncertainty > best_score:
+                    best_score = aggregated_uncertainty
+                    best_cluster_id = cid
+
+        logging.info(f"Next recommended cluster: {best_cluster_id} with aggregated uncertainty {best_score:.4f}")
+        return best_cluster_id
 
     @pyqtSlot(dict, int)
     def on_crop_label_changed(self, crop_data: dict, class_id: int):
@@ -236,6 +442,8 @@ class MainController(QObject):
         else:
             logging.warning(f"Annotation for image {image_index}, coord {coord} "
                             f"not found in cluster {cluster_id}")
+
+        self.propagate_labeling_changes(alpha=0.7)
 
         cluster_info = self.clustering_controller.generate_cluster_info()
         self.view.populate_cluster_selection(cluster_info, selected_cluster_id=cluster_id)

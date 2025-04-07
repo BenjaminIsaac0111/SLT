@@ -6,6 +6,7 @@ import numba
 import numpy as np
 from PyQt5.QtCore import QRunnable, QObject, pyqtSignal
 from sklearn.cluster import AgglomerativeClustering, MiniBatchKMeans
+from sklearn.mixture import GaussianMixture
 
 from GUI.models.Annotation import Annotation
 
@@ -61,7 +62,7 @@ class ClusteringWorkerSignals(QObject):
     """
     Signals container for ClusteringWorker.
     """
-    clustering_finished = pyqtSignal(dict)  # Emitted when clustering is complete
+    clustering_finished = pyqtSignal(dict, object, object)  # Emitted when clustering is complete
     progress_updated = pyqtSignal(int)  # Emitted to update progress (e.g., -1 means stage done)
 
 
@@ -80,7 +81,7 @@ class AnnotationClusteringWorker(QRunnable):
             self,
             annotations: List[Annotation],
             subsample_ratio: float = 1.0,
-            cluster_method: str = "minibatchkmeans",
+            cluster_method: str = "gaussianmixture",
             cluster_size: int = 6
     ):
         super().__init__()
@@ -88,8 +89,9 @@ class AnnotationClusteringWorker(QRunnable):
 
         self.annotations = annotations
         self.subsample_ratio = subsample_ratio
-        self.cluster_method = cluster_method.lower()  # 'agglomerative' or 'minibatchkmeans'
+        self.cluster_method = cluster_method.lower()  # 'agglomerative' or 'minibatchkmeans' or 'gaussianmixture'
         self.cluster_size = cluster_size
+        self.clustering_model = None
 
     def run(self):
         """
@@ -118,7 +120,7 @@ class AnnotationClusteringWorker(QRunnable):
         self.signals.progress_updated.emit(-1)  # Indicate start of core-set selection
 
         # ------------------------ Core-Set Selection -------------------------
-        core_set_size = min(10000, len(feature_matrix))
+        core_set_size = min(5000, len(feature_matrix))  # Cap coreset size to min
         logging.info(f"Core-set size: {core_set_size}")
         subsample_size = max(int(len(feature_matrix) * self.subsample_ratio), core_set_size)
 
@@ -138,16 +140,26 @@ class AnnotationClusteringWorker(QRunnable):
         try:
             if self.cluster_method == 'minibatchkmeans':
                 num_clusters = max(1, int(len(core_set_features) * 0.1))
-                clustering = MiniBatchKMeans(n_clusters=num_clusters, random_state=42, batch_size=4096)
-                core_set_labels = clustering.fit_predict(core_set_features)
+                clustering_model = MiniBatchKMeans(n_clusters=num_clusters, random_state=42, batch_size=4096)
+                core_set_labels = clustering_model.fit_predict(core_set_features)
                 cluster_centers = None
 
             elif self.cluster_method == 'agglomerative':
-                clustering = AgglomerativeClustering(n_clusters=None,
+                clustering_model = AgglomerativeClustering(n_clusters=None,
                                                      distance_threshold=5.0,
                                                      linkage='ward')
-                core_set_labels = clustering.fit_predict(core_set_features)
+                core_set_labels = clustering_model.fit_predict(core_set_features)
                 cluster_centers = None
+
+            elif self.cluster_method == 'gaussianmixture':
+                # Determine the number of components based on core set size
+                n_components = max(1, int(len(core_set_features) * 0.15))
+                logging.info(f"Using Gaussian Mixture Model with {n_components} components.")
+                clustering_model = GaussianMixture(n_components=n_components, random_state=42)
+                clustering_model.fit(core_set_features)
+                core_set_labels = clustering_model.predict(core_set_features)
+                cluster_centers = None
+
             else:
                 raise ValueError(f"Unknown clustering method: {self.cluster_method}")
 
@@ -158,6 +170,7 @@ class AnnotationClusteringWorker(QRunnable):
             logging.error(f"Clustering failed: {e}")
             self.signals.clustering_finished.emit({})
             return
+
 
         # Assign cluster IDs to the subset annotations
         for label, anno in zip(core_set_labels, core_set_annotations):
@@ -170,7 +183,7 @@ class AnnotationClusteringWorker(QRunnable):
         final_clusters_dict = self.downsample_clusters(clusters_dict, cluster_centers)
 
         self.signals.progress_updated.emit(-1)  # Final progress
-        self.signals.clustering_finished.emit(final_clusters_dict)
+        self.signals.clustering_finished.emit(final_clusters_dict, clustering_model, core_set_features)
 
     @staticmethod
     def group_annotations_by_cluster(annotations: List[Annotation]) -> Dict[int, List[Annotation]]:

@@ -83,7 +83,7 @@ class AnnotationClusteringController(QObject):
     # ----- Signals -----
     clustering_started = pyqtSignal()
     clustering_progress = pyqtSignal(int)
-    clusters_ready = pyqtSignal(dict)
+    clusters_ready = pyqtSignal(dict, object, object)
     labeling_statistics_updated = pyqtSignal(dict)
     annotation_progress = pyqtSignal(int)
     annotation_progress_finished = pyqtSignal()
@@ -153,7 +153,7 @@ class AnnotationClusteringController(QObject):
         clustering_worker = AnnotationClusteringWorker(
             annotations=all_annotations,
             subsample_ratio=1.0,
-            cluster_method="minibatchkmeans"
+            cluster_method="gaussianmixture"
         )
 
         # Connect signals from the worker's .signals object
@@ -163,15 +163,15 @@ class AnnotationClusteringController(QObject):
         # Submit the worker to the thread pool
         self.threadpool.start(clustering_worker)
 
-    @pyqtSlot(dict)
-    def on_clustering_finished(self, clusters: Dict[int, List[Annotation]]):
+    @pyqtSlot(dict, object, object)
+    def on_clustering_finished(self, clusters: Dict[int, List[Annotation]], clustering_model, feature_matrix):
         """
         Called when the clustering worker finishes.
         """
         self.clustering_in_progress = False
 
         self.clusters = clusters
-        self.clusters_ready.emit(clusters)
+        self.clusters_ready.emit(clusters, clustering_model, feature_matrix)
         self.hide_clustering_progress_bar.emit()
         self.compute_labeling_statistics()
 

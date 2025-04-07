@@ -52,10 +52,10 @@ class StartupDialog(QDialog):
         layout = QVBoxLayout()
         layout.addWidget(QLabel("Please choose how you'd like to start:", alignment=Qt.AlignCenter))
 
-        if autosave_file_exists:
-            continue_button = QPushButton("Continue Last Session")
-            continue_button.clicked.connect(self._continue_last_session)
-            layout.addWidget(continue_button)
+        self.continue_button = QPushButton("Continue Last Session")
+        self.continue_button.setEnabled(autosave_file_exists)
+        self.continue_button.clicked.connect(self._continue_last_session)
+        layout.addWidget(self.continue_button)
 
         load_button = QPushButton("Load Project")
         load_button.clicked.connect(self._load_project)
@@ -125,7 +125,7 @@ def _check_latest_autosave() -> str:
     """
     Checks for the latest autosave file in a temp directory; returns its path or None.
     """
-    temp_dir = os.path.join(tempfile.gettempdir(), 'my_application_temp')
+    temp_dir = os.path.join(tempfile.gettempdir(), 'SLT_Temp')
     os.makedirs(temp_dir, exist_ok=True)
 
     autosave_files = [
