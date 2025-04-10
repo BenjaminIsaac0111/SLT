@@ -7,7 +7,6 @@ import numpy as np
 from PyQt5.QtCore import QObject, pyqtSlot, QTimer, QCoreApplication
 from PyQt5.QtWidgets import QFileDialog, QMessageBox
 from sklearn.mixture import GaussianMixture
-from sklearn.preprocessing import StandardScaler
 
 from GUI.controllers.AnnotationClusteringController import AnnotationClusteringController
 from GUI.controllers.ImageProcessingController import ImageProcessingController
@@ -15,6 +14,7 @@ from GUI.controllers.ProjectStateController import ProjectStateController
 from GUI.models.Annotation import Annotation
 from GUI.models.ImageDataModel import ImageDataModel
 from GUI.models.PointAnnotationGenerator import LocalMaximaPointAnnotationGenerator, EquidistantPointAnnotationGenerator
+from GUI.models.UncertaintyPropagator import DistanceBasedPropagator
 from GUI.views.ClusteredCropsView import ClusteredCropsView
 
 
@@ -34,7 +34,6 @@ class MainController(QObject):
         """
         super().__init__()
         self.feature_matrix = None
-        self.gmm = None
         self.image_data_model = model
         self.view = view
         self.annotation_generator = LocalMaximaPointAnnotationGenerator()  # Default
@@ -176,8 +175,7 @@ class MainController(QObject):
         :param cluster_id: The ID of the selected cluster.
         :param crops_per_cluster: The updated number of crops per cluster.
         """
-        logging.info(f"Sampling parameters changed: "
-                     f"Cluster {cluster_id}, {crops_per_cluster} crops per cluster.")
+        logging.info(f"Sampling parameters changed: Cluster {cluster_id}, {crops_per_cluster} crops per cluster.")
         self.image_processing_controller.set_crops_per_cluster(crops_per_cluster, cluster_id)
 
     def handle_sampling_parameters_changed(self):
@@ -214,7 +212,7 @@ class MainController(QObject):
                 anno.adjusted_uncertainty = 0.0
 
         # Propagate uncertainty for both unlabeling and labeling.
-        self.propagate_labeling_changes(alpha=0.7)
+        self.propagate_labeling_changes()
 
         # Continue with statistics and cluster selection as before.
         self.clustering_controller.compute_labeling_statistics()
@@ -243,18 +241,9 @@ class MainController(QObject):
         """
         all_annos = self._get_all_annotations()
         for anno, new_u in zip(all_annos, updated_uncertainties):
+            if anno.adjusted_uncertainty != new_u:
+                print('Updated')
             anno.adjusted_uncertainty = new_u
-
-    def _get_component_for_cluster(self, cluster_id: int) -> int:
-        """
-        Determines the GMM component index corresponding to the given cluster ID.
-        This mapping can be established by comparing the cluster center (from MiniBatchKMeans)
-        with the means of the GMM components.
-
-        For simplicity, this placeholder returns cluster_id directly.
-        In practice, adjust this method based on your actual mapping.
-        """
-        return cluster_id
 
     def set_feature_matrix(self, feature_matrix: np.ndarray):
         """
@@ -263,77 +252,138 @@ class MainController(QObject):
         self.feature_matrix = feature_matrix
         logging.info("Feature matrix has been updated in the Main Controller.")
 
-    def propagate_uncertainty_with_gmm(self, X, uncertainties, labeled_cluster_center, alpha=0.7):
-        """
-        Propagates uncertainty reduction using a GMM with improvements in feature scaling,
-        component mapping, and clipping of updated uncertainties.
-
-        Parameters:
-            X : np.ndarray
-                The original feature matrix (concatenation of logit features and uncertainty).
-            uncertainties : np.ndarray
-                Array of original uncertainty values for each candidate.
-            labeled_cluster_center : np.ndarray
-                The center (or representative feature vector) of the manually labeled cluster.
-            alpha : float, default=0.7
-                Propagation strength hyperparameter.
-
-        Returns:
-            np.ndarray
-                Updated uncertainties after propagation, clipped to valid bounds.
-        """
-        # 1. Standardize the feature matrix to ensure features are on the same scale.
-        scaler = StandardScaler()
-        X_scaled = scaler.fit_transform(X)
-
-        # 2. Compute posterior probabilities using the scaled features.
-        responsibilities = self.gmm.predict_proba(X_scaled)  # shape: (n_samples, n_components)
-
-        # 3. Map the labeled cluster to the closest GMM component.
-        # Compare the labeled cluster center to the GMM means (scaled as well).
-        gmm_means_scaled = scaler.transform(self.gmm.means_)
-        distances = np.linalg.norm(gmm_means_scaled - labeled_cluster_center, axis=1)
-        labeled_component = np.argmin(distances)
-
-        # 4. Retrieve the posterior probability for the labeled component.
-        p_labeled = responsibilities[:, labeled_component]
-
-        # 5. Update uncertainties with the propagation rule.
-        updated_uncertainties = uncertainties * (1 - alpha * p_labeled)
-
-        # 6. Clip the updated uncertainties to ensure they remain within [0, original uncertainty].
-        updated_uncertainties = np.clip(updated_uncertainties, 0, uncertainties)
-
-        return updated_uncertainties
-
-    def propagate_labeling_changes(self, alpha=0.7):
+    def propagate_labeling_changes(self):
         """
         Updates uncertainties across all annotations based on the current manual labels.
-        Both bulk and individual label changes should call this method to propagate uncertainty.
+        Delegates the propagation logic to the UncertaintyPropagator service.
         """
-        # Retrieve the flattened list of current annotations from clusters.
         all_annos = self._get_all_annotations()
 
-        # Recompute the feature matrix for the currently active annotations.
         local_feature_matrix = np.array([
-            np.concatenate([anno.logit_features, [anno.uncertainty]])
+            np.concatenate([anno.logit_features])
             for anno in all_annos
         ], dtype=np.float32)
 
-        # Build the current uncertainties array.
-        current_uncertainties = np.array([anno.uncertainty for anno in all_annos])
+        current_uncertainties = np.array([anno.adjusted_uncertainty for anno in all_annos], dtype=np.float32)
 
-        # Determine the GMM component corresponding to the selected cluster.
-        selected_cluster_id = self.view.get_selected_cluster_id()
-        labeled_component = self._get_component_for_cluster(selected_cluster_id)
+        labeled_indices = np.where(np.array([anno.class_id != -1 for anno in all_annos]))[0]
+        labeled_features = local_feature_matrix[labeled_indices]
 
-        # Propagate uncertainty using the locally computed feature matrix.
-        updated_uncertainties = self.propagate_uncertainty_with_gmm(
-            local_feature_matrix, current_uncertainties, labeled_component, alpha
+        propagator = DistanceBasedPropagator(labeled_features=labeled_features)
+
+        updated_uncertainties = propagator.propagate(
+            feature_matrix=local_feature_matrix,
+            uncertainties=current_uncertainties
         )
 
-        # Update annotations with the new uncertainties.
         self._update_annotation_uncertainties(updated_uncertainties)
+
+    def debug_grid_search_propagation(self):
+        """
+        Analyzes the sensitivity of the distance-based uncertainty propagation
+        to the hyperparameters `lambda_param` and `threshold`.
+
+        For each (lambda, threshold) pair in a pre-defined grid, the method:
+          1. Propagates uncertainties using a DistanceBasedPropagator.
+          2. Computes summary statistics:
+             - Reduction Ratio: the average fraction by which uncertainties are reduced.
+             - Correlation: Pearson correlation between original and updated uncertainties.
+          3. Plots two heatmaps showing how these metrics vary with the hyperparameters.
+
+        This analysis helps determine if (and how) the propagation is behaving
+        as expected after labeling one cluster.
+        """
+        import numpy as np
+        import matplotlib.pyplot as plt
+
+        # Retrieve all annotations from clusters.
+        annotations = self._get_all_annotations()
+        if not annotations:
+            print("No annotations available for grid search propagation analysis.")
+            return
+
+        # Construct the feature matrix from each annotation's logit features.
+        local_feature_matrix = np.array(
+            [np.concatenate([anno.logit_features]) for anno in annotations],
+            dtype=np.float32
+        )
+        # Obtain the current (original/adjusted) uncertainties.
+        current_uncertainties = np.array(
+            [anno.adjusted_uncertainty for anno in annotations],
+            dtype=np.float32
+        )
+        # Create a labeled mask based on manual labeling (class_id != -1 implies a label).
+        labeled_mask = np.array(
+            [anno.class_id != -1 for anno in annotations],
+            dtype=np.float64
+        ).reshape(-1, 1)
+
+        # Define grid search ranges for lambda_param and threshold.
+        lambda_values = np.linspace(0.1, 2.0, 10)
+        threshold_values = np.linspace(1.0, 10.0, 10)
+
+        # Set up matrices to store computed metrics.
+        reduction_matrix = np.zeros((len(lambda_values), len(threshold_values)))
+        correlation_matrix = np.zeros((len(lambda_values), len(threshold_values)))
+
+        # Grid search: Evaluate propagation for each (lambda_param, threshold) pair.
+        for i, lam in enumerate(lambda_values):
+            for j, thresh in enumerate(threshold_values):
+                propagator = DistanceBasedPropagator(
+                    labeled_features=labeled_mask,
+                    lambda_param=lam,
+                    threshold=thresh
+                )
+                # Propagate uncertainties using the current hyperparameters.
+                updated_uncertainties = propagator.propagate(
+                    feature_matrix=local_feature_matrix,
+                    uncertainties=current_uncertainties
+                )
+                # Compute the reduction ratio as the average relative decrease in uncertainty.
+                reduction_ratio = np.mean((current_uncertainties - updated_uncertainties) / current_uncertainties)
+                # Compute the correlation coefficient between the original and updated uncertainties.
+                corr = np.corrcoef(current_uncertainties, updated_uncertainties)[0, 1]
+
+                reduction_matrix[i, j] = reduction_ratio
+                correlation_matrix[i, j] = corr
+
+        # Plot heatmaps to visualize the hyperparameter effects.
+        plt.figure(figsize=(12, 5))
+
+        # Heatmap for the mean uncertainty reduction ratio.
+        plt.subplot(1, 2, 1)
+        plt.imshow(
+            reduction_matrix,
+            aspect='auto',
+            origin='lower',
+            extent=[threshold_values[0], threshold_values[-1], lambda_values[0], lambda_values[-1]]
+        )
+        plt.colorbar(label='Mean Uncertainty Reduction Ratio')
+        plt.xlabel('Threshold')
+        plt.ylabel('Lambda (Decay Parameter)')
+        plt.title('Reduction Ratio across Hyperparameter Grid')
+
+        # Heatmap for the correlation between original and updated uncertainties.
+        plt.subplot(1, 2, 2)
+        plt.imshow(
+            correlation_matrix,
+            aspect='auto',
+            origin='lower',
+            extent=[threshold_values[0], threshold_values[-1], lambda_values[0], lambda_values[-1]]
+        )
+        plt.colorbar(label='Correlation (Original vs. Updated)')
+        plt.xlabel('Threshold')
+        plt.ylabel('Lambda (Decay Parameter)')
+        plt.title('Uncertainty Correlation across Hyperparameter Grid')
+
+        plt.tight_layout()
+        plt.show()
+
+        # Optionally, print summary statistics for further inspection.
+        for i, lam in enumerate(lambda_values):
+            for j, thresh in enumerate(threshold_values):
+                print(f"Lambda={lam:.2f}, Threshold={thresh:.2f}: Reduction Ratio={reduction_matrix[i, j]:.4f}, "
+                      f"Correlation={correlation_matrix[i, j]:.4f}")
 
     def debug_analyze_uncertainty_propagation(self):
         """
@@ -440,10 +490,9 @@ class MainController(QObject):
                 )
                 break
         else:
-            logging.warning(f"Annotation for image {image_index}, coord {coord} "
-                            f"not found in cluster {cluster_id}")
+            logging.warning(f"Annotation for image {image_index}, coord {coord} not found in cluster {cluster_id}")
 
-        self.propagate_labeling_changes(alpha=0.7)
+        self.propagate_labeling_changes()
 
         cluster_info = self.clustering_controller.generate_cluster_info()
         self.view.populate_cluster_selection(cluster_info, selected_cluster_id=cluster_id)

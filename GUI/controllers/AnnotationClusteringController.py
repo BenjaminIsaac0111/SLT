@@ -275,6 +275,10 @@ class AnnotationClusteringController(QObject):
                 'num_images': len({a.filename for a in annotations}),
                 'labeled_percentage': labeled_percentage,
                 'label': self.cluster_labels.get(cluster_id, ''),
+                'average_adjusted_uncertainty': np.mean(
+                    [annotation.adjusted_uncertainty for annotation in annotations]),
+                'average_uncertainty': np.mean([annotation.adjusted_uncertainty for annotation in annotations]),
+
             }
         return cluster_info
 
