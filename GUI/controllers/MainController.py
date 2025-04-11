@@ -86,6 +86,7 @@ class MainController(QObject):
         self.view.load_project_state_requested.connect(self.load_project)
         self.view.save_project_requested.connect(self.save_project)
         self.view.save_project_as_requested.connect(self.save_project_as)
+        self.view.navigation_widget.next_recommended_cluster_requested.connect(self.on_next_recommended_cluster)
 
         # --- ClusteringController -> View ---
         self.clustering_controller.show_clustering_progress_bar.connect(self.view.show_clustering_progress_bar)
@@ -208,22 +209,77 @@ class MainController(QObject):
         else:
             for anno in labeled_annotations[:self.image_processing_controller.crops_per_cluster]:
                 anno.class_id = class_id
-                # Initially set to zero; uncertainty will be updated via propagation.
                 anno.adjusted_uncertainty = 0.0
 
-        # Propagate uncertainty for both unlabeling and labeling.
+        # Propagate changes and update statistics
         self.propagate_labeling_changes()
-
-        # Continue with statistics and cluster selection as before.
         self.clustering_controller.compute_labeling_statistics()
+
+        cluster_info = self.clustering_controller.generate_cluster_info()
+        self.view.populate_cluster_selection(cluster_info, selected_cluster_id=selected_cluster_id)
+
+        # Compute the next recommended cluster in the background
         next_cluster_id = self.select_next_cluster_based_on_greedy_metric()
         if next_cluster_id is not None:
+            self.view.set_recommended_cluster(next_cluster_id)
+            logging.info(f"Next recommended cluster set to {next_cluster_id} based on updated uncertainties.")
+        else:
+            logging.info("No next cluster recommendation available.")
+
+        self.autosave_project_state()
+
+    @pyqtSlot(dict, int)
+    def on_crop_label_changed(self, crop_data: dict, class_id: int):
+        """
+        Handles when a class label is set for an individual crop.
+        """
+        cluster_id = int(crop_data['cluster_id'])
+        image_index = int(crop_data['image_index'])
+        coord = tuple(crop_data['coord'])
+
+        clusters = self.clustering_controller.get_clusters()
+        annotations = clusters.get(cluster_id, [])
+
+        # Update the annotation matching the provided crop data.
+        for anno in annotations:
+            if anno.image_index == image_index and anno.coord == coord:
+                anno.class_id = class_id
+                label_action = "unlabeled" if class_id == -1 else "labeled"
+                logging.debug(
+                    f"Annotation for image {image_index}, coord {coord} {label_action} with class_id {class_id}"
+                )
+                break
+        else:
+            logging.warning(f"Annotation for image {image_index}, coord {coord} not found in cluster {cluster_id}")
+
+        # Propagate uncertainty changes
+        self.propagate_labeling_changes()
+
+        # Recompute labeling statistics
+        self.clustering_controller.compute_labeling_statistics()
+
+        cluster_info = self.clustering_controller.generate_cluster_info()
+        self.view.populate_cluster_selection(cluster_info, selected_cluster_id=cluster_id)
+
+        next_cluster_id = self.select_next_cluster_based_on_greedy_metric()
+        if next_cluster_id is not None:
+            self.view.set_recommended_cluster(next_cluster_id)
+            logging.info(f"Next recommended cluster updated to {next_cluster_id} after individual crop label change.")
+        else:
+            logging.info("No next recommended cluster available after individual crop label change.")
+
+        self.autosave_project_state()
+
+    @pyqtSlot()
+    def on_next_recommended_cluster(self):
+        next_cluster_id = self.select_next_cluster_based_on_greedy_metric()
+        if next_cluster_id is not None:
+            # Update view to display the recommended cluster
             updated_cluster_info = self.clustering_controller.generate_cluster_info()
             self.view.populate_cluster_selection(updated_cluster_info, selected_cluster_id=next_cluster_id)
             self.on_sample_cluster(next_cluster_id)
         else:
-            logging.info("No next cluster recommendation available.")
-        self.autosave_project_state()
+            logging.info("No next recommended cluster found.")
 
     def _get_all_annotations(self) -> List[Annotation]:
         """
@@ -241,8 +297,6 @@ class MainController(QObject):
         """
         all_annos = self._get_all_annotations()
         for anno, new_u in zip(all_annos, updated_uncertainties):
-            if anno.adjusted_uncertainty != new_u:
-                print('Updated')
             anno.adjusted_uncertainty = new_u
 
     def set_feature_matrix(self, feature_matrix: np.ndarray):
@@ -423,8 +477,9 @@ class MainController(QObject):
         plt.figure(figsize=(12, 5))
 
         plt.subplot(1, 2, 1)
-        plt.hist(original_uncertainties, bins=30, alpha=0.7, label="Original")
-        plt.hist(updated_uncertainties, bins=30, alpha=0.7, label="Updated")
+        bins = np.linspace(0, 0.05, 30)  # example range
+        plt.hist(original_uncertainties, bins=bins, alpha=0.7, label="Original")
+        plt.hist(updated_uncertainties, bins=bins, alpha=0.7, label="Updated")
         plt.xlabel("Uncertainty")
         plt.ylabel("Frequency")
         plt.title("Histogram of Uncertainties")
@@ -455,8 +510,7 @@ class MainController(QObject):
         best_cluster_id = None
 
         for cid, annotations in clusters.items():
-            if annotations:  # Only consider non-empty clusters
-                # Compute the mean adjusted uncertainty for the cluster.
+            if annotations:
                 aggregated_uncertainty = np.mean([anno.adjusted_uncertainty for anno in annotations])
                 if aggregated_uncertainty > best_score:
                     best_score = aggregated_uncertainty
@@ -464,41 +518,6 @@ class MainController(QObject):
 
         logging.info(f"Next recommended cluster: {best_cluster_id} with aggregated uncertainty {best_score:.4f}")
         return best_cluster_id
-
-    @pyqtSlot(dict, int)
-    def on_crop_label_changed(self, crop_data: dict, class_id: int):
-        """
-        Handles when a class label is set for an individual crop.
-
-        :param crop_data: Dictionary containing crop information.
-        :param class_id: The new class ID assigned.
-        """
-        cluster_id = int(crop_data['cluster_id'])
-        image_index = int(crop_data['image_index'])
-        coord = tuple(crop_data['coord'])
-
-        clusters = self.clustering_controller.get_clusters()
-        annotations = clusters.get(cluster_id, [])
-
-        for anno in annotations:
-            if anno.image_index == image_index and anno.coord == coord:
-                anno.class_id = class_id
-                label_action = "unlabeled" if class_id == -1 else "labeled"
-                logging.debug(
-                    f"Annotation for image {image_index}, coord {coord} "
-                    f"{label_action} with class_id {class_id}"
-                )
-                break
-        else:
-            logging.warning(f"Annotation for image {image_index}, coord {coord} not found in cluster {cluster_id}")
-
-        self.propagate_labeling_changes()
-
-        cluster_info = self.clustering_controller.generate_cluster_info()
-        self.view.populate_cluster_selection(cluster_info, selected_cluster_id=cluster_id)
-
-        self.autosave_project_state()
-        self.clustering_controller.compute_labeling_statistics()
 
     # -------------------------------------------------------------------------
     #                           PROJECT STATE

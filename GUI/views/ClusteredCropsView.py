@@ -108,6 +108,7 @@ class ClusteringControlsWidget(QGroupBox):
 # ---------------------------------------------------------------------------
 class NavigationControlsWidget(QGroupBox):
     sample_cluster = pyqtSignal(int)
+    next_recommended_cluster_requested = pyqtSignal()
 
     def __init__(self):
         super().__init__("Cluster Navigation")
@@ -119,28 +120,29 @@ class NavigationControlsWidget(QGroupBox):
         # Navigation Buttons and Combo Box
         nav_layout = QHBoxLayout()
         self.prev_cluster_button = QPushButton("Previous (Backspace)")
-        self.prev_cluster_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.prev_cluster_button.clicked.connect(self.on_prev_cluster)
         self.prev_cluster_button.setEnabled(False)
-        self.prev_cluster_button.setFocusPolicy(Qt.NoFocus)
 
         self.cluster_combo = QComboBox()
-        self.cluster_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.cluster_combo.currentIndexChanged.connect(self.on_cluster_selected)
-        self.cluster_combo.setFocusPolicy(Qt.NoFocus)
 
         self.next_cluster_button = QPushButton("Next (Enter)")
-        self.next_cluster_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.next_cluster_button.clicked.connect(self.on_next_cluster)
         self.next_cluster_button.setEnabled(False)
-        self.next_cluster_button.setFocusPolicy(Qt.NoFocus)
 
         nav_layout.addWidget(self.prev_cluster_button)
         nav_layout.addWidget(self.cluster_combo)
         nav_layout.addWidget(self.next_cluster_button)
         layout.addLayout(nav_layout)
 
+        self.next_recommended_button = QPushButton("Go to Recommended Cluster")
+        self.next_recommended_button.clicked.connect(self.on_next_recommended)
+        layout.addWidget(self.next_recommended_button)
+
         self.setLayout(layout)
+
+    def on_next_recommended(self):
+        self.next_recommended_cluster_requested.emit()
 
     def on_cluster_selected(self, index: int):
         cluster_id = self.cluster_combo.itemData(index)
@@ -785,6 +787,9 @@ class ClusteredCropsView(QWidget):
             if cname == model_prediction:
                 return cid
         return None
+
+    def set_recommended_cluster(self, cluster_id: int):
+        self.navigation_widget.next_recommended_button.setText(f"Go to Recommended Cluster (ID: {cluster_id})")
 
     def update_labeling_statistics(self, statistics: dict):
         self.statistics_widget.update_statistics(statistics)

@@ -84,7 +84,7 @@ class AnnotationClusteringWorker(QRunnable):
             self,
             annotations: List[Annotation],
             subsample_ratio: float = 1.0,
-            cluster_method: str = "gaussianmixture",
+            cluster_method: str = "minibatchkmean",
             cluster_size: int = 6
     ):
         super().__init__()

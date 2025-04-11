@@ -277,7 +277,7 @@ class AnnotationClusteringController(QObject):
                 'label': self.cluster_labels.get(cluster_id, ''),
                 'average_adjusted_uncertainty': np.mean(
                     [annotation.adjusted_uncertainty for annotation in annotations]),
-                'average_uncertainty': np.mean([annotation.adjusted_uncertainty for annotation in annotations]),
+                'average_uncertainty': np.mean([annotation.uncertainty for annotation in annotations]),
 
             }
         return cluster_info
