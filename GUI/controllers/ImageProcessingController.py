@@ -5,7 +5,7 @@ from PyQt5.QtCore import QObject, pyqtSignal, QThreadPool, pyqtSlot, QPoint
 from PyQt5.QtGui import QPixmap, QPainter, QPen, QColor, QImage
 
 from GUI.models.Annotation import Annotation
-from GUI.models.ImageDataModel import ImageDataModel
+from GUI.models.ImageDataModel import BaseImageDataModel
 from GUI.models.ImageProcessor import ImageProcessor
 from GUI.workers.ImageProcessingWorker import ImageProcessingWorker
 
@@ -108,7 +108,7 @@ class ImageProcessingController(QObject):
     crop_loading_started = pyqtSignal()
     crop_loading_finished = pyqtSignal()
 
-    def __init__(self, model: ImageDataModel):
+    def __init__(self, model: BaseImageDataModel):
         """
         :param model: An ImageDataModel instance for fetching image data.
         """

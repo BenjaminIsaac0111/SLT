@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import logging
 from collections import OrderedDict
 from typing import Dict, List, Optional, Any
@@ -8,7 +9,8 @@ from sklearn.utils.class_weight import compute_class_weight
 
 from GUI.configuration.configuration import CLASS_COMPONENTS
 from GUI.models.Annotation import Annotation
-from GUI.models.ImageDataModel import ImageDataModel
+# Use unified interface
+from GUI.models.ImageDataModel import BaseImageDataModel
 from GUI.workers.AnnotationClusteringWorker import AnnotationClusteringWorker
 
 
@@ -19,13 +21,13 @@ class AnnotationExtractionWorker(QThread):
     progress = pyqtSignal(int)
     finished = pyqtSignal(list)
 
-    def __init__(self, model: ImageDataModel, annotation_generator: None, parent=None):
+    def __init__(self, model: BaseImageDataModel, annotation_generator: Any, parent=None):
         super().__init__(parent)
-        self.model = model
+        self.model: BaseImageDataModel = model
         self.annotation_generator = annotation_generator
 
     def run(self):
-        annotations = []
+        annotations: List[Annotation] = []
         total_images = self.model.get_number_of_images()
         for idx in range(total_images):
             image_data = self.model.get_image_data(idx)
@@ -42,7 +44,7 @@ class AnnotationExtractionWorker(QThread):
         """
         Extracts annotations from a single image.
         """
-        annotations = []
+        annotations: List[Annotation] = []
         uncertainty_map = image_data.get('uncertainty')
         logits = image_data.get('logits')
         filename = image_data.get('filename')
@@ -60,11 +62,10 @@ class AnnotationExtractionWorker(QThread):
                 filename=filename,
                 coord=coord,
                 logit_features=logit_feature,
-                class_id=-1,  # Default to unlabeled
+                class_id=-1,
                 image_index=image_index,
                 uncertainty=uncertainty_map[tuple(coord)],
                 cluster_id=None,
-                # Map the max logit index to a class name
                 model_prediction=CLASS_COMPONENTS.get(np.argmax(logit_feature), "None")
             )
             annotations.append(anno)
@@ -74,34 +75,24 @@ class AnnotationExtractionWorker(QThread):
 
 class AnnotationClusteringController(QObject):
     """
-    ClusteringController handles the end-to-end flow:
+    ClusteringController handles:
       1) Annotation extraction
       2) Clustering
-      3) Labeling statistics updates
+      3) Labeling statistics
     """
 
-    # ----- Signals -----
     clustering_started = pyqtSignal()
     clustering_progress = pyqtSignal(int)
     clusters_ready = pyqtSignal(dict, object, object)
     labeling_statistics_updated = pyqtSignal(dict)
     annotation_progress = pyqtSignal(int)
     annotation_progress_finished = pyqtSignal()
-    clustering_progress_bar_visible = pyqtSignal(bool)
-
-    # Additional signals for show/hide in the UI
     show_clustering_progress_bar = pyqtSignal()
     hide_clustering_progress_bar = pyqtSignal()
 
-    def __init__(self, model: ImageDataModel, annotation_generator):
-        """
-        Initializes the ClusteringController.
-
-        :param model: An instance of ImageDataModel.
-        :param annotation_generator: An instance of some annotation generator.
-        """
+    def __init__(self, model: BaseImageDataModel, annotation_generator: Any):
         super().__init__()
-        self.model = model
+        self.model: BaseImageDataModel = model
         self.annotation_generator = annotation_generator
 
         self.clusters: Dict[int, List[Annotation]] = {}
@@ -109,24 +100,14 @@ class AnnotationClusteringController(QObject):
         self.crops_per_cluster = 100
 
         self.clustering_in_progress = False
-
         self.annotation_extraction_worker: Optional[AnnotationExtractionWorker] = None
-
         self.threadpool = QThreadPool.globalInstance()
-
-    # -------------------------------------------------------------------------
-    #                         PUBLIC SLOTS & METHODS
-    # -------------------------------------------------------------------------
 
     @pyqtSlot()
     def start_clustering(self):
-        """
-        Begins the clustering process, starting with annotation extraction.
-        """
         if self.clustering_in_progress:
-            logging.warning("Clustering is already running.")
+            logging.warning("Clustering already running.")
             return
-
         logging.info("Clustering initiated.")
         self.clustering_in_progress = True
         self.clustering_started.emit()
@@ -134,10 +115,6 @@ class AnnotationClusteringController(QObject):
 
     @pyqtSlot(list)
     def on_annotation_extraction_finished(self, all_annotations: List[Annotation]):
-        """
-        Called when the annotation extraction worker is done.
-        Then we launch the clustering step.
-        """
         self.annotation_progress.emit(100)
         self.annotation_progress_finished.emit()
 
@@ -147,29 +124,18 @@ class AnnotationClusteringController(QObject):
         self._start_clustering_with_annotations(all_annotations)
 
     def _start_clustering_with_annotations(self, all_annotations: List[Annotation]):
-        """
-        Creates and starts the QRunnable-based ClusteringWorker.
-        """
-        clustering_worker = AnnotationClusteringWorker(
+        worker = AnnotationClusteringWorker(
             annotations=all_annotations,
             subsample_ratio=1.0,
             cluster_method="gaussianmixture"
         )
-
-        # Connect signals from the worker's .signals object
-        clustering_worker.signals.clustering_finished.connect(self.on_clustering_finished)
-        clustering_worker.signals.progress_updated.connect(self.clustering_progress.emit)
-
-        # Submit the worker to the thread pool
-        self.threadpool.start(clustering_worker)
+        worker.signals.clustering_finished.connect(self.on_clustering_finished)
+        worker.signals.progress_updated.connect(self.clustering_progress.emit)
+        self.threadpool.start(worker)
 
     @pyqtSlot(dict, object, object)
     def on_clustering_finished(self, clusters: Dict[int, List[Annotation]], clustering_model, feature_matrix):
-        """
-        Called when the clustering worker finishes.
-        """
         self.clustering_in_progress = False
-
         self.clusters = clusters
         self.clusters_ready.emit(clusters, clustering_model, feature_matrix)
         self.hide_clustering_progress_bar.emit()

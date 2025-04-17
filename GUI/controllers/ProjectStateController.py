@@ -8,7 +8,7 @@ from typing import Optional, List
 
 from PyQt5.QtCore import QObject, pyqtSignal, pyqtSlot, QThreadPool
 
-from GUI.models.ImageDataModel import ImageDataModel
+from GUI.models.ImageDataModel import BaseImageDataModel
 from GUI.workers.AutosaveWorker import AutosaveWorker
 
 TEMP_DIR = os.path.join(tempfile.gettempdir(), 'SLT_Temp')
@@ -33,7 +33,7 @@ class ProjectStateController(QObject):
     # -------------------------------------------------------------------------
     #                                INIT
     # -------------------------------------------------------------------------
-    def __init__(self, model: ImageDataModel):
+    def __init__(self, model: BaseImageDataModel):
         """
         :param model: The ImageDataModel in use.
         """

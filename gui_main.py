@@ -1,7 +1,10 @@
+#!/usr/bin/env python3
 import logging
 import os
 import sys
 import tempfile
+from pathlib import Path
+from typing import Optional
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QIcon
@@ -10,6 +13,10 @@ from PyQt5.QtWidgets import (
     QVBoxLayout, QLabel, QPushButton, QFileDialog, QMessageBox
 )
 
+# Import factory for both HDF5 and SQLite backends
+from GUI.models.ImageDataModel import create_image_data_model
+
+# Enable high DPI scaling before QApplication instantiation
 QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
 QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
 
@@ -19,12 +26,9 @@ def setup_logging():
     Configures the logging settings for the application.
     """
     logging.basicConfig(
-        level=logging.DEBUG,  # Set the logging level to DEBUG
+        level=logging.DEBUG,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.StreamHandler(sys.stdout)  # Logs to console
-            # Additional handlers (e.g., FileHandler) can be added as needed
-        ]
+        handlers=[logging.StreamHandler(sys.stdout)]
     )
     logging.debug("Logging has been configured.")
 
@@ -37,9 +41,9 @@ class StartupDialog(QDialog):
 
     def __init__(self, autosave_file_exists: bool, icon_path: str):
         super().__init__()
-        self.selected_option = None  # Track the user’s selection
+        self.selected_option = None
         self.project_file = None
-        self.hdf5_file = None
+        self.database = None
 
         self.setWindowTitle("Welcome to Smart Annotation Tool")
         self.setFixedSize(400, 200)
@@ -50,7 +54,9 @@ class StartupDialog(QDialog):
             logging.warning(f"Icon file not found at {icon_path}. Proceeding without an icon.")
 
         layout = QVBoxLayout()
-        layout.addWidget(QLabel("Please choose how you'd like to start:", alignment=Qt.AlignCenter))
+        layout.addWidget(
+            QLabel("Please choose how you'd like to start:", alignment=Qt.AlignCenter)
+        )
 
         self.continue_button = QPushButton("Continue Last Session")
         self.continue_button.setEnabled(autosave_file_exists)
@@ -73,12 +79,11 @@ class StartupDialog(QDialog):
 
     def _load_project(self):
         options = QFileDialog.Options()
-        # Allow compressed and uncompressed JSON files
         project_file, _ = QFileDialog.getOpenFileName(
             self,
             "Load Project",
             "",
-            "Compressed JSON Files (*.json.gz);;JSON Files (*.json);;All Files (*)",
+            "Compressed JSON Files (*.json.gz);;All Files (*)",
             options=options
         )
         if project_file:
@@ -88,19 +93,19 @@ class StartupDialog(QDialog):
 
     def _start_new_project(self):
         options = QFileDialog.Options()
-        hdf5_file, _ = QFileDialog.getOpenFileName(
+        data_file, _ = QFileDialog.getOpenFileName(
             self,
-            "Select HDF5 File",
+            "Select Data File",
             "",
-            "HDF5 Files (*.h5 *.hdf5);;All Files (*)",
+            "HDF5 & SQLite Files (*.h5;*.hdf5;*.sqlite;*.db);;All Files (*)",
             options=options
         )
-        if hdf5_file:
+        if data_file:
             self.selected_option = "start_new"
-            self.hdf5_file = hdf5_file
+            self.database = data_file
             self.accept()
         else:
-            QMessageBox.warning(self, "Warning", "No HDF5 file selected.")
+            QMessageBox.warning(self, "Warning", "No data file selected.")
 
 
 def _initialize_qt_app() -> QApplication:
@@ -113,7 +118,7 @@ def _initialize_qt_app() -> QApplication:
 
 def _set_app_icon(app: QApplication, icon_path: str):
     """
-    Tries to set the application icon; logs a warning if the file doesn't exist.
+    Tries to set the application icon; logs a warning if missing.
     """
     if os.path.exists(icon_path):
         app.setWindowIcon(QIcon(icon_path))
@@ -121,105 +126,99 @@ def _set_app_icon(app: QApplication, icon_path: str):
         logging.warning(f"Icon file not found at {icon_path}. Proceeding without an icon.")
 
 
-def _check_latest_autosave() -> str:
+def _check_latest_autosave() -> Optional[str]:
     """
-    Checks for the latest autosave file in a temp directory; returns its path or None.
+    Returns the path to the latest autosave JSON or None.
     """
     temp_dir = os.path.join(tempfile.gettempdir(), 'SLT_Temp')
     os.makedirs(temp_dir, exist_ok=True)
-
     autosave_files = [
         f for f in os.listdir(temp_dir)
         if f.startswith('project_autosave') and f.endswith('.json.gz')
     ]
-
     if not autosave_files:
         return None
+    autosave_files.sort(
+        key=lambda f: os.path.getmtime(os.path.join(temp_dir, f)),
+        reverse=True
+    )
+    return os.path.join(temp_dir, autosave_files[0])
 
-    # Sort by modification time (descending)
-    autosave_files.sort(key=lambda f: os.path.getmtime(os.path.join(temp_dir, f)), reverse=True)
-    latest_autosave_file = os.path.join(temp_dir, autosave_files[0])
-    return latest_autosave_file
+
+# ------------------------------------------------------------------ helpers
+def _backend_from_path(path: str) -> str:
+    ext = Path(path).suffix.lower()
+    if ext in {".h5", ".hdf5"}:
+        return "hdf5"
+    if ext in {".sqlite", ".db"}:
+        return "sqlite"
+    raise ValueError(f"Unsupported data file type: {ext}")
 
 
-def _show_startup_dialog(latest_autosave_file: str, controller, icon_path: str) -> bool:
+def _show_startup_dialog(latest_autosave_file: Optional[str], controller, icon_path: str) -> bool:
     """
-    Shows the StartupDialog and handles the user's choice.
-    Returns False if the user canceled the dialog (exiting the app).
+    Shows startup dialog and sets up the model accordingly.
+    Returns False if the user cancels.
     """
-    from GUI.models.ImageDataModel import ImageDataModel  # Imported here to avoid circular imports
 
     dialog = StartupDialog(autosave_file_exists=bool(latest_autosave_file), icon_path=icon_path)
     if dialog.exec_() != QDialog.Accepted:
-        return False  # User canceled
+        return False
 
     if dialog.selected_option == "continue_last" and latest_autosave_file:
         controller.project_state_controller.load_project_state(latest_autosave_file)
     elif dialog.selected_option == "load_project":
-        project_file = dialog.project_file
-        controller.project_state_controller.load_project_state(project_file)
+        controller.project_state_controller.load_project_state(dialog.project_file)
     elif dialog.selected_option == "start_new":
-        hdf5_file_path = dialog.hdf5_file
-        model = ImageDataModel(hdf5_file_path, 'variance')
-        controller.set_model(model)
+        data_path = dialog.database
+        project_state = {
+            "data_backend": _backend_from_path(data_path),
+            "data_path": data_path,
+            "uncertainty": "bald",
+            "clusters": {},  # empty project
+        }
+        controller.set_model(create_image_data_model(project_state))
     else:
-        return False  # No valid selection or canceled
+        return False
 
     return True
 
 
 def _create_main_window(clustered_crops_view: QDialog) -> QMainWindow:
     """
-    Creates and returns the main QMainWindow with a QTabWidget,
-    and centers the main window on the screen.
+    Creates and returns the main QMainWindow.
     """
     main_window = QMainWindow()
     tab_widget = QTabWidget()
     tab_widget.addTab(clustered_crops_view, "Clustered Crops")
-
     main_window.setCentralWidget(tab_widget)
     main_window.setWindowTitle("Guided Labelling Tool")
     main_window.resize(1920, 1080)
-
     frame_geom = main_window.frameGeometry()
     screen_center = QApplication.primaryScreen().availableGeometry().center()
     frame_geom.moveCenter(screen_center)
     main_window.move(frame_geom.topLeft())
-
     main_window.show()
     return main_window
 
 
 def main():
-    # 1) Set up logging
     setup_logging()
-
-    # 2) Initialize the Qt Application
     app = _initialize_qt_app()
-
-    # 3) Attempt to set the app icon
     icon_path = "GUI/assets/icons/icons8-point-100.png"
     _set_app_icon(app, icon_path)
 
-    # 4) Import classes now that QApplication is instantiated
     from GUI.views.ClusteredCropsView import ClusteredCropsView
     from GUI.controllers.MainController import MainController
 
-    # 5) Create view and controller, with model initially None
     clustered_crops_view = ClusteredCropsView()
-    global_cluster_controller = MainController(model=None, view=clustered_crops_view)
+    controller = MainController(model=None, view=clustered_crops_view)
 
-    # 6) Check for autosave
-    latest_autosave_file = _check_latest_autosave()
+    latest_autosave = _check_latest_autosave()
+    if not _show_startup_dialog(latest_autosave, controller, icon_path):
+        sys.exit()
 
-    # 7) Show startup dialog
-    if not _show_startup_dialog(latest_autosave_file, global_cluster_controller, icon_path):
-        sys.exit()  # Exit if user canceled or no selection
-
-    # 8) Create and show the main window
-    main_window = _create_main_window(clustered_crops_view)
-
-    # 9) Execute the app
+    main_window = _create_main_window(clustered_crops_view)  # Retain instance.
     sys.exit(app.exec_())
 
 

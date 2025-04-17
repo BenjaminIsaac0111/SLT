@@ -177,8 +177,8 @@ class NavigationControlsWidget(QGroupBox):
             text = (
                 f"Cluster {cid} - {num_annotations} annotations, "
                 f"{labeled_percentage:.2f}% assessed, "
-                f"Avg Uncertainty: {avg_uncertainty:.8f} "
-                f"Avg Adj Uncertainty: {avg_adj_uncertainty:.8f}"
+                f"Uncertainty: {avg_uncertainty:.8f} "
+                f"Adj Uncertainty: {avg_adj_uncertainty:.8f}"
             )
             if cluster_label:
                 text += f" - label: {cluster_label}"

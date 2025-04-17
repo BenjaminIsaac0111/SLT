@@ -3,6 +3,8 @@ import logging
 import math
 import os
 import sys
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 import h5py
 import numpy as np
@@ -14,420 +16,398 @@ from tensorflow.keras.models import load_model
 from tqdm import tqdm
 
 from Dataloader.dataloader import get_dataset_v2
-from Model.custom_layers import GroupNormalization, SpatialConcreteDropout, DropoutAttentionBlock
+from Model.custom_layers import (
+    DropoutAttentionBlock,
+    GroupNormalization,
+    SpatialConcreteDropout,
+)
 
-# Suppress TensorFlow's INFO and WARNING logs
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+# ----------------------------------------------------------------------------
+# Global configuration --------------------------------------------------------
+# ----------------------------------------------------------------------------
 
-# Further suppress TensorFlow's Python logger
-tf.get_logger().setLevel('ERROR')
+# 0 = INFO, 1 = WARNING, 2 = ERROR (suppress INFO + WARNING)
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 
-# Set mixed precision policy
-mixed_precision.set_global_policy('mixed_float16')
-
-model_prefix = 'dropout'
+# Run deterministically whenever possible
+os.environ.setdefault("TF_DETERMINISTIC_OPS", "1")
 
 
-def setup_logging(log_level=logging.DEBUG, log_file=None):
-    """
-    Sets up the logging configuration.
-    """
+# ----------------------------------------------------------------------------
+# Logging ---------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+
+def setup_logging(log_level: int = logging.DEBUG, log_file: Optional[str] = None) -> logging.Logger:
+    """Configure root logger and return it."""
+
     logger = logging.getLogger()
+
+    # Avoid duplicate handlers if the module is re‑imported (e.g. under pytest)
+    if logger.handlers:
+        logger.handlers.clear()
+
     logger.setLevel(log_level)
+    formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
 
-    # Formatter for log messages
-    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    stream_handler = logging.StreamHandler(sys.stdout)
+    stream_handler.setLevel(log_level)
+    stream_handler.setFormatter(formatter)
+    logger.addHandler(stream_handler)
 
-    # Console handler
-    ch = logging.StreamHandler(sys.stdout)
-    ch.setLevel(log_level)
-    ch.setFormatter(formatter)
-    logger.addHandler(ch)
-
-    # File handler
-    if log_file:
-        fh = logging.FileHandler(log_file)
-        fh.setLevel(log_level)
-        fh.setFormatter(formatter)
-        logger.addHandler(fh)
+    if log_file is not None:
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setLevel(log_level)
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
 
     return logger
 
 
-@tf.function
-def mc_infer(x, n_iter=20, model=None, num_classes=10, logger=None):
-    """
-    Perform MC Dropout inference to obtain various uncertainty measures.
-    Returns uncertainties and predictions.
-    """
-    if logger:
-        logger.debug(f"Starting MC inference with {n_iter} iterations.")
+# ----------------------------------------------------------------------------
+# Seeding ---------------------------------------------------------------------
+# ----------------------------------------------------------------------------
 
-    probs = []
-    logits = []
+def set_global_seed(seed: int) -> None:
+    """Set NumPy and TensorFlow RNG seeds for reproducibility."""
 
-    for i in range(n_iter):
-        preds = predict_logits(x, model)  # Get logits from the model
-        softmax_preds = tf.nn.softmax(preds, axis=-1)  # Apply softmax to get probabilities
-        probs.append(softmax_preds)
-        logits.append(preds)
-        if logger and (i + 1) % 5 == 0:
-            logger.debug(f"MC iteration {i + 1}/{n_iter} completed.")
+    np.random.seed(seed)
+    tf.keras.utils.set_random_seed(seed)
 
-    # Stack logits and probs to create tensors
-    probs = tf.stack(probs, axis=0)  # Shape: [n_iter, batch_size, H, W, num_classes]
-    logits = tf.stack(logits, axis=0)  # Shape: [n_iter, batch_size, H, W, num_classes]
 
-    # Calculate mean probabilities and mean logits over MC iterations
-    mean_probs = tf.reduce_mean(probs, axis=0)  # Shape: [batch_size, H, W, num_classes]
-    mean_logits = tf.reduce_mean(logits, axis=0)  # Shape: [batch_size, H, W, num_classes]
+# ----------------------------------------------------------------------------
+# Monte‑Carlo inference utilities --------------------------------------------
+# ----------------------------------------------------------------------------
 
-    # Calculate Predictive Entropy
-    entropy_mean = -tf.reduce_sum(mean_probs * tf.math.log(mean_probs + 1e-8), axis=-1)  # [batch_size, H, W]
+# Mixed precision (convs etc. in FP16, math‑sensitive ops will be re‑cast)
+mixed_precision.set_global_policy("mixed_float16")
 
-    # Calculate Expected Entropy
-    expected_entropies = -tf.reduce_sum(probs * tf.math.log(probs + 1e-8), axis=-1)  # [n_iter, batch_size, H, W]
-    expected_entropy = tf.reduce_mean(expected_entropies, axis=0)  # [batch_size, H, W]
 
-    # Calculate BALD (Mutual Information)
-    mutual_information = entropy_mean - expected_entropy  # [batch_size, H, W]
+def _predict_logits(x: tf.Tensor, model: tf.keras.Model) -> tf.Tensor:
+    """Raw logits from the model *in float32* with dropout active."""
 
-    # Calculate Variance of Probabilities
-    variance_probs = tf.math.reduce_variance(probs, axis=0)  # [batch_size, H, W, num_classes]
-    variance_uncertainty = tf.reduce_sum(variance_probs, axis=-1)  # [batch_size, H, W]
-
-    # Normalize entropy to [0, 1]
-    max_entropy = tf.cast(tf.math.log(float(num_classes)), tf.float16)
-    normalized_entropy = entropy_mean / max_entropy  # Normalize to [0, 1]
-
-    return {
-        'entropy': normalized_entropy,
-        'variance': variance_uncertainty,
-        'bald': mutual_information,
-        'mean_probs': mean_probs,
-        'mean_logits': mean_logits
-    }
+    logits_fp16 = model(x, training=True)  # honours dropout layers
+    return tf.cast(logits_fp16, tf.float32)
 
 
 @tf.function(jit_compile=True)
-def predict_logits(x, model):
-    return model(x, training=True)
+def mc_infer(
+        x: tf.Tensor,
+        *,
+        n_iter: int,
+        model: tf.keras.Model,
+        num_classes: int,
+        temperature: float = 1.0,
+) -> Dict[str, tf.Tensor]:
+    """Vectorised MC‑Dropout with epistemic / aleatoric metrics.
 
-
-def main(config, logger):
+    Parameters
+    ----------
+    x
+        Input batch [B, H, W, C].
+    n_iter
+        Number of stochastic forward passes.
+    model
+        Keras model returning logits.
+    num_classes
+        #classes for normalisation.
+    temperature
+        Positive scalar for post‑hoc temperature scaling.
     """
-    Main function to run MC Inference, adjust uncertainties, and store data.
-    This version uses dynamically resizable HDF5 datasets.
-    """
-    logger.info("Starting main processing function.")
 
-    # Extract input dimensions from INPUT_SIZE
-    input_size = config['INPUT_SIZE']
-    if not isinstance(input_size, list) or len(input_size) != 3:
-        logger.error("INPUT_SIZE must be a list of three integers: [HEIGHT, WIDTH, CHANNELS]")
-        raise ValueError("INPUT_SIZE must be a list of three integers: [HEIGHT, WIDTH, CHANNELS]")
-    INPUT_HEIGHT, INPUT_WIDTH, INPUT_CHANNELS = input_size
-    logger.debug(f"Input dimensions: Height={INPUT_HEIGHT}, Width={INPUT_WIDTH}, Channels={INPUT_CHANNELS}")
+    # ---------------------------------------------------------------------
+    # One fused forward pass ------------------------------------------------
+    # ---------------------------------------------------------------------
+    batch_size = tf.shape(x)[0]
+    x_tiled = tf.repeat(x, repeats=n_iter, axis=0)  # [n_iter⋅B, ...]
+    logits = _predict_logits(x_tiled, model)  # float32
 
-    input_shape = (INPUT_HEIGHT, INPUT_WIDTH, INPUT_CHANNELS)
-    num_classes = config['OUT_CHANNELS']
-    logger.debug(f"Number of classes: {num_classes}")
+    h, w = tf.shape(logits)[1], tf.shape(logits)[2]
+    logits = tf.reshape(logits, (n_iter, batch_size, h, w, num_classes))  # [T, B, H, W, K]
 
-    # Extract classwise uncertainty weights (if used)
-    classwise_uncertainty_weights = config.get('CLASSWISE_UNCERTAINTY_WEIGHTS', None)
-    if classwise_uncertainty_weights is None:
-        logger.error("CLASSWISE_UNCERTAINTY_WEIGHTS not found in config.")
-        raise KeyError("CLASSWISE_UNCERTAINTY_WEIGHTS not found in config.")
-    classwise_uncertainty_weights = np.array(classwise_uncertainty_weights, dtype=np.float16)
-    if len(classwise_uncertainty_weights) != num_classes:
-        logger.error("Length of CLASSWISE_UNCERTAINTY_WEIGHTS must be equal to number of classes.")
-        raise ValueError("Length of CLASSWISE_UNCERTAINTY_WEIGHTS must be equal to number of classes.")
+    # Temperature scaling --------------------------------------------------
+    logits_scaled = logits / tf.cast(temperature, tf.float32)
+    probs = tf.nn.softmax(logits_scaled, axis=-1)  # [T, B, H, W, K]
 
-    # Load the model
-    model_path = os.path.join(config['MODEL_DIR'], f"best_{config['MODEL_NAME']}")
-    logger.info(f"Loading model from {model_path}")
-    try:
-        model = load_model(
-            model_path,
-            custom_objects={
-                'DropoutAttentionBlock': DropoutAttentionBlock,
-                'GroupNormalization': GroupNormalization,
-                'SpatialConcreteDropout': SpatialConcreteDropout,
-            },
-            compile=False
-        )
-        logger.info("Model loaded successfully.")
-    except Exception as e:
-        logger.exception("Failed to load the model.")
-        raise e
+    # Expected values across iterations -----------------------------------
+    mean_probs = tf.reduce_mean(probs, axis=0)  # [B, H, W, K]
+    mean_logits = tf.reduce_mean(logits_scaled, axis=0)
 
-    # Modify the model to output logits (second-to-last layer)
+    # Predictive entropy (total) ------------------------------------------
+    entropy = -tf.reduce_sum(mean_probs * tf.math.log(mean_probs + 1e-6), axis=-1)  # [B, H, W]
+    max_entropy = tf.math.log(tf.cast(num_classes, tf.float32))
+    entropy_norm = entropy / max_entropy  # 0‑1
+
+    # Expected entropy -----------------------------------------------------
+    expected_entropy = -tf.reduce_mean(
+        tf.reduce_sum(probs * tf.math.log(probs + 1e-6), axis=-1), axis=0
+    )
+
+    # BALD (mutual information) -------------------------------------------
+    bald = entropy - expected_entropy
+
+    # Variance of probabilities -------------------------------------------
+    variance = tf.reduce_sum(tf.math.reduce_variance(probs, axis=0), axis=-1)  # sum over K
+
+    return {
+        "entropy": entropy_norm,
+        "variance": variance,
+        "bald": bald,
+        "mean_probs": mean_probs,
+        "mean_logits": mean_logits,
+    }
+
+
+# ----------------------------------------------------------------------------
+# Main processing -------------------------------------------------------------
+# ----------------------------------------------------------------------------
+
+def main(config: Dict[str, Any], *, logger: logging.Logger, resume: bool = False) -> None:
+    """Run MC inference, compute uncertainties, and stream them to HDF5."""
+
+    # ---------------------------------------------------------------------
+    # Seed & I/O paths -----------------------------------------------------
+    # ---------------------------------------------------------------------
+    set_global_seed(int(config.get("SEED", 42)))
+
+    input_size: List[int] = config["INPUT_SIZE"]  # [H, W, C]
+    if len(input_size) != 3:
+        raise ValueError("INPUT_SIZE must be [H, W, C]")
+    h_in, w_in, c_in = input_size
+
+    num_classes: int = config["OUT_CHANNELS"]
+    batch_size: int = config["BATCH_SIZE"]
+
+    model_path = Path(config["MODEL_DIR"]) / f"best_{config['MODEL_NAME']}"
+    logger.info("Loading model from %s", model_path)
+
+    model = load_model(
+        model_path,
+        custom_objects={
+            "DropoutAttentionBlock": DropoutAttentionBlock,
+            "GroupNormalization": GroupNormalization,
+            "SpatialConcreteDropout": SpatialConcreteDropout,
+        },
+        compile=False,
+    )
+    logger.info("Model loaded. Switching output to penultimate layer (logits).")
     model = Model(inputs=model.input, outputs=model.layers[-2].output)
-    logger.debug("Modified model to output logits from the second-to-last layer.")
 
-    # Load the dataset
-    logger.info("Loading dataset.")
+    # ---------------------------------------------------------------------
+    # Dataset -------------------------------------------------------------
+    # ---------------------------------------------------------------------
     ds = get_dataset_v2(
-        data_dir=config['DATA_DIR'],
-        filelists=config['TRAINING_LIST'],
+        data_dir=config["DATA_DIR"],
+        filelists=config["TRAINING_LIST"],
         repeat=False,
         shuffle=False,
-        batch_size=config['BATCH_SIZE'],
-        shuffle_buffer_size=config['SHUFFLE_BUFFER_SIZE'],
-        out_channels=config['OUT_CHANNELS']
+        batch_size=batch_size,
+        shuffle_buffer_size=config["SHUFFLE_BUFFER_SIZE"],
+        out_channels=num_classes,
     )
-    logger.info("Dataset loaded successfully.")
 
-    # Check for output directory in config or fallback to model directory
-    output_dir = config.get('OUTPUT_DIR', config['MODEL_DIR'])
-    if not os.path.exists(output_dir):
-        logger.info(f"Output directory {output_dir} does not exist. Creating it.")
-        os.makedirs(output_dir)
-
-    # Construct the HDF5 output file path
-    output_file = os.path.join(
-        output_dir,
-        f"{model_prefix}_{os.path.splitext(config['MODEL_NAME'])[0]}_inference_output.h5"
+    # ---------------------------------------------------------------------
+    # Output file ---------------------------------------------------------
+    # ---------------------------------------------------------------------
+    output_dir = Path(config.get("OUTPUT_DIR", config["MODEL_DIR"]))
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_file = output_dir / (
+        f"dropout_{Path(config['MODEL_NAME']).stem}_inference_output.h5"
     )
-    logger.info(f"Output will be stored in {output_file}")
 
-    # Try to read total_samples if provided
-    try:
-        N_SAMPLES = int(config.get('N_SAMPLES', -1))
-    except ValueError:
-        logger.error("N_SAMPLES must be an integer.")
-        raise ValueError("N_SAMPLES must be an integer.")
+    logger.info("Writing to %s", output_file)
 
-    if N_SAMPLES == -1:
-        # If not specified, we might not know total_samples upfront; if you want total_samples,
-        # you must read it from the TRAINING_LIST.
-        training_list_path = config['TRAINING_LIST']
-        if not os.path.isfile(training_list_path):
-            logger.error(f"TRAINING_LIST file not found at {training_list_path}")
-            raise FileNotFoundError(f"TRAINING_LIST file not found at {training_list_path}")
+    if not resume and output_file.exists():
+        logger.error("Output file exists. Use --resume to append instead of overwrite.")
+        sys.exit(1)
 
-        with open(training_list_path, 'r') as f:
-            total_samples = sum(1 for line in f if line.strip())
-        logger.info(f"Processing all available samples: {total_samples}")
+    hdf5_mode = "a" if resume else "w"
+
+    # ---------------------------------------------------------------------
+    # Uncertainty selection ----------------------------------------------
+    # ---------------------------------------------------------------------
+    uncertainty_types = [ut.lower() for ut in config.get("UNCERTAINTY_TYPES", ["variance", "bald", "entropy"])]
+
+    # ---------------------------------------------------------------------
+    # Optional cap on #samples --------------------------------------------
+    # ---------------------------------------------------------------------
+    n_samples_cfg = int(config.get("N_SAMPLES", -1))
+    if n_samples_cfg == -1:
+        with open(config["TRAINING_LIST"], "r") as f:
+            total_samples = sum(1 for _ in f if _.strip())
     else:
-        total_samples = N_SAMPLES
-        logger.info(f"Total samples to process: {total_samples}")
+        total_samples = n_samples_cfg
 
-    chunk_size = config.get('CHUNK_SIZE', 1)
-    logger.debug(f"Chunk size for HDF5 datasets: {chunk_size}")
+    logger.info("Total samples to process: %s", total_samples)
 
-    batch_size = config['BATCH_SIZE']
+    # ---------------------------------------------------------------------
+    # Create / open HDF5 ---------------------------------------------------
+    # ---------------------------------------------------------------------
+    chunk_size = int(config.get("CHUNK_SIZE", batch_size))
+    if chunk_size < 1:
+        chunk_size = batch_size
 
-    # Determine if we can resume from a checkpoint
-    resume_index = 0
-    hdf5_mode = 'a' if os.path.exists(output_file) else 'w'  # 'a' for append mode
+    with h5py.File(output_file, hdf5_mode) as h5f:
+        # Create datasets if new file -----------------------------------
+        if "rgb_images" not in h5f:
+            maxshape_img = (None, h_in, w_in, c_in)
+            maxshape_logits = (None, h_in, w_in, num_classes)
 
-    logger.info("Starting processing to compute uncertainties and store data...")
-
-    try:
-        with h5py.File(output_file, hdf5_mode) as hdf5_file:
-            logger.info(f"HDF5 file opened in mode '{hdf5_mode}' for storing results.")
-
-            # If datasets don't exist, create them as resizable
-            if 'rgb_images' not in hdf5_file:
-                maxshape_rgb = (None,) + input_shape
-                maxshape_logits = (None,) + input_shape[:2] + (num_classes,)
-                maxshape_2d = (None,) + input_shape[:2]
-
-                rgb_image_dataset = hdf5_file.create_dataset(
-                    'rgb_images',
-                    shape=(0,) + input_shape,
-                    maxshape=maxshape_rgb,
-                    dtype='uint8',
-                    compression='gzip',
+            rgb_ds = h5f.create_dataset(
+                "rgb_images",
+                shape=(0, h_in, w_in, c_in),
+                maxshape=maxshape_img,
+                dtype="uint8",
+                compression="gzip",
+                compression_opts=4,
+                chunks=(chunk_size, h_in, w_in, c_in),
+            )
+            logits_ds = h5f.create_dataset(
+                "logits",
+                shape=(0, h_in, w_in, num_classes),
+                maxshape=maxshape_logits,
+                dtype="float32",
+                compression="gzip",
+                compression_opts=4,
+                chunks=(chunk_size, h_in, w_in, num_classes),
+            )
+            fname_ds = h5f.create_dataset(
+                "filenames",
+                shape=(0,),
+                maxshape=(None,),
+                dtype=h5py.string_dtype(encoding="utf-8"),
+                compression="gzip",
+                compression_opts=4,
+                chunks=(chunk_size,),
+            )
+            unc_ds: Dict[str, h5py.Dataset] = {}
+            for ut in uncertainty_types:
+                ds_name = ut if ut != "total" else "total_uncertainty"
+                unc_ds[ut] = h5f.create_dataset(
+                    ds_name,
+                    shape=(0, h_in, w_in),
+                    maxshape=(None, h_in, w_in),
+                    dtype="float32",
+                    compression="gzip",
                     compression_opts=4,
-                    chunks=(chunk_size,) + input_shape
+                    chunks=(chunk_size, h_in, w_in),
                 )
-                logits_dataset = hdf5_file.create_dataset(
-                    'logits',
-                    shape=(0,) + input_shape[:2] + (num_classes,),
-                    maxshape=maxshape_logits,
-                    dtype='float32',
-                    compression='gzip',
-                    compression_opts=4,
-                    chunks=(chunk_size,) + input_shape[:2] + (num_classes,)
-                )
-                variance_dataset = hdf5_file.create_dataset(
-                    'variance',
-                    shape=(0,) + input_shape[:2],
-                    maxshape=maxshape_2d,
-                    dtype='float32',
-                    compression='gzip',
-                    compression_opts=4,
-                    chunks=(chunk_size,) + input_shape[:2]
-                )
-                bald_dataset = hdf5_file.create_dataset(
-                    'bald',
-                    shape=(0,) + input_shape[:2],
-                    maxshape=maxshape_2d,
-                    dtype='float32',
-                    compression='gzip',
-                    compression_opts=4,
-                    chunks=(chunk_size,) + input_shape[:2]
-                )
-                filename_dataset = hdf5_file.create_dataset(
-                    'filenames',
-                    shape=(0,),
-                    maxshape=(None,),
-                    dtype=h5py.string_dtype(encoding='utf-8'),
-                    compression='gzip',
-                    compression_opts=4,
-                    chunks=(chunk_size,)
-                )
-            else:
-                # Datasets already exist, so just open them
-                rgb_image_dataset = hdf5_file['rgb_images']
-                logits_dataset = hdf5_file['logits']
-                variance_dataset = hdf5_file['variance']
-                bald_dataset = hdf5_file['bald']
-                filename_dataset = hdf5_file['filenames']
+            h5f.attrs["last_written_index"] = 0
+        else:
+            rgb_ds = h5f["rgb_images"]
+            logits_ds = h5f["logits"]
+            fname_ds = h5f["filenames"]
+            unc_ds = {
+                ut: h5f[ut if ut != "total" else "total_uncertainty"]
+                for ut in uncertainty_types
+            }
 
-            # Check for checkpoint
-            if 'last_written_index' in hdf5_file.attrs:
-                resume_index = hdf5_file.attrs['last_written_index']
-                logger.info(f"Resuming from index {resume_index}")
-            else:
-                hdf5_file.attrs['last_written_index'] = 0
+        # -----------------------------------------------------------------
+        # Resume offset ----------------------------------------------------
+        # -----------------------------------------------------------------
+        start_idx = int(h5f.attrs.get("last_written_index", 0))
+        logger.info("Starting from index %d", start_idx)
 
-            # Skip samples in the dataset if resuming
-            if resume_index > 0:
-                ds = ds.skip(resume_index)
+        # Skip dataset accordingly ---------------------------------------
+        if start_idx > 0:
+            ds = ds.skip(start_idx)
 
-            # If total_samples is known, limit dataset to remaining samples
-            if total_samples > 0:
-                samples_remaining = total_samples - resume_index
-                if samples_remaining <= 0:
-                    logger.info("All samples have already been processed. Exiting.")
-                    return
-                batches_remaining = math.ceil(samples_remaining / batch_size)
-                ds = ds.take(batches_remaining)
+        samples_remaining = max(total_samples - start_idx, 0)
+        if samples_remaining == 0:
+            logger.info("Nothing left to process; exiting.")
+            return
 
-                total_to_process = samples_remaining
-            else:
-                # If total_samples not known, you can rely solely on dataset exhaustion
-                total_to_process = None
+        ds = ds.take(math.ceil(samples_remaining / batch_size))
 
-            index = resume_index
-            with tqdm(total=total_to_process, desc="Processing", unit="samples",
-                      disable=(total_to_process is None)) as pbar:
-                for batch_idx, (filename_batch, x_batch, y_batch) in enumerate(ds):
-                    current_batch_size = x_batch.shape[0]
+        # -----------------------------------------------------------------
+        # Main loop -------------------------------------------------------
+        # -----------------------------------------------------------------
+        pbar = tqdm(total=samples_remaining, unit="samples", desc="Processing")
+        idx = start_idx
 
-                    # Compute uncertainties
-                    uncertainties = mc_infer(
-                        x_batch, n_iter=config['MC_N_ITER'], model=model, num_classes=num_classes,
-                        logger=logger
-                    )
+        for filenames, x_batch, _ in ds:  # y_batch unused for inference
+            bsz_actual = x_batch.shape[0]
 
-                    # Extract uncertainties
-                    entropy_np = uncertainties['entropy'].numpy()
-                    variance_np = uncertainties['variance'].numpy()
-                    bald_np = uncertainties['bald'].numpy()
-                    mean_logits_np = uncertainties['mean_logits'].numpy()
+            # ----------------------------------- Uncertainties ----------
+            uncs = mc_infer(
+                x_batch,
+                n_iter=int(config["MC_N_ITER"]),
+                model=model,
+                num_classes=num_classes,
+                temperature=float(config.get("TEMPERATURE", 1.0)),
+            )
 
-                    # Adjust uncertainties
-                    adjusted_variance = variance_np * (1 - entropy_np)
-                    adjusted_bald = bald_np * (1 - entropy_np)
+            # Cast to numpy early (1 cpu copy) --------------------------
+            x_uint8 = (x_batch.numpy() * 255).astype("uint8")
+            filenames_str = [f.decode("utf-8") for f in filenames.numpy()]
 
-                    x_batch_np = x_batch.numpy()
-                    filename_batch_np = filename_batch.numpy()
+            new_size = idx + bsz_actual
 
-                    rgb_images_uint8 = (x_batch_np * 255).astype('uint8')
+            # Resize only when required (avoid HDF5 no‑op cost) ---------
+            if new_size > rgb_ds.shape[0]:
+                rgb_ds.resize((new_size, h_in, w_in, c_in))
+                logits_ds.resize((new_size, h_in, w_in, num_classes))
+                fname_ds.resize((new_size,))
+                for ut_ds in unc_ds.values():
+                    ut_ds.resize((new_size, h_in, w_in))
 
-                    # If total_samples is known, ensure we don't exceed it
-                    actual_batch_size = current_batch_size
-                    if total_samples > 0:
-                        actual_batch_size = min(current_batch_size, total_samples - index)
-                        if actual_batch_size <= 0:
-                            logger.warning("No samples left to write, stopping early.")
-                            break
+            # Write ------------------------------------------------------
+            rgb_ds[idx:new_size] = x_uint8
+            logits_ds[idx:new_size] = uncs["mean_logits"].numpy().astype("float16")
+            fname_ds[idx:new_size] = filenames_str
 
-                    # Resize datasets to hold the new samples
-                    new_size = index + actual_batch_size
+            for ut in uncertainty_types:
+                data_np = uncs[ut if ut != "total" else "entropy"].numpy().astype("float16")
+                unc_ds[ut][idx:new_size] = data_np
 
-                    rgb_image_dataset.resize((new_size,) + input_shape)
-                    logits_dataset.resize((new_size,) + input_shape[:2] + (num_classes,))
-                    variance_dataset.resize((new_size,) + input_shape[:2])
-                    bald_dataset.resize((new_size,) + input_shape[:2])
-                    filename_dataset.resize((new_size,))
+            idx += bsz_actual
+            h5f.attrs["last_written_index"] = idx
+            pbar.update(bsz_actual)
 
-                    # Write data
-                    rgb_image_dataset[index:new_size] = rgb_images_uint8[:actual_batch_size]
-                    logits_dataset[index:new_size] = mean_logits_np[:actual_batch_size].astype('float16')
-                    variance_dataset[index:new_size] = adjusted_variance[:actual_batch_size].astype('float16')
-                    bald_dataset[index:new_size] = adjusted_bald[:actual_batch_size].astype('float16')
-                    filename_dataset[index:new_size] = [
-                        fname.decode('utf-8') for fname in filename_batch_np[:actual_batch_size]
-                    ]
-
-                    index += actual_batch_size
-                    hdf5_file.attrs['last_written_index'] = index
-                    hdf5_file.flush()
-
-                    if total_to_process is not None:
-                        pbar.update(actual_batch_size)
-
-                    # If total_samples is known and we've hit the limit, stop
-                    if total_samples > 0 and index >= total_samples:
-                        logger.info("Reached total_samples limit.")
-                        break
-
-            # Flush data one last time
-            hdf5_file.flush()
-            logger.info("All data written to HDF5 file successfully.")
-
-    except Exception as e:
-        logger.exception("An error occurred while writing to the HDF5 file.")
-        raise e
-
-    logger.info(f"Processing completed. Data stored in {output_file}.")
+        pbar.close()
+        logger.info("Finished writing %d samples.", idx - start_idx)
 
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(
-        description='Monte Carlo Inference with Uncertainty Measures')
-    parser.add_argument('-c', '--config_path', type=str, required=True, help='Path to the configuration YAML file')
-    parser.add_argument('--log_level', type=str, default='INFO',
-                        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
-                        help='Set the logging level')
-    parser.add_argument('--log_file', type=str, default=None, help='Path to a file to store logs')
-    parser.add_argument('--output_dir', type=str, default=None,
-                        help='Directory where the output HDF5 file will be saved (overrides default in config).')
+# ----------------------------------------------------------------------------
+# CLI ------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+
+if __name__ == "__main__":
+
+    parser = argparse.ArgumentParser(description="MC‑Dropout inference with uncertainty outputs")
+    parser.add_argument("-c", "--config_path", required=True, help="YAML configuration file")
+    parser.add_argument("--log_level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])
+    parser.add_argument("--log_file", help="Path to log file")
+    parser.add_argument("--output_dir", help="Override OUTPUT_DIR from YAML")
+    parser.add_argument("--resume", action="store_true", help="Append to existing HDF5 instead of overwrite")
+
     args = parser.parse_args()
 
-    # Set up logging
-    log_level = getattr(logging, args.log_level.upper(), logging.INFO)
-    logger = setup_logging(log_level=log_level, log_file=args.log_file)
-    logger.info("Logging is configured.")
+    logger = setup_logging(getattr(logging, args.log_level.upper(), logging.INFO), args.log_file)
 
     try:
-        # Load the YAML config file
-        logger.info(f"Loading configuration from {args.config_path}")
-        with open(args.config_path, 'r') as config_file:
-            config = yaml.safe_load(config_file)
-        logger.info("Configuration loaded successfully.")
-
-        # Override output directory if specified via CLI
+        with open(args.config_path, "r") as fh:
+            cfg = yaml.safe_load(fh)
         if args.output_dir:
-            config['OUTPUT_DIR'] = args.output_dir
+            cfg["OUTPUT_DIR"] = args.output_dir
 
-        # Ensure required keys are present in the config
-        required_keys = ['MODEL_DIR', 'MODEL_NAME', 'DATA_DIR', 'TRAINING_LIST', 'BATCH_SIZE',
-                         'SHUFFLE_BUFFER_SIZE', 'OUT_CHANNELS', 'INPUT_SIZE', 'MC_N_ITER']
-        missing_keys = [key for key in required_keys if key not in config]
-        if missing_keys:
-            logger.error(f"Missing required config keys: {missing_keys}")
-            raise KeyError(f"Missing required config keys: {missing_keys}")
-        logger.debug("All required configuration keys are present.")
+        required = [
+            "MODEL_DIR",
+            "MODEL_NAME",
+            "DATA_DIR",
+            "TRAINING_LIST",
+            "BATCH_SIZE",
+            "SHUFFLE_BUFFER_SIZE",
+            "OUT_CHANNELS",
+            "INPUT_SIZE",
+            "MC_N_ITER",
+        ]
+        missing = [k for k in required if k not in cfg]
+        if missing:
+            logger.error("Missing required config keys: %s", missing)
+            sys.exit(1)
 
-        # Call the main function with the config and logger
-        main(config, logger)
+        main(cfg, logger=logger, resume=args.resume)
 
-    except Exception as e:
-        logger.critical("An unrecoverable error occurred. Exiting the program.")
+    except Exception:
+        logger.exception("Fatal error. Exiting.")
         sys.exit(1)

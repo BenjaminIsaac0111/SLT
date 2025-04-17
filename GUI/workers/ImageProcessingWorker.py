@@ -7,7 +7,7 @@ from PyQt5.QtCore import QRunnable, QObject, pyqtSignal
 
 from GUI.models.Annotation import Annotation
 from GUI.models.CacheManager import CacheManager
-from GUI.models.ImageDataModel import ImageDataModel
+from GUI.models.ImageDataModel import BaseImageDataModel
 from GUI.models.ImageProcessor import ImageProcessor
 
 
@@ -29,7 +29,7 @@ class ImageProcessingWorker(QRunnable):
     def __init__(
             self,
             sampled_annotations: List[Annotation],
-            image_data_model: ImageDataModel,
+            image_data_model: BaseImageDataModel,
             image_processor: ImageProcessor,
             crop_size: int = 512,
             zoom_factor: int = 2,

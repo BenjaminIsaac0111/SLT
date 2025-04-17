@@ -1,74 +1,74 @@
+#!/usr/bin/env python3
 import json
 import logging
 from collections import OrderedDict
+from pathlib import Path
 from typing import Optional, Dict, List
 
 import numpy as np
 from PyQt5.QtCore import QObject, pyqtSlot, QTimer, QCoreApplication
 from PyQt5.QtWidgets import QFileDialog, QMessageBox
-from sklearn.mixture import GaussianMixture
 
 from GUI.controllers.AnnotationClusteringController import AnnotationClusteringController
 from GUI.controllers.ImageProcessingController import ImageProcessingController
 from GUI.controllers.ProjectStateController import ProjectStateController
 from GUI.models.Annotation import Annotation
-from GUI.models.ImageDataModel import ImageDataModel
-from GUI.models.PointAnnotationGenerator import LocalMaximaPointAnnotationGenerator, EquidistantPointAnnotationGenerator
+# Use unified interface and factory
+from GUI.models.ImageDataModel import BaseImageDataModel, create_image_data_model
+from GUI.models.PointAnnotationGenerator import (
+    LocalMaximaPointAnnotationGenerator,
+    EquidistantPointAnnotationGenerator,
+)
 from GUI.models.UncertaintyPropagator import DistanceBasedPropagator
+from GUI.unittests.debug_uncertainty_propergation import analyze_uncertainty
 from GUI.views.ClusteredCropsView import ClusteredCropsView
 
 
 class MainController(QObject):
     """
-    GlobalClusterController acts as the main orchestrator of the application.
-    It handles user interactions, connects the view with other controllers,
-    and keeps the UI responsive by updating it based on signals.
+    Main orchestrator of the application, backend-agnostic data model
     """
 
-    def __init__(self, model: Optional[ImageDataModel], view: ClusteredCropsView):
-        """
-        Initializes the GlobalClusterController.
-
-        :param model: An instance of the ImageDataModel.
-        :param view: An instance of the ClusteredCropsView.
-        """
+    def __init__(
+            self,
+            model: Optional[BaseImageDataModel],
+            view: ClusteredCropsView
+    ):
         super().__init__()
         self.feature_matrix = None
-        self.image_data_model = model
+        self.image_data_model: Optional[BaseImageDataModel] = model
         self.view = view
-        self.annotation_generator = LocalMaximaPointAnnotationGenerator()  # Default
+        self.annotation_generator = LocalMaximaPointAnnotationGenerator()
 
-        # Instantiate other controllers with the initial model
-        self.clustering_controller = AnnotationClusteringController(self.image_data_model, self.annotation_generator)
+        # Controllers use BaseImageDataModel interface
+        self.clustering_controller = AnnotationClusteringController(
+            self.image_data_model, self.annotation_generator
+        )
         self.image_processing_controller = ImageProcessingController(self.image_data_model)
         self.project_state_controller = ProjectStateController(self.image_data_model)
 
-        # Autosave timer initialization (do not start it yet)
         self.autosave_timer = QTimer()
-        self.autosave_timer.setInterval(30000)  # 30 seconds
+        self.autosave_timer.setInterval(30000)
         self.autosave_timer.timeout.connect(self.autosave_project_state)
 
-        # Connect signals and slots
         self.connect_signals()
-
-        # Ensure cleanup on application exit
         QCoreApplication.instance().aboutToQuit.connect(self.cleanup)
+        logging.info("MainController initialized.")
 
-    def set_model(self, model: ImageDataModel):
+    def set_model(self, model: BaseImageDataModel):
         """
-        Sets the model and starts the autosave timer if not already active.
-
-        :param model: The new ImageDataModel instance to set.
+        Attach new data model (HDF5 or SQLite) and start autosave.
         """
-        if self.image_data_model == model:
-            logging.debug("Model is already set. Skipping reassignment.")
+        if self.image_data_model is model:
             return
-
-        self._assign_model_to_controllers(model)
+        self.image_data_model = model
+        self.clustering_controller.model = model
+        self.image_processing_controller.model = model
+        self.project_state_controller.model = model
 
         if not self.autosave_timer.isActive():
             self.autosave_timer.start()
-        logging.info("Model has been updated and autosave timer started.")
+        logging.info("Data model set: %s", model.data_path)
 
     def connect_signals(self):
         """
@@ -141,10 +141,6 @@ class MainController(QObject):
         Handles when clusters are ready after clustering finishes.
         Updates the ImageProcessingController with the new clusters.
         """
-        self.set_feature_matrix(feature_matrix)
-        if isinstance(clustering_model, GaussianMixture):
-            self.gmm = clustering_model
-            logging.info("GMM has been set in Main Controller.")
         self.image_processing_controller.set_clusters(clusters)
         cluster_info = self.clustering_controller.generate_cluster_info()
         first_cluster_id = list(cluster_info.keys())[0] if cluster_info else None
@@ -332,168 +328,19 @@ class MainController(QObject):
 
         self._update_annotation_uncertainties(updated_uncertainties)
 
-    def debug_grid_search_propagation(self):
-        """
-        Analyzes the sensitivity of the distance-based uncertainty propagation
-        to the hyperparameters `lambda_param` and `threshold`.
-
-        For each (lambda, threshold) pair in a pre-defined grid, the method:
-          1. Propagates uncertainties using a DistanceBasedPropagator.
-          2. Computes summary statistics:
-             - Reduction Ratio: the average fraction by which uncertainties are reduced.
-             - Correlation: Pearson correlation between original and updated uncertainties.
-          3. Plots two heatmaps showing how these metrics vary with the hyperparameters.
-
-        This analysis helps determine if (and how) the propagation is behaving
-        as expected after labeling one cluster.
-        """
-        import numpy as np
-        import matplotlib.pyplot as plt
-
-        # Retrieve all annotations from clusters.
-        annotations = self._get_all_annotations()
-        if not annotations:
-            print("No annotations available for grid search propagation analysis.")
-            return
-
-        # Construct the feature matrix from each annotation's logit features.
-        local_feature_matrix = np.array(
-            [np.concatenate([anno.logit_features]) for anno in annotations],
-            dtype=np.float32
+    def debug_analyze_uncertainty_propagation(
+            self,
+            *,
+            show_plot: bool = False,
+            save_plot_to: Optional[str] = None,
+    ) -> None:
+        """Wrapper that plugs the detached utility into MainController."""
+        stats_out = analyze_uncertainty(
+            annotations=self._get_all_annotations(),
+            show=show_plot,
+            save_path=Path(save_plot_to) if save_plot_to else None,
         )
-        # Obtain the current (original/adjusted) uncertainties.
-        current_uncertainties = np.array(
-            [anno.adjusted_uncertainty for anno in annotations],
-            dtype=np.float32
-        )
-        # Create a labeled mask based on manual labeling (class_id != -1 implies a label).
-        labeled_mask = np.array(
-            [anno.class_id != -1 for anno in annotations],
-            dtype=np.float64
-        ).reshape(-1, 1)
-
-        # Define grid search ranges for lambda_param and threshold.
-        lambda_values = np.linspace(0.1, 2.0, 10)
-        threshold_values = np.linspace(1.0, 10.0, 10)
-
-        # Set up matrices to store computed metrics.
-        reduction_matrix = np.zeros((len(lambda_values), len(threshold_values)))
-        correlation_matrix = np.zeros((len(lambda_values), len(threshold_values)))
-
-        # Grid search: Evaluate propagation for each (lambda_param, threshold) pair.
-        for i, lam in enumerate(lambda_values):
-            for j, thresh in enumerate(threshold_values):
-                propagator = DistanceBasedPropagator(
-                    labeled_features=labeled_mask,
-                    lambda_param=lam,
-                    threshold=thresh
-                )
-                # Propagate uncertainties using the current hyperparameters.
-                updated_uncertainties = propagator.propagate(
-                    feature_matrix=local_feature_matrix,
-                    uncertainties=current_uncertainties
-                )
-                # Compute the reduction ratio as the average relative decrease in uncertainty.
-                reduction_ratio = np.mean((current_uncertainties - updated_uncertainties) / current_uncertainties)
-                # Compute the correlation coefficient between the original and updated uncertainties.
-                corr = np.corrcoef(current_uncertainties, updated_uncertainties)[0, 1]
-
-                reduction_matrix[i, j] = reduction_ratio
-                correlation_matrix[i, j] = corr
-
-        # Plot heatmaps to visualize the hyperparameter effects.
-        plt.figure(figsize=(12, 5))
-
-        # Heatmap for the mean uncertainty reduction ratio.
-        plt.subplot(1, 2, 1)
-        plt.imshow(
-            reduction_matrix,
-            aspect='auto',
-            origin='lower',
-            extent=[threshold_values[0], threshold_values[-1], lambda_values[0], lambda_values[-1]]
-        )
-        plt.colorbar(label='Mean Uncertainty Reduction Ratio')
-        plt.xlabel('Threshold')
-        plt.ylabel('Lambda (Decay Parameter)')
-        plt.title('Reduction Ratio across Hyperparameter Grid')
-
-        # Heatmap for the correlation between original and updated uncertainties.
-        plt.subplot(1, 2, 2)
-        plt.imshow(
-            correlation_matrix,
-            aspect='auto',
-            origin='lower',
-            extent=[threshold_values[0], threshold_values[-1], lambda_values[0], lambda_values[-1]]
-        )
-        plt.colorbar(label='Correlation (Original vs. Updated)')
-        plt.xlabel('Threshold')
-        plt.ylabel('Lambda (Decay Parameter)')
-        plt.title('Uncertainty Correlation across Hyperparameter Grid')
-
-        plt.tight_layout()
-        plt.show()
-
-        # Optionally, print summary statistics for further inspection.
-        for i, lam in enumerate(lambda_values):
-            for j, thresh in enumerate(threshold_values):
-                print(f"Lambda={lam:.2f}, Threshold={thresh:.2f}: Reduction Ratio={reduction_matrix[i, j]:.4f}, "
-                      f"Correlation={correlation_matrix[i, j]:.4f}")
-
-    def debug_analyze_uncertainty_propagation(self):
-        """
-        Debugging method to analyze uncertainty propagation.
-
-        Computes summary statistics and generates plots (a histogram and a scatter plot)
-        to compare original uncertainties versus adjusted uncertainties.
-        """
-        # Import matplotlib only when needed
-        import matplotlib.pyplot as plt
-        import numpy as np
-
-        # Retrieve all current annotations (flattened list from clusters)
-        annotations = self._get_all_annotations()
-        if not annotations:
-            logging.warning("No annotations available for uncertainty propagation analysis.")
-            return
-
-        # Extract original and updated uncertainties
-        original_uncertainties = np.array([anno.uncertainty for anno in annotations])
-        updated_uncertainties = np.array([anno.adjusted_uncertainty for anno in annotations])
-
-        # Compute summary statistics
-        mean_orig = np.mean(original_uncertainties)
-        std_orig = np.std(original_uncertainties)
-        mean_updated = np.mean(updated_uncertainties)
-        std_updated = np.std(updated_uncertainties)
-        correlation = np.corrcoef(original_uncertainties, updated_uncertainties)[0, 1]
-
-        # Print summary statistics to the console
-        print("=== Uncertainty Propagation Debug Summary ===")
-        print(f"Original Uncertainty: Mean = {mean_orig:.4f}, Std = {std_orig:.4f}")
-        print(f"Updated  Uncertainty: Mean = {mean_updated:.4f}, Std = {std_updated:.4f}")
-        print(f"Correlation (Original vs. Updated): {correlation:.4f}")
-
-        # Plot histograms of original and updated uncertainties
-        plt.figure(figsize=(12, 5))
-
-        plt.subplot(1, 2, 1)
-        bins = np.linspace(0, 0.05, 30)  # example range
-        plt.hist(original_uncertainties, bins=bins, alpha=0.7, label="Original")
-        plt.hist(updated_uncertainties, bins=bins, alpha=0.7, label="Updated")
-        plt.xlabel("Uncertainty")
-        plt.ylabel("Frequency")
-        plt.title("Histogram of Uncertainties")
-        plt.legend()
-
-        # Scatter plot comparing original and updated uncertainties
-        plt.subplot(1, 2, 2)
-        plt.scatter(original_uncertainties, updated_uncertainties, alpha=0.5)
-        plt.xlabel("Original Uncertainty")
-        plt.ylabel("Updated Uncertainty")
-        plt.title("Original vs. Updated Uncertainty")
-
-        plt.tight_layout()
-        plt.show()
+        logging.info("Uncertainty debug summary: %s", stats_out.to_log_string())
 
     def select_next_cluster_based_on_greedy_metric(self) -> Optional[int]:
         """
@@ -522,29 +369,28 @@ class MainController(QObject):
     # -------------------------------------------------------------------------
     #                           PROJECT STATE
     # -------------------------------------------------------------------------
-
     def get_current_state(self) -> dict:
-        """
-        Retrieves the current project state, including cluster and annotation data.
-        """
-        if self.image_data_model is None:
-            logging.debug("Cannot get current state: model is not initialized.")
+        if not self.image_data_model:
             return {}
 
-        clusters = self.clustering_controller.get_clusters()
-        project_state = {
-            'hdf5_file_path': self.image_data_model.hdf5_file_path,
-            'annotations': {},
-            'cluster_order': list(clusters.keys()),
-            'selected_cluster_id': self.view.get_selected_cluster_id(),
+        backend = getattr(
+            self.image_data_model,
+            "backend",
+            Path(self.image_data_model.data_path).suffix.lstrip(".").lower(),  # fallback
+        )
+
+        return {
+            "schema_version": 2,
+            "data_backend": backend,
+            "data_path": self.image_data_model.data_path,
+            "uncertainty": 'bald',
+            "clusters": {
+                str(cid): [a.to_dict() for a in annos]
+                for cid, annos in self.clustering_controller.get_clusters().items()
+            },
+            "cluster_order": list(self.clustering_controller.get_clusters()),
+            "selected_cluster_id": self.view.get_selected_cluster_id(),
         }
-
-        for cluster_id, annotations in clusters.items():
-            for anno in annotations:
-                annotation_data = anno.to_dict()
-                project_state['annotations'].setdefault(anno.filename, []).append(annotation_data)
-
-        return project_state
 
     def autosave_project_state(self):
         """
@@ -564,41 +410,27 @@ class MainController(QObject):
 
     @pyqtSlot()
     def save_project(self):
-        """
-        Saves the project state to the current file path.
-        If the current file path is not set, prompts the user to choose a save location.
-        """
-        current_path = self.project_state_controller.get_current_save_path()
-        if current_path:
-            project_state = self.get_current_state()
-            self.project_state_controller.save_project_state(project_state, current_path)
-        else:
-            self.save_project_as()
+        path = self.project_state_controller.get_current_save_path()
+        if not path:
+            return self.save_project_as()
+        self.project_state_controller.save_project_state(self.get_current_state(), path)
 
     @pyqtSlot()
     def save_project_as(self):
-        """
-        Prompts the user to select a location and file name, and then saves the project state.
-        """
-        file_path = self._prompt_save_file()
-        if not file_path:
-            logging.info("Save As action was canceled by the user.")
-            return
-
-        self.project_state_controller.set_current_save_path(file_path)
-        project_state = self.get_current_state()
-        self.project_state_controller.save_project_state(project_state, file_path)
+        file_path, _ = QFileDialog.getSaveFileName(
+            self.view, "Save Project As", "", "JSON GZipped (*.json.gz);;All Files (*)"
+        )
+        if file_path:
+            self.project_state_controller.set_current_save_path(file_path)
+            self.project_state_controller.save_project_state(self.get_current_state(), file_path)
 
     @pyqtSlot()
     def load_project(self):
-        """
-        Loads the project state from a saved file to resume the session.
-        """
-        project_file = self._prompt_load_file()
-        if project_file:
-            self.project_state_controller.load_project_state(project_file)
-        else:
-            logging.info("Load project action was canceled by the user.")
+        file_path, _ = QFileDialog.getOpenFileName(
+            self.view, "Load Project", "", "JSON GZipped (*.json.gz);;All Files (*)"
+        )
+        if file_path:
+            self.project_state_controller.load_project_state(file_path)
 
     @pyqtSlot()
     def restore_autosave(self):
@@ -634,17 +466,13 @@ class MainController(QObject):
 
         :param project_state: The loaded project state.
         """
-        clusters_data = self._rebuild_clusters_from_annotations(project_state)
+        self._initialize_model_if_needed(project_state)
+
+        clusters_data = self._clusters_from_state(project_state)
         self.clustering_controller.clusters = clusters_data
         self.image_processing_controller.set_clusters(clusters_data)
 
-        hdf5_file_path = project_state.get('hdf5_file_path', None)
-        if not hdf5_file_path:
-            logging.error("No hdf5_file_path in project_state.")
-            QMessageBox.critical(self.view, "Error", "Project state does not contain hdf5_file_path.")
-            return
-
-        self._initialize_model_if_needed(hdf5_file_path, project_state)
+        self._initialize_model_if_needed(project_state)
 
         cluster_info = self.clustering_controller.generate_cluster_info()
         selected_cluster_id = project_state.get('selected_cluster_id', None)
@@ -749,7 +577,7 @@ class MainController(QObject):
     #                       PRIVATE / HELPER METHODS
     # -------------------------------------------------------------------------
 
-    def _assign_model_to_controllers(self, model: ImageDataModel):
+    def _assign_model_to_controllers(self, model: BaseImageDataModel):
         """
         Helper method to reassign the model to all sub-controllers.
         """
@@ -758,35 +586,29 @@ class MainController(QObject):
         self.image_processing_controller.model = model
         self.project_state_controller.model = model
 
-    def _initialize_model_if_needed(self, hdf5_file_path: str, project_state: dict):
-        """
-        Helper to initialize a new ImageDataModel if needed (or update if paths differ).
-        """
-        if (self.image_data_model is None or
-                self.image_data_model.hdf5_file_path != hdf5_file_path):
-            uncertainty_type = project_state.get('uncertainty_type', 'variance')
-            image_data_model = ImageDataModel(
-                hdf5_file_path=hdf5_file_path,
-                uncertainty_type=uncertainty_type
-            )
-            self.set_model(image_data_model)
+    # ---------------------------------------------------------------------
+    # helper – create/replace the data‑model if it does not match the file
+    # ---------------------------------------------------------------------
+    def _initialize_model_if_needed(self, project_state: dict):
+        """Create/replace the model iff the data file differs from the current one."""
+        data_path = project_state["data_path"]
 
-    def _rebuild_clusters_from_annotations(self, project_state: dict) -> Dict[int, List[Annotation]]:
-        """
-        Helper method to rebuild clusters dict from the annotations in the project state.
-        """
-        annotations_data = project_state.get('annotations', {})
-        clusters_data = {}
-        for filename, annotations_list in annotations_data.items():
-            for annotation_dict in annotations_list:
-                anno = Annotation.from_dict(annotation_dict)
-                cluster_id = anno.cluster_id
-                clusters_data.setdefault(cluster_id, []).append(anno)
+        if self.image_data_model and self.image_data_model.data_path == data_path:
+            return  # already using the right file
 
-        cluster_order = project_state.get('cluster_order', None)
-        if cluster_order is not None:
-            clusters_data = self._reorder_clusters(cluster_order, clusters_data)
-        return clusters_data
+        self.set_model(create_image_data_model(project_state))
+
+    def _clusters_from_state(self, state: dict) -> Dict[int, List[Annotation]]:
+        clusters_json = state["clusters"]
+        clusters: Dict[int, List[Annotation]] = {
+            int(cid): [Annotation.from_dict(a) for a in annos]
+            for cid, annos in clusters_json.items()
+        }
+
+        order = state.get("cluster_order")
+        if order:
+            clusters = self._reorder_clusters(order, clusters)
+        return clusters
 
     @staticmethod
     def _reorder_clusters(cluster_order: List[int],
