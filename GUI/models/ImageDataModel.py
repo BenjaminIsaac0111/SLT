@@ -126,7 +126,7 @@ class HDF5ImageDataModel(BaseImageDataModel):
                 rdcc_nbytes = 1024 * (1024 ** 2)
                 rdcc_nslots = 1_000_003
                 self._hdf5_file = h5py.File(
-                    self._hdf5_file_path,
+                    self._db_path,
                     mode='r',
                     libver='latest',
                     rdcc_nbytes=rdcc_nbytes,
