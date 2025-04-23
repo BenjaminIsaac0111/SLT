@@ -20,7 +20,7 @@ from GUI.models.PointAnnotationGenerator import (
     EquidistantPointAnnotationGenerator,
 )
 from GUI.models.UncertaintyPropagator import DistanceBasedPropagator
-from GUI.unittests.debug_uncertainty_propergation import analyze_uncertainty
+from GUI.unittests.debug_uncertainty_propargation import analyze_uncertainty
 from GUI.views.ClusteredCropsView import ClusteredCropsView
 
 

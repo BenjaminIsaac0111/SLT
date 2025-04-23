@@ -47,7 +47,7 @@ class UncertaintyDebugStats:
 def analyze_uncertainty(
         annotations: Sequence["Annotation"],
         *,
-        show: bool = False,
+        show: bool = True,
         save_path: Optional[Path] = None,
 ) -> UncertaintyDebugStats:
     """

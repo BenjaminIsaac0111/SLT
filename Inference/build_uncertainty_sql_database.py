@@ -193,12 +193,11 @@ class SQLiteStorage:
 # Main processing -------------------------------------------------------------
 # ----------------------------------------------------------------------------
 
-def main(config: Dict[str, Any], logger: logging.Logger, resume: bool = False) -> None:
+def main(config: Dict[str, Any], logger: logging.Logger) -> None:
     set_global_seed(int(config.get("SEED", 42)))
 
     # Config parameters
     input_size = config["INPUT_SIZE"]  # [H, W, C]
-    h_in, w_in, c_in = input_size
     num_classes = config["OUT_CHANNELS"]
     batch_size = config["BATCH_SIZE"]
 
@@ -327,7 +326,7 @@ if __name__ == "__main__":
         if missing:
             logger.error("Missing required config keys: %s", missing)
             sys.exit(1)
-        main(cfg, logger=logger, resume=args.resume)
+        main(cfg, logger=logger)
     except Exception:
         logger.exception("Fatal error. Exiting.")
         sys.exit(1)
