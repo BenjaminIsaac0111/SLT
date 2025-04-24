@@ -2,8 +2,9 @@ import logging
 from functools import partial
 from typing import List, Dict, Optional
 
+import numpy as np
 from PyQt5.QtCore import pyqtSignal, Qt
-from PyQt5.QtGui import QPainter, QPixmap
+from PyQt5.QtGui import QPainter, QPixmap, QImage
 from PyQt5.QtWidgets import (
     QWidget, QComboBox, QPushButton, QVBoxLayout, QLabel,
     QProgressBar, QGraphicsView, QGraphicsScene, QGridLayout,
@@ -422,6 +423,8 @@ class LabelingStatisticsWidget(QGroupBox):
                 f"Disagreements: {disagreement_count} (Agreement: {agreement_percentage:.2f}%)"
         )
         self.summary_label.setText(summary_text)
+
+
 # ---------------------------------------------------------------------------
 # Custom Graphics View for Crop Display and Zoom Handling
 # ---------------------------------------------------------------------------
@@ -800,3 +803,11 @@ class ClusteredCropsView(QWidget):
 
     def on_export_annotations(self):
         self.export_annotations_requested.emit()
+
+    @staticmethod
+    def _numpy_to_qpixmap(arr: np.ndarray) -> QPixmap:
+        h, w, _ = arr.shape
+        buf = arr.tobytes()  # deep copy – arr may be GC-ed later
+        qimg = QImage(buf, w, h, QImage.Format_RGB888)
+        qimg._buf = buf  # pin buffer
+        return QPixmap.fromImage(qimg)

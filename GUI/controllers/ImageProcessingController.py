@@ -1,6 +1,7 @@
 import logging
 from typing import Dict, List, Optional, Tuple
 
+import numpy as np
 from PyQt5.QtCore import QObject, pyqtSignal, QThreadPool, pyqtSlot, QPoint
 from PyQt5.QtGui import QPixmap, QPainter, QPen, QColor, QImage
 
@@ -153,8 +154,6 @@ class ImageProcessingController(QObject):
         """
         if self.loading_images:
             logging.info("Aborting previous image loading process.")
-            # In a QThreadPool approach, you generally can't forcibly
-            # 'quit' a pool job unless you implement your own stop flag.
 
         self.loading_images = True
         self.crop_loading_started.emit()
@@ -231,9 +230,10 @@ class ImageProcessingController(QObject):
                 logging.warning(f"Missing image or coords for annotation: {anno}")
                 continue
 
-            q_image = self.image_processor.numpy_to_qimage(np_image)
-            q_annotated = self.annotator.draw_annotation(q_image, coord_pos)
-            q_pixmap = QPixmap.fromImage(q_annotated)
+            q_pixmap = self._numpy_to_qpixmap(np_image)
+            q_pixmap = QPixmap.fromImage(
+                self.annotator.draw_annotation(q_pixmap.toImage(), coord_pos)
+            )
 
             sampled_crops.append({
                 'annotation': anno,
@@ -245,6 +245,14 @@ class ImageProcessingController(QObject):
         logging.info(f"Displayed {len(sampled_crops)} sampled crops.")
         self.crop_loading_finished.emit()
         self.loading_images = False
+
+    @staticmethod
+    def _numpy_to_qpixmap(arr: np.ndarray) -> QPixmap:
+        h, w, _ = arr.shape
+        buf = arr.tobytes()  # deep copy, owns memory
+        qimg = QImage(buf, w, h, QImage.Format_RGB888)
+        qimg._buf = buf  # pin buffer to qimg lifespan
+        return QPixmap.fromImage(qimg)
 
     # -------------------------------------------------------------------------
     #                          PREFETCH LOGIC

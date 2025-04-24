@@ -331,7 +331,7 @@ class MainController(QObject):
     def debug_analyze_uncertainty_propagation(
             self,
             *,
-            show_plot: bool = False,
+            show_plot: bool = True,
             save_plot_to: Optional[str] = None,
     ) -> None:
         """Wrapper that plugs the detached utility into MainController."""
@@ -472,8 +472,6 @@ class MainController(QObject):
         self.clustering_controller.clusters = clusters_data
         self.image_processing_controller.set_clusters(clusters_data)
 
-        self._initialize_model_if_needed(project_state)
-
         cluster_info = self.clustering_controller.generate_cluster_info()
         selected_cluster_id = project_state.get('selected_cluster_id', None)
         self.view.populate_cluster_selection(cluster_info, selected_cluster_id=selected_cluster_id)
@@ -590,7 +588,7 @@ class MainController(QObject):
     # helper – create/replace the data‑model if it does not match the file
     # ---------------------------------------------------------------------
     def _initialize_model_if_needed(self, project_state: dict):
-        """Create/replace the model iff the data file differs from the current one."""
+        """Create/replace the model if the data file differs from the current one."""
         data_path = project_state["data_path"]
 
         if self.image_data_model and self.image_data_model.data_path == data_path:

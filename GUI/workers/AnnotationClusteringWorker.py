@@ -105,7 +105,7 @@ class AnnotationClusteringWorker(QRunnable):
 
         if total_annotations == 0:
             logging.warning("No annotations provided for clustering.")
-            self.signals.clustering_finished.emit({})
+            self.signals.clustering_finished.emit({}, None, None)
             return
 
         # Build the feature matrix (logit_features + [uncertainty])

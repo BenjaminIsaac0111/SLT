@@ -51,30 +51,30 @@ def analyze_uncertainty(
         save_path: Optional[Path] = None,
 ) -> UncertaintyDebugStats:
     """
-    Compute summary statistics and (optionally) plot original vs.\ adjusted
-    uncertainties.
-
-    Parameters
-    ----------
-    annotations
-        Iterable of Annotation objects (must expose ``uncertainty`` and
-        ``adjusted_uncertainty``).
-    show
-        If ``True`` call ``plt.show()`` (interactive usage).
-    save_path
-        If provided, save the figure at this path. Parent directories are
-        created automatically.
-
-    Returns
-    -------
-    UncertaintyDebugStats
-        Structured metrics for downstream logging or testing.
+    Compute summary statistics and (optionally) plot original vs. adjusted
+    uncertainties.  If orig == adj everywhere, we assign perfect correlations
+    (r = ρ = 1) and p-values = 1 to indicate no evidence against the null.
     """
     if not annotations:
         raise ValueError("No annotations provided")
 
     orig = np.asarray([a.uncertainty for a in annotations], dtype=float)
     adj = np.asarray([a.adjusted_uncertainty for a in annotations], dtype=float)
+    diff = orig - adj
+
+    # --- handle the degenerate "all-zero difference" case ---
+    if np.allclose(diff, 0):
+        pearson_r = 1.0
+        spearman_rho = 1.0
+        pvalue_paired_t = 1.0
+        pvalue_wilcoxon = 1.0
+    else:
+        pearson_r = np.corrcoef(orig, adj)[0, 1]
+        spearman_rho = stats.spearmanr(orig, adj, nan_policy="omit").correlation
+        pvalue_paired_t = stats.ttest_rel(orig, adj, nan_policy="omit").pvalue
+        pvalue_wilcoxon = stats.wilcoxon(orig, adj,
+                                         zero_method="wilcox",
+                                         correction=True).pvalue
 
     stats_out = UncertaintyDebugStats(
         n=len(orig),
@@ -82,10 +82,10 @@ def analyze_uncertainty(
         std_orig=orig.std(ddof=1),
         mean_adj=adj.mean(),
         std_adj=adj.std(ddof=1),
-        pearson_r=np.corrcoef(orig, adj)[0, 1],
-        spearman_rho=stats.spearmanr(orig, adj, nan_policy="omit").correlation,
-        pvalue_paired_t=stats.ttest_rel(orig, adj, nan_policy="omit").pvalue,
-        pvalue_wilcoxon=stats.wilcoxon(orig, adj, zero_method="wilcox", correction=True).pvalue,
+        pearson_r=pearson_r,
+        spearman_rho=spearman_rho,
+        pvalue_paired_t=pvalue_paired_t,
+        pvalue_wilcoxon=pvalue_wilcoxon,
     )
 
     # ------------------------------------------------------------------ plot
@@ -93,7 +93,7 @@ def analyze_uncertainty(
         fig, ax = plt.subplots(1, 2, figsize=(12, 4), constrained_layout=True)
 
         # Histogram
-        bins = "auto"  # Freedman‑Diaconis via numpy
+        bins = "auto"
         ax[0].hist(orig, bins=bins, alpha=0.6, label="Original")
         ax[0].hist(adj, bins=bins, alpha=0.6, label="Adjusted")
         ax[0].set_xlabel("Uncertainty")
@@ -102,14 +102,14 @@ def analyze_uncertainty(
         ax[0].legend()
 
         # Scatter
-        reduction = orig - adj
-        sc = ax[1].scatter(orig, adj, c=reduction, cmap="viridis", alpha=0.5)
-        ax[1].plot([orig.min(), orig.max()], [orig.min(), orig.max()],
+        sc = ax[1].scatter(orig, adj, c=diff, cmap="viridis", alpha=0.5)
+        ax[1].plot([orig.min(), orig.max()],
+                   [orig.min(), orig.max()],
                    ls="--", lw=0.7, color="grey")
         ax[1].set_xlabel("Original")
         ax[1].set_ylabel("Adjusted")
         ax[1].set_title("Original vs. adjusted")
-        cb = fig.colorbar(sc, ax=ax[1], label="Δ uncertainty")
+        fig.colorbar(sc, ax=ax[1], label="Δ uncertainty")
 
         if save_path:
             save_path = Path(save_path)

@@ -28,7 +28,8 @@ def setup_logging():
     logging.basicConfig(
         level=logging.DEBUG,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=[logging.StreamHandler(sys.stdout)]
+        handlers=[logging.StreamHandler(sys.stdout)],
+        force=True
     )
     logging.debug("Logging has been configured.")
 
@@ -175,7 +176,7 @@ def _show_startup_dialog(latest_autosave_file: Optional[str], controller, icon_p
             "data_backend": _backend_from_path(data_path),
             "data_path": data_path,
             "uncertainty": "bald",
-            "clusters": {},  # empty project
+            "clusters": None,  # empty project
         }
         controller.set_model(create_image_data_model(project_state))
     else:
@@ -203,7 +204,6 @@ def _create_main_window(clustered_crops_view: QDialog) -> QMainWindow:
 
 
 def main():
-    setup_logging()
     app = _initialize_qt_app()
     icon_path = "GUI/assets/icons/icons8-point-100.png"
     _set_app_icon(app, icon_path)
@@ -211,6 +211,7 @@ def main():
     from GUI.views.ClusteredCropsView import ClusteredCropsView
     from GUI.controllers.MainController import MainController
 
+    setup_logging()
     clustered_crops_view = ClusteredCropsView()
     controller = MainController(model=None, view=clustered_crops_view)
 

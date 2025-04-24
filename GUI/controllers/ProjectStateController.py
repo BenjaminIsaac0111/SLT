@@ -192,7 +192,7 @@ class ProjectStateController(QObject):
     # -------------------------------------------------------------------------
     @staticmethod
     def _is_project_state_empty(project_state: dict) -> bool:
-        return not project_state.get('annotations')
+        return not project_state.get('clusters')
 
     @staticmethod
     def _save_to_file(project_state: dict, file_path: str):
