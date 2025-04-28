@@ -6,29 +6,29 @@ import numpy as np
 
 @dataclass
 class Annotation:
-    """
-    Holds metadata for a single annotation on an image, including:
-      - Image index and filename
-      - Coordinate of the annotation
-      - Logits and uncertainty information
-      - Class/cluster assignments
-      - Optional model prediction
-      - Adjusted uncertainty (for propagating uncertainty reduction)
-    """
     image_index: int
     filename: str
     coord: Tuple[int, int]
     logit_features: np.ndarray
     uncertainty: Union[float, np.ndarray]
-    class_id: Optional[int] = -1  # Default to -1 (unlabeled)
-    cluster_id: Optional[int] = None  # No cluster assignment by default
-    model_prediction: Optional[str] = None  # Optional field for model's class prediction
+    class_id: Optional[int] = -1
+    cluster_id: Optional[int] = None
+    model_prediction: Optional[str] = None
     adjusted_uncertainty: Optional[Union[float, np.ndarray]] = None
 
+    # ---------- core ---------------------------------------------------------
+    def __setattr__(self, name, value):
+        if name == "uncertainty" and hasattr(self, "uncertainty"):
+            raise AttributeError("`uncertainty` is read-only once set.")
+        super().__setattr__(name, value)
+
     def __post_init__(self):
-        # If no adjusted uncertainty is provided, initialize it as the original uncertainty.
         if self.adjusted_uncertainty is None:
             self.adjusted_uncertainty = self.uncertainty
+
+    def reset_uncertainty(self) -> None:
+        """Restore posterior to prior"""
+        self.adjusted_uncertainty = self.uncertainty
 
     def to_dict(self) -> dict:
         """

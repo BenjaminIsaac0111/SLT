@@ -19,7 +19,7 @@ from GUI.models.PointAnnotationGenerator import (
     LocalMaximaPointAnnotationGenerator,
     EquidistantPointAnnotationGenerator,
 )
-from GUI.models.UncertaintyPropagator import DistanceBasedPropagator
+from GUI.models.UncertaintyPropagator import propagate_for_annotations
 from GUI.unittests.debug_uncertainty_propargation import analyze_uncertainty
 from GUI.views.ClusteredCropsView import ClusteredCropsView
 
@@ -302,31 +302,9 @@ class MainController(QObject):
         self.feature_matrix = feature_matrix
         logging.info("Feature matrix has been updated in the Main Controller.")
 
-    def propagate_labeling_changes(self):
-        """
-        Updates uncertainties across all annotations based on the current manual labels.
-        Delegates the propagation logic to the UncertaintyPropagator service.
-        """
-        all_annos = self._get_all_annotations()
-
-        local_feature_matrix = np.array([
-            np.concatenate([anno.logit_features])
-            for anno in all_annos
-        ], dtype=np.float32)
-
-        current_uncertainties = np.array([anno.adjusted_uncertainty for anno in all_annos], dtype=np.float32)
-
-        labeled_indices = np.where(np.array([anno.class_id != -1 for anno in all_annos]))[0]
-        labeled_features = local_feature_matrix[labeled_indices]
-
-        propagator = DistanceBasedPropagator(labeled_features=labeled_features)
-
-        updated_uncertainties = propagator.propagate(
-            feature_matrix=local_feature_matrix,
-            uncertainties=current_uncertainties
-        )
-
-        self._update_annotation_uncertainties(updated_uncertainties)
+    def propagate_labeling_changes(self) -> None:
+        """Re-compute adjusted_uncertainty for every annotation."""
+        propagate_for_annotations(self._get_all_annotations())
 
     def debug_analyze_uncertainty_propagation(
             self,
