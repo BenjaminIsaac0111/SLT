@@ -14,12 +14,47 @@ Key properties
 """
 
 from abc import ABC, abstractmethod
-from typing import List
+from typing import Optional
+from typing import Union, List
 
 import numpy as np
 from numba import njit
+from scipy.spatial import cKDTree
 
 from GUI.models.Annotation import Annotation
+
+
+def auto_lambda(
+        feats: np.ndarray,
+        k: Optional[int] = None
+) -> float:
+    """
+    Data-driven λ based on the median k-NN distance.
+
+    Parameters
+    ----------
+    feats : (n, d) float32
+        Feature matrix (all points, labelled or not).
+    k : int, optional
+        Order of the neighbour to use.  Default log2(n).
+
+    Returns
+    -------
+    lambda_param : float
+        Scale parameter for the Gaussian kernel.
+    """
+    # choose k adaptively once
+    n = feats.shape[0]
+    if k is None:
+        k = max(1, int(np.ceil(np.log2(n))))
+
+    # fast exact k-NN search
+    tree = cKDTree(feats)
+    # query returns the distance to each of the first k+1 neighbours
+    dists, _ = tree.query(feats, k=k + 1)  # include self at column 0
+    sigma = np.median(dists[:, -1])  # k-th neighbour
+
+    return 1.0 / sigma ** 2  # λ = 1/σ²
 
 
 # -----------------------------------------------------------------------------
@@ -117,32 +152,29 @@ class DistanceBasedPropagator(BaseUncertaintyPropagator):
 def propagate_for_annotations(
         annos: List[Annotation],
         *,
-        lambda_param: float = .1,
+        lambda_param: Union[float, str] = "auto",
         threshold: float = np.inf,
+        k_auto: Optional[int] = None,
 ) -> None:
-    """
-    In-place update of Annotation.adjusted_uncertainty.
-
-    Parameters
-    ----------
-    annos
-        List of Annotation objects (any order, any clusters).
-    lambda_param, threshold
-        Hyper-parameters of the Gaussian kernel.
-    """
     if not annos:
         return
 
     feats = np.stack([a.logit_features for a in annos]).astype(np.float32)
     prior_u = np.array([a.uncertainty for a in annos], dtype=np.float32)
-    mask_lbl = np.array([a.class_id != -1 for a in annos])
+    mask_lbl = np.array([a.class_id not in (-1, -2) for a in annos])
     lbl_feats = feats[mask_lbl]
 
+    # ---------- automatic λ -----------------------------------------------
+    if isinstance(lambda_param, str) and lambda_param.lower() == "auto":
+        lambda_param = auto_lambda(feats, k=k_auto)
+    # ----------------------------------------------------------------------
+
     post_u = DistanceBasedPropagator(
-        lbl_feats, lambda_param=lambda_param, threshold=threshold
+        lbl_feats,
+        lambda_param=lambda_param,
+        threshold=threshold,
     ).propagate(feats, prior_u)
 
-    post_u[mask_lbl] = 0.0  # labelled points → zero
-
+    post_u[mask_lbl] = 0.0
     for a, u in zip(annos, post_u):
         a.adjusted_uncertainty = float(u) if np.isscalar(u) else u
