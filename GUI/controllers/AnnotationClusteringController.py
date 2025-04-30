@@ -97,7 +97,6 @@ class AnnotationClusteringController(QObject):
 
         self.clusters: Dict[int, List[Annotation]] = {}
         self.cluster_labels: Dict[int, str] = {}
-        self.crops_per_cluster = 100
 
         self.clustering_in_progress = False
         self.annotation_extraction_worker: Optional[AnnotationExtractionWorker] = None
@@ -127,7 +126,7 @@ class AnnotationClusteringController(QObject):
         worker = AnnotationClusteringWorker(
             annotations=all_annotations,
             subsample_ratio=1.0,
-            cluster_method="gaussianmixture"
+            cluster_method="minibatchkmeans"
         )
         worker.signals.clustering_finished.connect(self.on_clustering_finished)
         worker.signals.progress_updated.connect(self.clustering_progress.emit)
@@ -257,10 +256,6 @@ class AnnotationClusteringController(QObject):
 
     def get_clusters(self) -> Dict[int, List[Annotation]]:
         return self.clusters
-
-    def set_crops_per_cluster(self, num_crops: int):
-        self.crops_per_cluster = num_crops
-        logging.info(f"Crops per cluster set to {num_crops}.")
 
     def cleanup(self):
         """

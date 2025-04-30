@@ -169,9 +169,6 @@ class ImageProcessingController(QObject):
         else:
             self._display_processed_annotations(processed_annos)
 
-        # Prefetch neighbors
-        self._preload_adjacent_clusters(cluster_id)
-
     def refresh_current_cluster(self, current_cluster_id: Optional[int]):
         """
         Reloads crops for the specified cluster, if valid.
@@ -257,7 +254,7 @@ class ImageProcessingController(QObject):
     # -------------------------------------------------------------------------
     #                          PREFETCH LOGIC
     # -------------------------------------------------------------------------
-    def _preload_adjacent_clusters(self, cluster_id: int):
+    def preload_next_clusters(self, cluster_id: int):
         """
         Triggers background loading for adjacent clusters.
         """
@@ -278,9 +275,9 @@ class ImageProcessingController(QObject):
 
         for neighbor_id in neighbors:
             if not self._is_cluster_cached(neighbor_id):
-                self._start_background_prefetch(neighbor_id)
+                self.start_background_prefetch(neighbor_id)
 
-    def _start_background_prefetch(self, cluster_id: int):
+    def start_background_prefetch(self, cluster_id: int):
         if cluster_id in self.prefetching_clusters:
             logging.debug(f"Already prefetching cluster {cluster_id}.")
             return

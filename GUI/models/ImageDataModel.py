@@ -10,7 +10,7 @@ Key design points
 * **Immutable shared metadata** – expensive metadata such as the list of
   filenames is computed once under the GIL and then shared read‑only across
   threads.
-* **Transparent caching** – heavy unmarshalling (BLOB→NumPy) is memoised via
+* **Transparent caching** – heavy unmarshalling (BLOB→NumPy) is memorised via
   ``CacheManager`` (LRU).
 * **Back‑end factory** – ``create_image_data_model()`` instantiates the correct
   concrete class based solely on the ``project_state`` dictionary found in each
@@ -20,13 +20,11 @@ Both concrete subclasses implement the same public interface defined by
 :class:`BaseImageDataModel`.
 """
 
-from __future__ import annotations
-
 import logging
 import sqlite3
 import threading
 from abc import ABCMeta, abstractmethod
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List, Sequence, Optional
 
 import h5py
 import numpy as np
@@ -82,9 +80,6 @@ class BaseImageDataModel(QObject, metaclass=ABCQObjectMeta):
 # -----------------------------------------------------------------------------
 class HDF5ImageDataModel(BaseImageDataModel):
     """Thread‑local SWMR HDF5 reader."""
-
-    cache = CacheManager()
-
     def __init__(self, project_state: Dict[str, Any]):
         super().__init__()
         self._db_path: str = project_state["data_path"]
@@ -113,11 +108,6 @@ class HDF5ImageDataModel(BaseImageDataModel):
         if not (0 <= index < len(self._filenames)):
             raise IndexError("index out of range")
 
-        key = (index, self._uncertainty_type)
-        cached = self.cache.get(key)
-        if cached is not None:
-            return cached
-
         f: h5py.File = self._tls.h5f
         image = f["rgb_images"][index]
         logits = f["logits"][index]
@@ -130,7 +120,6 @@ class HDF5ImageDataModel(BaseImageDataModel):
             "uncertainty": uncertainty,
             "filename": fname,
         }
-        self.cache.set(key, record)
         return record
 
     def get_filenames(self) -> List[str]:
@@ -143,7 +132,7 @@ class HDF5ImageDataModel(BaseImageDataModel):
 
     def close(self) -> None:
         """Close the per‑thread HDF5 file handle (no effect on other threads)."""
-        h5f: h5py.File | None = getattr(self._tls, "h5f", None)
+        h5f: Optional[h5py.File] = getattr(self._tls, "h5f", None)
         if h5f is not None:
             h5f.close()
             del self._tls.h5f
@@ -197,7 +186,7 @@ class SQLiteImageDataModel(BaseImageDataModel):
     # ---------------------------------------------------------------------
     @property
     def _conn(self) -> sqlite3.Connection:
-        conn: sqlite3.Connection | None = getattr(self._tls, "conn", None)
+        conn: Optional[sqlite3.Connection] = getattr(self._tls, "conn", None)
         if conn is None:
             conn = sqlite3.connect(self._db_path, detect_types=sqlite3.PARSE_DECLTYPES)
             conn.row_factory = sqlite3.Row
@@ -241,9 +230,9 @@ class SQLiteImageDataModel(BaseImageDataModel):
             if row is None:
                 raise KeyError(f"missing array '{name}' for sample {sample_id}")
             dims: Sequence[int] = [row[f"dim{i}"] for i in range(row["ndims"])]
-            # make an *owned* copy of the BLOB to avoid use‑after‑free
-            buf = memoryview(row["data"]).tobytes()
-            return np.frombuffer(buf, dtype=row["dtype"]).reshape(dims)
+            blob_bytes: bytes = row["data"]  # this is the single allocation
+            arr = np.frombuffer(blob_bytes, dtype=row["dtype"])
+            return arr.reshape(dims)
 
         image = _load_array("rgb")
         logits = _load_array("logits")
@@ -268,7 +257,7 @@ class SQLiteImageDataModel(BaseImageDataModel):
         return len(self._filenames)
 
     def close(self) -> None:
-        conn: sqlite3.Connection | None = getattr(self._tls, "conn", None)
+        conn: Optional[sqlite3.Connection] = getattr(self._tls, "conn", None)
         if conn is not None:
             conn.close()
             del self._tls.conn

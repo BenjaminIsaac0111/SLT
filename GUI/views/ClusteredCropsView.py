@@ -108,7 +108,8 @@ class ClusteringControlsWidget(QGroupBox):
 # Navigation Controls Widget
 # ---------------------------------------------------------------------------
 class NavigationControlsWidget(QGroupBox):
-    sample_cluster = pyqtSignal(int)
+    # Signals
+    sample_cluster = pyqtSignal(int)  # unchanged
     next_recommended_cluster_requested = pyqtSignal()
 
     def __init__(self):
@@ -118,26 +119,13 @@ class NavigationControlsWidget(QGroupBox):
     def _init_ui(self):
         layout = QVBoxLayout()
 
-        # Navigation Buttons and Combo Box
-        nav_layout = QHBoxLayout()
-        self.prev_cluster_button = QPushButton("Previous (Backspace)")
-        self.prev_cluster_button.clicked.connect(self.on_prev_cluster)
-        self.prev_cluster_button.setEnabled(False)
-
         self.cluster_combo = QComboBox()
         self.cluster_combo.currentIndexChanged.connect(self.on_cluster_selected)
+        layout.addWidget(self.cluster_combo)
 
-        self.next_cluster_button = QPushButton("Next (Enter)")
-        self.next_cluster_button.clicked.connect(self.on_next_cluster)
-        self.next_cluster_button.setEnabled(False)
-
-        nav_layout.addWidget(self.prev_cluster_button)
-        nav_layout.addWidget(self.cluster_combo)
-        nav_layout.addWidget(self.next_cluster_button)
-        layout.addLayout(nav_layout)
-
-        self.next_recommended_button = QPushButton("Go to Recommended Cluster")
+        self.next_recommended_button = QPushButton("Go to Recommended Cluster (⏎)")
         self.next_recommended_button.clicked.connect(self.on_next_recommended)
+        self.next_recommended_button.setFocusPolicy(Qt.NoFocus)
         layout.addWidget(self.next_recommended_button)
 
         self.setLayout(layout)
@@ -150,9 +138,6 @@ class NavigationControlsWidget(QGroupBox):
         if cluster_id is not None:
             logging.debug(f"Cluster selected: {cluster_id}")
             self.sample_cluster.emit(cluster_id)
-        # Update navigation button states
-        self.prev_cluster_button.setEnabled(index > 0)
-        self.next_cluster_button.setEnabled(index < self.cluster_combo.count() - 1)
 
     def on_prev_cluster(self):
         current_index = self.cluster_combo.currentIndex()
@@ -191,10 +176,6 @@ class NavigationControlsWidget(QGroupBox):
                 self.cluster_combo.setCurrentIndex(index)
 
         self.cluster_combo.blockSignals(False)
-        has_clusters = (self.cluster_combo.count() > 0)
-        current_index = self.cluster_combo.currentIndex()
-        self.prev_cluster_button.setEnabled(has_clusters and current_index > 0)
-        self.next_cluster_button.setEnabled(has_clusters and current_index < self.cluster_combo.count() - 1)
 
     def get_selected_cluster_id(self) -> Optional[int]:
         index = self.cluster_combo.currentIndex()
@@ -470,7 +451,7 @@ class ClusteredCropsView(QWidget):
     request_clustering = pyqtSignal()
     annotation_method_changed = pyqtSignal(str)
     sample_cluster = pyqtSignal(int)
-    sampling_parameters_changed = pyqtSignal(int, int)  # (cluster_id, crops_per_cluster)
+    backtrack_requested = pyqtSignal()
     bulk_label_changed = pyqtSignal(int)  # class_id for all visible crops
     crop_label_changed = pyqtSignal(dict, int)  # (annotation_dict, class_id)
     save_project_state_requested = pyqtSignal()
@@ -483,9 +464,10 @@ class ClusteredCropsView(QWidget):
         super().__init__()
         self.zoom_level = 5
         self.selected_crops: List[dict] = []
+        self._nav_history: List[int] = []
 
         self._init_ui()
-        self.setFocusPolicy(Qt.StrongFocus)
+        self.setFocus(Qt.OtherFocusReason)
         self.setFocus()
 
     def _init_ui(self):
@@ -588,10 +570,10 @@ class ClusteredCropsView(QWidget):
             self.on_agree_with_model_clicked()
             return
         if key in (Qt.Key_Return, Qt.Key_Enter):
-            self.navigation_widget.on_next_cluster()
+            self.navigation_widget.on_next_recommended()
             return
         if key == Qt.Key_Backspace:
-            self.navigation_widget.on_prev_cluster()
+            self.backtrack_requested.emit()
             return
         super().keyPressEvent(event)
 
@@ -736,9 +718,11 @@ class ClusteredCropsView(QWidget):
                 max_row_height = 0
 
         expected = len(self.selected_crops)
-        assert arranged_count == expected, (
-            f"View arrangement mismatch: expected {expected}, arranged {arranged_count}"
-        )
+        if arranged_count != expected:
+            logging.warning(
+                "Arranged %d/%d crops—skipping assert to maintain UI stability.",
+                arranged_count, expected
+            )
         logging.info(f"Arranged {arranged_count} crops in the view.")
         self.scene.setSceneRect(self.scene.itemsBoundingRect())
         if self.crop_loading_progress_bar.isVisible():

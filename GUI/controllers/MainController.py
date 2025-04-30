@@ -38,6 +38,7 @@ class MainController(QObject):
         self.feature_matrix = None
         self.image_data_model: Optional[BaseImageDataModel] = model
         self.view = view
+        self._nav_history: list[int] = []
         self.annotation_generator = LocalMaximaPointAnnotationGenerator()
 
         # Controllers use BaseImageDataModel interface
@@ -76,8 +77,7 @@ class MainController(QObject):
         """
         # --- View -> Controller ---
         self.view.request_clustering.connect(self.clustering_controller.start_clustering)
-        self.view.sample_cluster.connect(self.on_sample_cluster)
-        self.view.sampling_parameters_changed.connect(self.on_sampling_parameters_changed)
+        self.view.sample_cluster.connect(self.on_select_cluster)
         self.view.annotation_method_changed.connect(self.on_annotation_method_changed)
         self.view.bulk_label_changed.connect(self.on_bulk_label_changed)
         self.view.crop_label_changed.connect(self.on_crop_label_changed)
@@ -87,7 +87,7 @@ class MainController(QObject):
         self.view.save_project_requested.connect(self.save_project)
         self.view.save_project_as_requested.connect(self.save_project_as)
         self.view.navigation_widget.next_recommended_cluster_requested.connect(self.on_next_recommended_cluster)
-
+        self.view.backtrack_requested.connect(self.on_backtrack_requested)
         # --- ClusteringController -> View ---
         self.clustering_controller.show_clustering_progress_bar.connect(self.view.show_clustering_progress_bar)
         self.clustering_controller.hide_clustering_progress_bar.connect(self.view.hide_clustering_progress_bar)
@@ -146,11 +146,11 @@ class MainController(QObject):
         first_cluster_id = list(cluster_info.keys())[0] if cluster_info else None
         self.view.populate_cluster_selection(cluster_info, selected_cluster_id=first_cluster_id)
         if first_cluster_id is not None:
-            self.on_sample_cluster(first_cluster_id)
+            self.on_select_cluster(first_cluster_id)
         self.view.hide_clustering_progress_bar()
 
     @pyqtSlot(int)
-    def on_sample_cluster(self, cluster_id: int):
+    def on_select_cluster(self, cluster_id: int):
         """
         Handles the request to sample a cluster and display its crops.
 
@@ -164,17 +164,6 @@ class MainController(QObject):
             return
         self.image_processing_controller.display_crops(annotations, cluster_id)
 
-    @pyqtSlot(int, int)
-    def on_sampling_parameters_changed(self, cluster_id: int, crops_per_cluster: int):
-        """
-        Handles changes in sampling parameters by refreshing the displayed crops.
-
-        :param cluster_id: The ID of the selected cluster.
-        :param crops_per_cluster: The updated number of crops per cluster.
-        """
-        logging.info(f"Sampling parameters changed: Cluster {cluster_id}, {crops_per_cluster} crops per cluster.")
-        self.image_processing_controller.set_crops_per_cluster(crops_per_cluster, cluster_id)
-
     def handle_sampling_parameters_changed(self):
         """
         Handles the sampling parameters after debouncing.
@@ -183,7 +172,7 @@ class MainController(QObject):
         logging.info("Handling debounced sampling parameter changes.")
         selected_cluster_id = self.view.get_selected_cluster_id()
         if selected_cluster_id is not None:
-            self.on_sample_cluster(selected_cluster_id)
+            self.on_select_cluster(selected_cluster_id)
         else:
             logging.warning("No cluster is currently selected. Clearing displayed crops.")
             self.view.display_sampled_crops([])
@@ -268,14 +257,29 @@ class MainController(QObject):
 
     @pyqtSlot()
     def on_next_recommended_cluster(self):
+        current = self.view.get_selected_cluster_id()
+        if current is not None:
+            self._nav_history.append(current)  # push
         next_cluster_id = self.select_next_cluster_based_on_greedy_metric()
         if next_cluster_id is not None:
             # Update view to display the recommended cluster
             updated_cluster_info = self.clustering_controller.generate_cluster_info()
             self.view.populate_cluster_selection(updated_cluster_info, selected_cluster_id=next_cluster_id)
-            self.on_sample_cluster(next_cluster_id)
+            self.on_select_cluster(next_cluster_id)
         else:
             logging.info("No next recommended cluster found.")
+
+    @pyqtSlot()
+    def on_backtrack_requested(self):
+        """Restore the previously displayed recommended cluster, if any."""
+        if not self._nav_history:
+            logging.debug("Backtrack: history empty; nothing to do.")
+            return
+
+        last = self._nav_history.pop()
+        cluster_info = self.clustering_controller.generate_cluster_info()
+        self.view.populate_cluster_selection(cluster_info, selected_cluster_id=last)
+        self.on_select_cluster(last)
 
     def _get_all_annotations(self) -> List[Annotation]:
         """
@@ -341,6 +345,7 @@ class MainController(QObject):
                     best_score = aggregated_uncertainty
                     best_cluster_id = cid
 
+        # self.image_processing_controller.start_background_prefetch(best_cluster_id)
         logging.info(f"Next recommended cluster: {best_cluster_id} with aggregated uncertainty {best_score:.4f}")
         return best_cluster_id
 
@@ -455,11 +460,11 @@ class MainController(QObject):
         self.view.populate_cluster_selection(cluster_info, selected_cluster_id=selected_cluster_id)
 
         if selected_cluster_id and selected_cluster_id in clusters_data:
-            self.on_sample_cluster(selected_cluster_id)
+            self.on_select_cluster(selected_cluster_id)
         else:
             first_cluster_id = next(iter(clusters_data), None)
             if first_cluster_id is not None:
-                self.on_sample_cluster(first_cluster_id)
+                self.on_select_cluster(first_cluster_id)
 
         self.view.hide_progress_bar()
         self.clustering_controller.compute_labeling_statistics()
