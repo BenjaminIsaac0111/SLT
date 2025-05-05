@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+
 import json
 import logging
 from collections import OrderedDict
@@ -9,16 +11,20 @@ import numpy as np
 from PyQt5.QtCore import QObject, pyqtSlot, QTimer, QCoreApplication
 from PyQt5.QtWidgets import QFileDialog, QMessageBox
 
+from GUI.configuration.configuration import PROJECT_EXT, MIME_FILTER, LEGACY_FILTER
 from GUI.controllers.AnnotationClusteringController import AnnotationClusteringController
 from GUI.controllers.ImageProcessingController import ImageProcessingController
 from GUI.controllers.ProjectStateController import ProjectStateController
+from GUI.models import StatePersistance
 from GUI.models.Annotation import Annotation
+from GUI.models.ClusterRanker import score_cluster
 # Use unified interface and factory
 from GUI.models.ImageDataModel import BaseImageDataModel, create_image_data_model
 from GUI.models.PointAnnotationGenerator import (
     LocalMaximaPointAnnotationGenerator,
     EquidistantPointAnnotationGenerator,
 )
+from GUI.models.StatePersistance import ProjectState
 from GUI.models.UncertaintyPropagator import propagate_for_annotations
 from GUI.unittests.debug_uncertainty_propargation import analyze_uncertainty
 from GUI.views.ClusteredCropsView import ClusteredCropsView
@@ -28,6 +34,7 @@ class MainController(QObject):
     """
     Main orchestrator of the application, backend-agnostic data model
     """
+    AUTOSAVE_IDLE_MS = 10_000
 
     def __init__(
             self,
@@ -48,9 +55,9 @@ class MainController(QObject):
         self.image_processing_controller = ImageProcessingController(self.image_data_model)
         self.project_state_controller = ProjectStateController(self.image_data_model)
 
-        self.autosave_timer = QTimer()
-        self.autosave_timer.setInterval(30000)
-        self.autosave_timer.timeout.connect(self.autosave_project_state)
+        self._dirty = False  # ← any unsaved change?
+        self._idle_timer = QTimer(singleShot=True)
+        self._idle_timer.timeout.connect(self._autosave_if_dirty)
 
         self.connect_signals()
         QCoreApplication.instance().aboutToQuit.connect(self.cleanup)
@@ -67,8 +74,6 @@ class MainController(QObject):
         self.image_processing_controller.model = model
         self.project_state_controller.model = model
 
-        if not self.autosave_timer.isActive():
-            self.autosave_timer.start()
         logging.info("Data model set: %s", model.data_path)
 
     def connect_signals(self):
@@ -78,7 +83,7 @@ class MainController(QObject):
         # --- View -> Controller ---
         self.view.request_clustering.connect(self.clustering_controller.start_clustering)
         self.view.sample_cluster.connect(self.on_select_cluster)
-        self.view.annotation_method_changed.connect(self.on_annotation_method_changed)
+        self.view.annotation_method_changed.connect(self.on_label_generator_method_changed)
         self.view.bulk_label_changed.connect(self.on_bulk_label_changed)
         self.view.crop_label_changed.connect(self.on_crop_label_changed)
         self.view.save_project_state_requested.connect(self.save_project)
@@ -115,7 +120,7 @@ class MainController(QObject):
     # -------------------------------------------------------------------------
 
     @pyqtSlot(str)
-    def on_annotation_method_changed(self, method: str):
+    def on_label_generator_method_changed(self, method: str):
         """
         Instantiates the appropriate annotation generator based on the selected method,
         and updates the clustering controller accordingly.
@@ -134,6 +139,9 @@ class MainController(QObject):
 
         self.clustering_controller.annotation_generator = self.annotation_generator
         logging.info("Annotation generator updated to method: %s", method)
+
+        self._dirty = True
+        self._idle_timer.start(self.AUTOSAVE_IDLE_MS)
 
     @pyqtSlot(dict, object, object)
     def on_clusters_ready(self, clusters: Dict[int, List[Annotation]], clustering_model, feature_matrix):
@@ -203,14 +211,6 @@ class MainController(QObject):
         cluster_info = self.clustering_controller.generate_cluster_info()
         self.view.populate_cluster_selection(cluster_info, selected_cluster_id=selected_cluster_id)
 
-        # Compute the next recommended cluster in the background
-        next_cluster_id = self.select_next_cluster_based_on_greedy_metric()
-        if next_cluster_id is not None:
-            self.view.set_recommended_cluster(next_cluster_id)
-            logging.info(f"Next recommended cluster set to {next_cluster_id} based on updated uncertainties.")
-        else:
-            logging.info("No next cluster recommendation available.")
-
         self.autosave_project_state()
 
     @pyqtSlot(dict, int)
@@ -246,14 +246,8 @@ class MainController(QObject):
         cluster_info = self.clustering_controller.generate_cluster_info()
         self.view.populate_cluster_selection(cluster_info, selected_cluster_id=cluster_id)
 
-        next_cluster_id = self.select_next_cluster_based_on_greedy_metric()
-        if next_cluster_id is not None:
-            self.view.set_recommended_cluster(next_cluster_id)
-            logging.info(f"Next recommended cluster updated to {next_cluster_id} after individual crop label change.")
-        else:
-            logging.info("No next recommended cluster available after individual crop label change.")
-
-        self.autosave_project_state()
+        self._dirty = True
+        self._idle_timer.start(self.AUTOSAVE_IDLE_MS)
 
     @pyqtSlot()
     def on_next_recommended_cluster(self):
@@ -340,40 +334,54 @@ class MainController(QObject):
 
         for cid, annotations in clusters.items():
             if annotations:
-                aggregated_uncertainty = np.mean([anno.adjusted_uncertainty for anno in annotations])
-                if aggregated_uncertainty > best_score:
-                    best_score = aggregated_uncertainty
+                aggregated_uncertainty = [anno.adjusted_uncertainty for anno in annotations]
+                score = score_cluster(aggregated_uncertainty, method='topk', k=3)
+                if score > best_score:
+                    best_score = score
                     best_cluster_id = cid
 
-        # self.image_processing_controller.start_background_prefetch(best_cluster_id)
         logging.info(f"Next recommended cluster: {best_cluster_id} with aggregated uncertainty {best_score:.4f}")
         return best_cluster_id
 
     # -------------------------------------------------------------------------
     #                           PROJECT STATE
     # -------------------------------------------------------------------------
-    def get_current_state(self) -> dict:
-        if not self.image_data_model:
-            return {}
+    # -----------------------------------------------------------------
+    #            PROJECT STATE  – new implementation
+    # -----------------------------------------------------------------
+    def get_current_state(self) -> StatePersistance.ProjectState:
+        """Return a fully‑validated ProjectState instance."""
+        if self.image_data_model is None:
+            # an empty placeholder—won't be saved but keeps type consistent
+            return StatePersistance.ProjectState(
+                schema_version=2,
+                data_backend="",
+                data_path="",
+                clusters={},
+                cluster_order=[],
+                selected_cluster_id=None,
+            )
 
         backend = getattr(
             self.image_data_model,
             "backend",
-            Path(self.image_data_model.data_path).suffix.lstrip(".").lower(),  # fallback
+            Path(self.image_data_model.data_path).suffix.lstrip(".").lower(),
         )
 
-        return {
-            "schema_version": 2,
-            "data_backend": backend,
-            "data_path": self.image_data_model.data_path,
-            "uncertainty": 'bald',
-            "clusters": {
+        clusters = self.clustering_controller.get_clusters()
+        state = StatePersistance.ProjectState(
+            schema_version=2,
+            data_backend=backend,
+            data_path=self.image_data_model.data_path,
+            uncertainty="bald",
+            clusters={
                 str(cid): [a.to_dict() for a in annos]
-                for cid, annos in self.clustering_controller.get_clusters().items()
+                for cid, annos in clusters.items()
             },
-            "cluster_order": list(self.clustering_controller.get_clusters()),
-            "selected_cluster_id": self.view.get_selected_cluster_id(),
-        }
+            cluster_order=list(clusters),
+            selected_cluster_id=self.view.get_selected_cluster_id(),
+        )
+        return state
 
     def autosave_project_state(self):
         """
@@ -398,22 +406,64 @@ class MainController(QObject):
             return self.save_project_as()
         self.project_state_controller.save_project_state(self.get_current_state(), path)
 
+    # at the top of the file or in a shared constants module ------------
+    PROJECT_EXT = ".slt"  # Smart‑Labelling‑Tool file
+    MIME_FILTER = f"SLT Project (*{PROJECT_EXT})"
+    LEGACY_FILTER = "Legacy Project (*.json.gz)"
+
+    # -------------------------------------------------------------------
     @pyqtSlot()
-    def save_project_as(self):
-        file_path, _ = QFileDialog.getSaveFileName(
-            self.view, "Save Project As", "", "JSON GZipped (*.json.gz);;All Files (*)"
+    def save_project_as(self) -> None:
+        """
+        Prompt for a filename and write the current project state.
+        Defaults to the modern *.slt* container (Zstandard‑compressed JSON).
+        """
+        file_path, chosen_filter = QFileDialog.getSaveFileName(
+            self.view,
+            "Save Project As",
+            "",
+            f"{MIME_FILTER};;{LEGACY_FILTER};;All Files (*)",
         )
-        if file_path:
-            self.project_state_controller.set_current_save_path(file_path)
-            self.project_state_controller.save_project_state(self.get_current_state(), file_path)
+        if not file_path:  # Cancel pressed
+            return
+
+        # ----------------------- normalise suffix -----------------------
+        suffix = Path(file_path).suffix.lower()
+
+        # user typed no suffix or an unknown one
+        if suffix not in {PROJECT_EXT, ".json.gz"}:
+            file_path += PROJECT_EXT
+        elif suffix == "" and chosen_filter.startswith("Legacy"):
+            file_path += ".json.gz"
+
+        # -------------------------- save --------------------------------
+        self.project_state_controller.set_current_save_path(file_path)
+        self.project_state_controller.save_project_state(
+            self.get_current_state(),
+            file_path,  # controller decides codec via suffix
+        )
 
     @pyqtSlot()
-    def load_project(self):
+    def load_project(self) -> None:
+        """
+        Ask the user for a project file (.slt or legacy .json.gz) and hand it
+        to ProjectStateController for asynchronous loading.
+        """
         file_path, _ = QFileDialog.getOpenFileName(
-            self.view, "Load Project", "", "JSON GZipped (*.json.gz);;All Files (*)"
+            self.view,
+            "Load Project",
+            "",
+            f"{MIME_FILTER};;{LEGACY_FILTER};;All Files (*)",
         )
-        if file_path:
-            self.project_state_controller.load_project_state(file_path)
+        if not file_path:  # user pressed Cancel
+            return
+
+        # remember this path so subsequent Ctrl‑S writes to the same file
+        self.project_state_controller.set_current_save_path(file_path)
+
+        # hand off to controller; on success it emits project_loaded, which
+        # we already connect to on_project_loaded
+        self.project_state_controller.load_project_state(file_path)
 
     @pyqtSlot()
     def restore_autosave(self):
@@ -442,8 +492,8 @@ class MainController(QObject):
         else:
             logging.error("Autosave failed.")
 
-    @pyqtSlot(dict)
-    def on_project_loaded(self, project_state: dict):
+    @pyqtSlot(ProjectState)
+    def on_project_loaded(self, project_state: ProjectState):
         """
         Handles loading of the project state.
 
@@ -456,7 +506,7 @@ class MainController(QObject):
         self.image_processing_controller.set_clusters(clusters_data)
 
         cluster_info = self.clustering_controller.generate_cluster_info()
-        selected_cluster_id = project_state.get('selected_cluster_id', None)
+        selected_cluster_id = project_state.selected_cluster_id
         self.view.populate_cluster_selection(cluster_info, selected_cluster_id=selected_cluster_id)
 
         if selected_cluster_id and selected_cluster_id in clusters_data:
@@ -549,7 +599,6 @@ class MainController(QObject):
         Cleans up resources before application exit.
         """
         logging.info("Cleaning up before application exit.")
-        self.autosave_timer.stop()
         self.image_processing_controller.cleanup()
         self.clustering_controller.cleanup()
         self.project_state_controller.cleanup()
@@ -567,28 +616,24 @@ class MainController(QObject):
         self.image_processing_controller.model = model
         self.project_state_controller.model = model
 
-    # ---------------------------------------------------------------------
-    # helper – create/replace the data‑model if it does not match the file
-    # ---------------------------------------------------------------------
-    def _initialize_model_if_needed(self, project_state: dict):
-        """Create/replace the model if the data file differs from the current one."""
-        data_path = project_state["data_path"]
-
+    def _initialize_model_if_needed(self, state: ProjectState):
+        data_path = state.data_path  # « was  state["data_path"]
         if self.image_data_model and self.image_data_model.data_path == data_path:
-            return  # already using the right file
+            return
+        self.set_model(create_image_data_model(state))
 
-        self.set_model(create_image_data_model(project_state))
-
-    def _clusters_from_state(self, state: dict) -> Dict[int, List[Annotation]]:
-        clusters_json = state["clusters"]
-        clusters: Dict[int, List[Annotation]] = {
-            int(cid): [Annotation.from_dict(a) for a in annos]
-            for cid, annos in clusters_json.items()
+    def _clusters_from_state(
+            self, state: ProjectState
+    ) -> dict[int, list[Annotation]]:
+        clusters: dict[int, list[Annotation]] = {
+            int(cid): [Annotation.from_dict(a.dict()) for a in annos]
+            for cid, annos in state.clusters.items()
         }
 
-        order = state.get("cluster_order")
-        if order:
-            clusters = self._reorder_clusters(order, clusters)
+        # honour saved display order if present
+        if state.cluster_order:
+            clusters = self._reorder_clusters(state.cluster_order, clusters)
+
         return clusters
 
     @staticmethod
@@ -726,3 +771,14 @@ class MainController(QObject):
         except Exception as e:
             logging.error(f"Error exporting annotations: {e}")
             QMessageBox.critical(None, "Error", f"Failed to export annotations: {e}")
+
+    # ---------------------------------------------------------------------
+    #  AUTOSAVE — called by single‑shot timer when user is idle
+    # ---------------------------------------------------------------------
+    def _autosave_if_dirty(self):
+        """Write a project snapshot if anything changed since last save."""
+        if not self._dirty:
+            return
+        self._dirty = False
+        project_state = self.get_current_state()
+        self.project_state_controller.autosave_project_state(project_state)

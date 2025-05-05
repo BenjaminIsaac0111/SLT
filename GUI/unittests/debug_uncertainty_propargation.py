@@ -62,7 +62,6 @@ def analyze_uncertainty(
     adj = np.asarray([a.adjusted_uncertainty for a in annotations], dtype=float)
     diff = orig - adj
 
-    # --- handle the degenerate "all-zero difference" case ---
     if np.allclose(diff, 0):
         pearson_r = 1.0
         spearman_rho = 1.0
@@ -90,7 +89,7 @@ def analyze_uncertainty(
 
     # ------------------------------------------------------------------ plot
     if show or save_path:
-        fig, ax = plt.subplots(1, 2, figsize=(12, 4), constrained_layout=True)
+        fig, ax = plt.subplots(2, 1, figsize=(6, 8), constrained_layout=True)
 
         # Histogram
         bins = "auto"

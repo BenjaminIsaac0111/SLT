@@ -1,215 +1,176 @@
-import gzip
-import json
+#!/usr/bin/env python3
+# project_state_controller.py
+# --------------------------------------------------------------------
+#  Qt‑based façade around the pure‑Python persistence layer.
+# --------------------------------------------------------------------
+from __future__ import annotations
+
 import logging
-import os
-import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
-from typing import Optional, List
+from functools import partial
+from pathlib import Path
+from tempfile import gettempdir
+from typing import List, Optional, Union
 
-from PyQt5.QtCore import QObject, pyqtSignal, pyqtSlot, QThreadPool
+from PyQt5.QtCore import QObject, pyqtSignal
 
+from GUI.configuration.configuration import PROJECT_EXT
 from GUI.models.ImageDataModel import BaseImageDataModel
-from GUI.workers.AutosaveWorker import AutosaveWorker
+from GUI.models.StatePersistance import ProjectState, save_state, load_state
 
-TEMP_DIR = os.path.join(tempfile.gettempdir(), 'SLT_Temp')
-os.makedirs(TEMP_DIR, exist_ok=True)
+# --------------------------------------------------------------------
+#  constants
+# --------------------------------------------------------------------
+TEMP_DIR = Path(gettempdir()) / "SLT_Temp"
+TEMP_DIR.mkdir(exist_ok=True)
+
+AUTOSAVE_BASENAME = f"project_autosave{PROJECT_EXT}"
 
 
+# --------------------------------------------------------------------
+#  controller
+# --------------------------------------------------------------------
 class ProjectStateController(QObject):
     """
-    Manages saving and loading of the project state, including autosave
-    functionality, restoring from autosave files, and versioned backups.
+    Thin Qt wrapper that persists and restores ProjectState objects.
+    All heavy I/O is delegated to persistence.py and executed on a
+    single‑thread ThreadPoolExecutor so the GUI never blocks.
     """
 
-    # -------------------------------------------------------------------------
-    #                                 SIGNALS
-    # -------------------------------------------------------------------------
+    # --------------------- Qt signals --------------------------------
     autosave_finished = pyqtSignal(bool)
-    project_loaded = pyqtSignal(dict)
+    project_loaded = pyqtSignal(ProjectState)
     project_saved = pyqtSignal(str)
     save_failed = pyqtSignal(str)
     load_failed = pyqtSignal(str)
 
-    # -------------------------------------------------------------------------
-    #                                INIT
-    # -------------------------------------------------------------------------
-    def __init__(self, model: BaseImageDataModel):
-        """
-        :param model: The ImageDataModel in use.
-        """
+    # --------------------- ctor --------------------------------------
+    def __init__(self, model: BaseImageDataModel | None):
         super().__init__()
         self.model = model
+        self._current_save_path: Optional[str] = None
+        self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="save")
+        logging.debug("ProjectStateController initialised (temp = %s)", TEMP_DIR)
 
-        self.is_saving = False
-        self.current_save_path: Optional[str] = None
-
-        # Use a QThreadPool instead of a dedicated QThread for autosaves
-        self.threadpool = QThreadPool()
-        self.threadpool.setMaxThreadCount(1)
-
-        # Temporary file path for autosave
-        self.temp_file_path = os.path.join(TEMP_DIR, 'project_autosave.json.gz')
-        logging.info(f"Temporary autosave file path: {self.temp_file_path}")
-
-    # -------------------------------------------------------------------------
-    #                        PUBLIC METHODS
-    # -------------------------------------------------------------------------
-    def set_current_save_path(self, file_path: str):
-        """
-        Sets the file path for saving the project.
-        """
-        self.current_save_path = file_path
-        logging.info(f"Current save path set to: {file_path}")
+    # -----------------------------------------------------------------
+    #  save‑path helpers
+    # -----------------------------------------------------------------
+    def set_current_save_path(self, file_path: str) -> None:
+        self._current_save_path = file_path
+        logging.info("Current save path set to %s", file_path)
 
     def get_current_save_path(self) -> Optional[str]:
-        """
-        Returns the current file path for the project save.
-        """
-        return self.current_save_path
+        return self._current_save_path
 
-    def autosave_project_state(self, project_state: dict):
-        """
-        Autosaves the project state using a QRunnable-based worker.
-        """
-        if self.is_saving:
-            logging.info("Autosave already in progress; skipping this request.")
+    # -----------------------------------------------------------------
+    #  AUTOSAVE  (never blocks GUI thread)
+    # -----------------------------------------------------------------
+    def autosave_project_state(self, state: ProjectState) -> None:
+        """Write *state* to a timestamped file under TEMP_DIR."""
+        if not state.clusters:  # nothing worth saving
+            logging.debug("Autosave skipped: clusters empty.")
             return
 
-        if self._is_project_state_empty(project_state):
-            logging.info("No annotations to save; skipping autosave.")
-            return
-
-        self.is_saving = True
-        versioned_backup_path = self.get_versioned_backup_path(
-            self.temp_file_path, max_backups=10
+        target = self._rotate_backups(TEMP_DIR / AUTOSAVE_BASENAME)
+        fut = self._pool.submit(
+            partial(save_state, state, target, level=1)  # fast zstd
+        )
+        fut.add_done_callback(
+            lambda f: self.autosave_finished.emit(f.exception() is None)
         )
 
-        # Create a new AutosaveWorker for each autosave request
-        worker = AutosaveWorker(project_state, versioned_backup_path)
-        # Connect the worker's 'save_finished' signal to our slot
-        worker.signals.save_finished.connect(self.on_autosave_finished)
+    # -----------------------------------------------------------------
+    #  EXPLICIT SAVE  (Save / Save As…)
+    # -----------------------------------------------------------------
+    def save_project_state(
+            self,
+            state: ProjectState,
+            file_path: Union[str, Path],
+            *,
+            level: int = 3,
+    ) -> None:
+        """Persist *state* to *file_path* in the background."""
+        path = Path(file_path).expanduser()
+        fut = self._pool.submit(
+            partial(save_state, state, path, level=level)
+        )
 
-        # Start the worker on the thread pool
-        self.threadpool.start(worker)
+        def _done(f):
+            exc = f.exception()
+            if exc is None:
+                self.project_saved.emit(str(path))
+                logging.info("Saved project → %s (%.1f kB)",
+                             path, path.stat().st_size / 1024)
+            else:
+                logging.exception("Save failed for %s", path)
+                self.save_failed.emit(str(exc))
 
-    @pyqtSlot(bool)
-    def on_autosave_finished(self, success: bool):
-        """
-        Called when AutosaveWorker completes (signals.save_finished).
-        """
-        self.is_saving = False
-        self.autosave_finished.emit(success)
+        fut.add_done_callback(_done)
 
-    def save_project_state(self, project_state: dict, file_path: str):
-        """
-        Saves the project state to a specified path (e.g., from "Save" or "Save As").
-        """
-        try:
-            self._save_to_file(project_state, file_path)
-            logging.info(f"Project state saved to {file_path}")
-            self.project_saved.emit(file_path)
-        except (TypeError, IOError) as e:
-            logging.error(f"Failed to save project state: {e}")
-            self.save_failed.emit(str(e))
-
-    def load_project_state(self, project_file: str):
-        """
-        Loads the project state from a file to resume the session.
-        """
-        if not os.path.exists(project_file):
-            msg = f"No project file found at {project_file}."
-            logging.error(msg)
-            self.load_failed.emit(msg)
+    # -----------------------------------------------------------------
+    #  LOAD
+    # -----------------------------------------------------------------
+    def load_project_state(self, file_path: Union[str, Path]) -> None:
+        """Load file synchronously (fast) and emit signal."""
+        path = Path(file_path).expanduser()
+        if not path.exists():
+            self.load_failed.emit(f"No project file at {path}")
             return
-
         try:
-            project_state = self._load_from_file(project_file)
-            logging.info(f"Project state loaded from {project_file}")
-            self.project_loaded.emit(project_state)
-        except (IOError, json.JSONDecodeError, KeyError, ValueError) as e:
-            err_msg = f"Failed to load project from {project_file}: {e}"
-            logging.error(err_msg)
-            self.load_failed.emit(str(e))
+            state = load_state(path)
+            self.project_loaded.emit(state)
+            logging.info("Loaded project %s (schema v%d)",
+                         path, state.schema_version)
+        except Exception as err:
+            logging.exception("Failed to load %s", path)
+            self.load_failed.emit(str(err))
 
-    def get_versioned_backup_path(self, base_path: str, max_backups: int = 10) -> str:
-        """
-        Creates a new backup path containing a timestamp and cleans old backups.
-        """
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        base_name = os.path.basename(base_path)
-        backup_filename = f"{base_name}_{timestamp}.json.gz"
-        backup_path = os.path.join(TEMP_DIR, backup_filename)
-
-        self._remove_old_backups(base_name, max_backups)
-        return backup_path
-
+    # -----------------------------------------------------------------
+    #  QUERY AUTOSAVE FILES
+    # -----------------------------------------------------------------
     def get_latest_autosave_file(self) -> Optional[str]:
-        """
-        Returns the most recently modified autosave file in TEMP_DIR, or None.
-        """
-        autosave_files = [
-            f for f in os.listdir(TEMP_DIR)
-            if f.startswith('project_autosave') and f.endswith('.json.gz')
-        ]
-        if not autosave_files:
-            return None
-
-        autosave_files.sort(
-            key=lambda f: os.path.getmtime(os.path.join(TEMP_DIR, f)),
-            reverse=True
-        )
-        return os.path.join(TEMP_DIR, autosave_files[0])
+        files = self._autosave_files()
+        return str(files[0]) if files else None
 
     def get_autosave_files(self) -> List[str]:
-        """
-        Lists all autosave files in TEMP_DIR (most recent first).
-        """
-        autosave_files = [
-            f for f in os.listdir(TEMP_DIR)
-            if f.startswith('project_autosave') and f.endswith('.json.gz')
-        ]
-        if not autosave_files:
-            return []
+        return [str(p) for p in self._autosave_files()]
 
-        autosave_files.sort(
-            key=lambda f: os.path.getmtime(os.path.join(TEMP_DIR, f)),
-            reverse=True
-        )
-        return [os.path.join(TEMP_DIR, f) for f in autosave_files]
-
-    def cleanup(self):
-        logging.info("Cleaning up autosave before application exit.")
-
-        if self.is_saving:
-            logging.info("Autosave is in progress; waiting for completion.")
-            # Wait indefinitely until all worker tasks are done
-            self.threadpool.waitForDone()
-
+    # -----------------------------------------------------------------
+    #  CLEAN‑UP
+    # -----------------------------------------------------------------
+    def cleanup(self) -> None:
+        """Wait for background tasks before Qt exits."""
+        logging.info("Waiting for save tasks to finish…")
+        self._pool.shutdown(wait=True)
         logging.info("ProjectStateController cleanup done.")
 
-    # -------------------------------------------------------------------------
-    #                            PRIVATE HELPERS
-    # -------------------------------------------------------------------------
+    # -----------------------------------------------------------------
+    #  INTERNAL UTILITIES
+    # -----------------------------------------------------------------
     @staticmethod
-    def _is_project_state_empty(project_state: dict) -> bool:
-        return not project_state.get('clusters')
+    def _rotate_backups(base: Path, max_keep: int = 10) -> Path:
+        """
+        Return a new file name  <base.stem>_<timestamp><base.suffix>
+        and delete oldest backups so at most *max_keep* remain.
+        Works on Python 3.7+ (no Path.with_stem).
+        """
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        new_name = f"{base.stem}_{ts}{base.suffix}"
+        new_path = base.parent / new_name
 
-    @staticmethod
-    def _save_to_file(project_state: dict, file_path: str):
-        with gzip.open(file_path, 'wt') as gzfile:
-            json.dump(project_state, gzfile, indent=4)
+        # clean up old backups
+        pattern = f"{base.stem}_*{base.suffix}"
+        backups = sorted(base.parent.glob(pattern), key=lambda p: p.stat().st_mtime)
+        for old in backups[:-max_keep + 1]:
+            old.unlink(missing_ok=True)
+            logging.debug("Deleted old autosave %s", old.name)
 
-    @staticmethod
-    def _load_from_file(project_file: str) -> dict:
-        with gzip.open(project_file, 'rt') as gzfile:
-            return json.load(gzfile)
+        return new_path
 
-    def _remove_old_backups(self, base_name: str, max_backups: int):
-        all_backups = sorted([
-            f for f in os.listdir(TEMP_DIR)
-            if f.startswith(base_name) and f.endswith(".json.gz")
-        ])
-        while len(all_backups) > max_backups:
-            old_backup = all_backups.pop(0)
-            os.remove(os.path.join(TEMP_DIR, old_backup))
-            logging.info(f"Deleted old backup file: {old_backup}")
+    def _autosave_files(self) -> List[Path]:
+        return sorted(
+            TEMP_DIR.glob(f"{AUTOSAVE_BASENAME}_*.zst"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )

@@ -31,6 +31,7 @@ import numpy as np
 from PyQt5.QtCore import QObject
 
 from GUI.models.CacheManager import CacheManager
+from GUI.models.StatePersistance import ProjectState
 
 
 # -----------------------------------------------------------------------------
@@ -80,10 +81,11 @@ class BaseImageDataModel(QObject, metaclass=ABCQObjectMeta):
 # -----------------------------------------------------------------------------
 class HDF5ImageDataModel(BaseImageDataModel):
     """Thread‑local SWMR HDF5 reader."""
-    def __init__(self, project_state: Dict[str, Any]):
+
+    def __init__(self, project_state: ProjectState):
         super().__init__()
-        self._db_path: str = project_state["data_path"]
-        self._uncertainty_type: str = project_state.get("uncertainty", "bald")
+        self._db_path: str = project_state.data_path
+        self._uncertainty_type: str = project_state.uncertainty
 
         # thread‑local storage for per‑thread h5py.File handle and datasets
         self._tls = threading.local()
@@ -168,7 +170,7 @@ class SQLiteImageDataModel(BaseImageDataModel):
 
     cache = CacheManager()
 
-    def __init__(self, project_state: Dict[str, Any]):
+    def __init__(self, project_state: ProjectState):
         super().__init__()
         self._db_path: str = project_state["data_path"]
         self._uncertainty_type: str = project_state.get("uncertainty", "bald")
@@ -280,13 +282,10 @@ class SQLiteImageDataModel(BaseImageDataModel):
 # factory
 # -----------------------------------------------------------------------------
 
-def create_image_data_model(project_state: Dict[str, Any]) -> BaseImageDataModel:
-    """Factory function used by the GUI.
-
-    ``project_state`` originates from ``.json.gz`` save‑files and *must* contain
-    at least the keys ``data_backend`` ("hdf5"|"sqlite") and ``data_path``.
-    """
-    backend = project_state["data_backend"].lower()
+def create_image_data_model(
+        project_state: ProjectState
+) -> BaseImageDataModel:
+    backend = project_state.data_backend.lower()
     if backend == "hdf5":
         return HDF5ImageDataModel(project_state)
     if backend == "sqlite":
