@@ -130,7 +130,7 @@ class AnnotationClusteringController(QObject):
             self.hide_clustering_progress_bar.emit()
             self.clustering_in_progress = False
             self.compute_labeling_statistics()
-        return
+            return
 
         self.show_clustering_progress_bar.emit()
         self.clustering_progress.emit(-1)

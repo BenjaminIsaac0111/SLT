@@ -146,6 +146,7 @@ class MainController(QObject):
             self.annotation_generator = LocalMaximaPointAnnotationGenerator(
                 filter_size=48, gaussian_sigma=4.0, use_gaussian=False
             )
+            self._use_greedy_nav = True
             logging.warning("Unknown annotation method selected; defaulting to Local Maxima.")
         self._seq_cursor = None
         self.clustering_controller.annotation_generator = self.annotation_generator
@@ -387,7 +388,7 @@ class MainController(QObject):
         # -------------------------------------------------- #
         #  Per-cluster raw metrics
         # -------------------------------------------------- #
-        per_cluster = []  # (cid, U, D, R, C)
+        per_cluster = []  # (cid, U, R, C)
 
         for cid, annos in candidate_items.items():
             unlab = [a for a in annos if a.class_id == -1]
@@ -395,18 +396,6 @@ class MainController(QObject):
 
             # mean adjusted uncertainty of *unlabelled* members
             U = float(np.mean([a.adjusted_uncertainty for a in unlab])) if unlab else 0.0
-
-            # disagreement rate among labelled members
-            if lab:
-                disagreements = [
-                    1
-                    for a in lab
-                    if (mp := self.clustering_controller.get_class_id_from_prediction(a.model_prediction)) is not None
-                       and mp != a.class_id
-                ]
-                D = sum(disagreements) / len(lab)
-            else:
-                D = 0.0
 
             # rarity of majority class in the cluster
             if lab:
@@ -422,7 +411,7 @@ class MainController(QObject):
             else:
                 C = 0.0
 
-            per_cluster.append((cid, U, D, R, C))
+            per_cluster.append((cid, U, R, C))
 
         # -------------------------------------------------- #
         #  z-score normalisation & selection
@@ -433,9 +422,8 @@ class MainController(QObject):
         stds[stds == 0] = 1.0  # avoid divide-by-zero
 
         best_cid, best_score = None, -np.inf
-        for cid, U, D, R, C in per_cluster:
+        for cid, U, R, C in per_cluster:
             z = ((U - means[0]) / stds[0] +
-                 (D - means[1]) / stds[1] +
                  (R - means[2]) / stds[2] +
                  (C - means[3]) / stds[3])
             if z > best_score:
