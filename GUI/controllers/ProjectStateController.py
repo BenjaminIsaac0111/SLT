@@ -9,6 +9,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from functools import partial
+from hashlib import blake2b
 from pathlib import Path
 from tempfile import gettempdir
 from typing import List, Optional, Union
@@ -26,6 +27,14 @@ TEMP_DIR = Path(gettempdir()) / "SLT_Temp"
 TEMP_DIR.mkdir(exist_ok=True)
 
 AUTOSAVE_BASENAME = f"project_autosave{PROJECT_EXT}"
+
+
+def _hash_path(path: str, length: int = 8) -> str:
+    """
+    Fast, case‑sensitive Blake2 hash of *path* for directory names.
+    Short digest (default 8 hex chars) is plenty to avoid collisions.
+    """
+    return blake2b(path.encode("utf8"), digest_size=length).hexdigest()
 
 
 # --------------------------------------------------------------------
@@ -174,3 +183,23 @@ class ProjectStateController(QObject):
             key=lambda p: p.stat().st_mtime,
             reverse=True,
         )
+
+    def get_frames_dir(self) -> Path:
+        """
+        Return a directory that is *unique* for the current project.
+        Lazily created on first call; survives across program runs.
+        """
+        if self._current_save_path:
+            anchor = Path(self._current_save_path).expanduser().resolve()
+            stem = anchor.stem  # e.g.  tumour_project
+            h = _hash_path(str(anchor))  # 8‑hex digest
+            root = Path(gettempdir()) / "SLT_Frames"
+            dir_ = root / f"{stem}_{h}"
+        else:
+            # unsaved / untitled project → fallback to timestamp
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            root = Path(gettempdir()) / "SLT_Frames"
+            dir_ = root / f"unsaved_{ts}"
+
+        dir_.mkdir(parents=True, exist_ok=True)
+        return dir_

@@ -145,12 +145,8 @@ def mc_infer(
     # BALD (mutual information) -------------------------------------------
     bald = entropy - expected_entropy
 
-    # Variance of probabilities -------------------------------------------
-    variance = tf.reduce_sum(tf.math.reduce_variance(probs, axis=0), axis=-1)  # sum over K
-
     return {
         "entropy": entropy_norm,
-        "variance": variance,
         "bald": bald,
         "mean_probs": mean_probs,
         "mean_logits": mean_logits,
@@ -211,7 +207,7 @@ def main(config: Dict[str, Any], *, logger: logging.Logger, resume: bool = False
     output_dir = Path(config.get("OUTPUT_DIR", config["MODEL_DIR"]))
     output_dir.mkdir(parents=True, exist_ok=True)
     output_file = output_dir / (
-        f"dropout_{Path(config['MODEL_NAME']).stem}_inference_output.h5"
+        f"mc_{Path(config['MODEL_NAME']).stem}_inference_output.h5"
     )
 
     logger.info("Writing to %s", output_file)

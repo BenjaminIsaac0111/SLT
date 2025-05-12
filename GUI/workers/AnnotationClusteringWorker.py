@@ -1,6 +1,6 @@
 import logging
 from collections import defaultdict
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 import numba
 import numpy as np
@@ -11,73 +11,92 @@ from sklearn.mixture import GaussianMixture
 from GUI.models.Annotation import Annotation
 
 
+# -----------------------------------------------------------------------------
+# NUMBA‑ACCELERATED HELPERS
+# -----------------------------------------------------------------------------
+
 @numba.njit
-def compute_initial_distances(X, center_index):
-    """
-    Compute the distance from every point in X to X[center_index].
-    """
+def _compute_initial_distances(X: np.ndarray, center_index: int):
+    """Return the Euclidean distance of every row in *X* to *X[center_index]*."""
     diff = X - X[center_index]
-    dist = np.sqrt((diff * diff).sum(axis=1))
-    return dist
+    return np.sqrt((diff * diff).sum(axis=1))
 
 
 @numba.njit
-def update_distances(X, dist_to_closest_center, new_center_index):
-    """
-    Update distances to the new center if it's closer than existing centers.
-    """
+def _update_distances(X: np.ndarray, dist_to_closest_center: np.ndarray, new_center_index: int):
+    """In‑place relaxation: keep the smaller of the existing distance and the new one."""
     diff = X - X[new_center_index]
     new_dist = np.sqrt((diff * diff).sum(axis=1))
+    # vectorised minimum – numba supports this broadcasting pattern
     for i in range(len(dist_to_closest_center)):
         if new_dist[i] < dist_to_closest_center[i]:
             dist_to_closest_center[i] = new_dist[i]
 
 
 @numba.njit
-def k_center_greedy_numba(X, k, random_state=42):
+def k_center_greedy_numba(X: np.ndarray, k: int, random_state: Optional[int] = None):
+    """Return *k* indices according to the greedy k‑centre heuristic (farthest‑first).
+
+    ‑ *X* : (n,d) float32 array
+    ‑ *k* : number of centres requested (k ≤ n expected)
+    ‑ *random_state* : if ``None`` the current RNG state is used; otherwise it is
+      used to seed *NumPy* inside numba for deterministic behaviour.
     """
-    Approximate k-center greedy selection with Numba optimization.
-    Picks one random center, then repeatedly picks the farthest point.
-    """
-    np.random.seed(random_state)
+    if random_state is not None:
+        np.random.seed(random_state)
+
     n = X.shape[0]
     if k >= n:
         return np.arange(n)
 
-    # Start by picking a random center
-    center_indices = np.empty(k, dtype=np.int64)
-    initial_center = np.random.randint(n)
-    center_indices[0] = initial_center
+    centres = np.empty(k, dtype=np.int64)
 
-    dist_to_closest_center = compute_initial_distances(X, initial_center)
+    # 1. random initial centre
+    centres[0] = np.random.randint(n)
+    dists = _compute_initial_distances(X, centres[0])
 
+    # 2. farthest‑first
     for idx in range(1, k):
-        # Pick the farthest point from the current set of centers
-        next_center = np.argmax(dist_to_closest_center)
-        center_indices[idx] = next_center
-        update_distances(X, dist_to_closest_center, next_center)
+        centres[idx] = np.argmax(dists)
+        _update_distances(X, dists, centres[idx])
 
-    return center_indices
+    return centres
 
+
+# -----------------------------------------------------------------------------
+# QT SIGNALLING STRUCTURES
+# -----------------------------------------------------------------------------
 
 class ClusteringWorkerSignals(QObject):
-    """
-    Signals container for ClusteringWorker.
-    """
-    clustering_finished = pyqtSignal(dict, object, object)  # Emitted when clustering is complete
-    progress_updated = pyqtSignal(int)  # Emitted to update progress (e.g., -1 means stage done)
+    """Signal bundle emitted by :class:`AnnotationClusteringWorker`."""
 
+    clustering_finished = pyqtSignal(dict, object, object)  # clusters, model, core‑set features
+    progress_updated = pyqtSignal(int)  # negative values = stage sentinel
+
+
+# -----------------------------------------------------------------------------
+# MAIN WORKER
+# -----------------------------------------------------------------------------
 
 class AnnotationClusteringWorker(QRunnable):
-    """
-    Performs clustering on a potentially large subset (core-set),
-    then down-samples each cluster to exactly 'cluster_size' members.
+    """Cluster a large annotation pool via core‑set sampling then down‑sampling.
 
-    Submit this to a QThreadPool to run in the background:
-
-        worker = ClusteringWorker(annotations, ...)
-        worker.signals.clustering_finished.connect(...)
-        threadpool.start(worker)
+    Parameters
+    ----------
+    annotations : list[Annotation]
+        Full pool.
+    subsample_ratio : float, default 1.0
+        Proportion of the pool to take as an *initial* random sub‑sample before
+        the greedy selection.  Values in ``(0,1]``.  Set < 1.0 to cap memory/time.
+    cluster_method : {"minibatchkmeans", "agglomerative", "gaussianmixture"}
+        Backend algorithm applied on the core‑set.
+    cluster_size : int, default 6
+        How many elements to return per final cluster.
+    include_uncertainty : bool, default True
+        Whether to append the per‑annotation uncertainty score to the feature
+        vector used *throughout* the pipeline.
+    random_state : int | None, default 42
+        Seed passed to :pyfunc:`k_center_greedy_numba`. ``None`` ⇒ stochastic.
     """
 
     def __init__(
@@ -85,155 +104,168 @@ class AnnotationClusteringWorker(QRunnable):
             annotations: List[Annotation],
             subsample_ratio: float = 1.0,
             cluster_method: str = "minibatchkmeans",
-            cluster_size: int = 6
+            cluster_size: int = 8,
+            *,
+            include_uncertainty: bool = True,
+            random_state: Optional[int] = 42,
     ):
         super().__init__()
         self.signals = ClusteringWorkerSignals()
 
+        # user‑provided arguments
         self.annotations = annotations
-        self.subsample_ratio = subsample_ratio
-        self.cluster_method = cluster_method.lower()  # 'agglomerative' or 'minibatchkmeans' or 'gaussianmixture'
-        self.cluster_size = cluster_size
+        self.subsample_ratio = float(np.clip(subsample_ratio, 0.0, 1.0))  # guard
+        self.cluster_method = cluster_method.lower()
+        self.cluster_size = int(cluster_size)
+        self.include_uncertainty = include_uncertainty
+        self.random_state = random_state
+
+        # runtime artefacts
         self.clustering_model = None
 
+    # ------------------------------------------------------------------
+    # QRunnable interface
+    # ------------------------------------------------------------------
+
     def run(self):
-        """
-        Main entry point for the QRunnable. This is executed in a worker thread.
-        """
-        logging.info("ClusteringWorker started.")
-        total_annotations = len(self.annotations)
-
-        if total_annotations == 0:
-            logging.warning("No annotations provided for clustering.")
-            self.signals.clustering_finished.emit({}, None, None)
+        """Entry point executed inside the worker thread."""
+        logging.info("AnnotationClusteringWorker started with %d annotations.", len(self.annotations))
+        if not self.annotations:
+            logging.warning("No annotations provided; aborting clustering.")
+            self.signals.clustering_finished.emit({})
             return
 
-        # Build the feature matrix (logit_features + [uncertainty])
+        # ----------- Feature matrix construction ----------------------------------
         try:
-            feature_matrix = np.array([
-                np.concatenate([anno.logit_features, [anno.uncertainty]])
-                for anno in self.annotations
+            feature_matrix = np.asarray([
+                self._annotation_to_vec(a) for a in self.annotations
             ], dtype=np.float32)
-        except Exception as e:
-            logging.error(f"Error creating feature matrix: {e}")
+        except Exception as exc:
+            logging.error("Failed to build feature matrix: %s", exc)
             self.signals.clustering_finished.emit({})
             return
 
-        logging.debug(f"Feature matrix shape: {feature_matrix.shape}")
-        self.signals.progress_updated.emit(-1)  # Indicate start of core-set selection
+        self.signals.progress_updated.emit(-1)  # stage: core‑set start
 
-        # ------------------------ Core-Set Selection -------------------------
-        core_set_size = min(5000, len(feature_matrix))  # Cap coreset size to min
-        logging.info(f"Core-set size: {core_set_size}")
-        subsample_size = max(int(len(feature_matrix) * self.subsample_ratio), core_set_size)
+        # ----------- Core‑set greedy selection ------------------------------------
+        core_set_cap = min(5_000, feature_matrix.shape[0])
+        subsample_size = min(int(feature_matrix.shape[0] * self.subsample_ratio), core_set_cap)
+        subsample_idx = np.random.choice(feature_matrix.shape[0], subsample_size, replace=False)
+        subsample_X = feature_matrix[subsample_idx]
 
-        # Subsample if needed
-        subsample_indices = np.random.choice(len(feature_matrix), subsample_size, replace=False)
-        subsample_X = feature_matrix[subsample_indices]
+        actual_k = min(core_set_cap, subsample_size)
+        if actual_k < core_set_cap:
+            logging.warning("Sub‑sample (%d) smaller than core‑set cap (%d); core‑set will consist of %d items.",
+                            subsample_size, core_set_cap, actual_k)
 
-        logging.info(f"Selecting core-set using k-center greedy on {len(subsample_X)} points.")
-        center_indices_subsample = k_center_greedy_numba(subsample_X, core_set_size)
-        core_set_indices = subsample_indices[center_indices_subsample]
+        centre_idx_sub = k_center_greedy_numba(
+            subsample_X,
+            actual_k,
+            random_state=self.random_state,
+        )
+        core_set_idx = subsample_idx[centre_idx_sub]
 
-        core_set_features = feature_matrix[core_set_indices]
-        core_set_annotations = [self.annotations[i] for i in core_set_indices]
-        self.signals.progress_updated.emit(-1)  # Core-set selection done
+        core_features = feature_matrix[core_set_idx]
+        core_annotations = [self.annotations[i] for i in core_set_idx]
+        self.signals.progress_updated.emit(-1)  # stage: clustering start
 
-        # -------------------------- Clustering Step --------------------------
+        # ----------- Clustering ----------------------------------------------------
         try:
-            if self.cluster_method == 'minibatchkmeans':
-                num_clusters = max(1, int(len(core_set_features) * 0.1))
-                clustering_model = MiniBatchKMeans(n_clusters=num_clusters, random_state=42, batch_size=4096)
-                core_set_labels = clustering_model.fit_predict(core_set_features)
-                cluster_centers = None
-
-            elif self.cluster_method == 'agglomerative':
-                clustering_model = AgglomerativeClustering(n_clusters=None,
-                                                           distance_threshold=5.0,
-                                                           linkage='ward')
-                core_set_labels = clustering_model.fit_predict(core_set_features)
-                cluster_centers = None
-
-            elif self.cluster_method == 'gaussianmixture':
-                # Determine the number of components based on core set size
-                n_components = max(1, int(len(core_set_features) * 0.15))
-                logging.info(f"Using Gaussian Mixture Model with {n_components} components.")
-                clustering_model = GaussianMixture(n_components=n_components, random_state=42)
-                clustering_model.fit(core_set_features)
-                core_set_labels = clustering_model.predict(core_set_features)
-                cluster_centers = None
-
-            else:
-                raise ValueError(f"Unknown clustering method: {self.cluster_method}")
-
-            logging.info(f"Clustering complete. Found {len(set(core_set_labels))} clusters.")
-            self.signals.progress_updated.emit(-1)  # Clustering done
-
-        except Exception as e:
-            logging.error(f"Clustering failed: {e}")
+            core_labels, cluster_centres = self._cluster_core_set(core_features)
+        except Exception as exc:
+            logging.exception("Clustering failed: %s", exc)
             self.signals.clustering_finished.emit({})
             return
 
-        # Assign cluster IDs to the subset annotations
-        for label, anno in zip(core_set_labels, core_set_annotations):
-            anno.cluster_id = int(label)
+        # propagate labels
+        for lbl, anno in zip(core_labels, core_annotations):
+            anno.cluster_id = int(lbl)
 
-        # Group into initial clusters
-        clusters_dict = self.group_annotations_by_cluster(core_set_annotations)
+        # ----------- Down‑sampling -------------------------------------------------
+        clusters = self._group_by_cluster(core_annotations)
+        final_clusters = self._downsample_clusters(clusters, cluster_centres)
 
-        # Down-sample each cluster
-        final_clusters_dict = self.downsample_clusters(clusters_dict, cluster_centers)
+        self.signals.progress_updated.emit(-1)  # stage: done
+        self.signals.clustering_finished.emit(final_clusters, self.clustering_model, core_features)
 
-        self.signals.progress_updated.emit(-1)  # Final progress
-        self.signals.clustering_finished.emit(final_clusters_dict, clustering_model, core_set_features)
+    # ------------------------------------------------------------------
+    # Helper methods
+    # ------------------------------------------------------------------
+
+    def _annotation_to_vec(self, anno: Annotation) -> np.ndarray:
+        """Convert *Annotation* → ndarray according to *include_uncertainty*."""
+        if self.include_uncertainty:
+            return np.concatenate([anno.logit_features, np.asarray([anno.uncertainty], dtype=np.float32)])
+        return anno.logit_features.astype(np.float32, copy=False)
+
+    # ......................................................
 
     @staticmethod
-    def group_annotations_by_cluster(annotations: List[Annotation]) -> Dict[int, List[Annotation]]:
-        """
-        Groups annotations by their cluster IDs.
-        """
-        clusters_map = defaultdict(list)
-        for annotation in annotations:
-            clusters_map[annotation.cluster_id].append(annotation)
-        return dict(clusters_map)
+    def _group_by_cluster(annotations: List[Annotation]) -> Dict[int, List[Annotation]]:
+        clusters: Dict[int, List[Annotation]] = defaultdict(list)
+        for anno in annotations:
+            clusters[anno.cluster_id].append(anno)
+        return clusters
 
-    def downsample_clusters(
-            self,
-            clusters_dict: Dict[int, List[Annotation]],
-            cluster_centers: np.ndarray
-    ) -> Dict[int, List[Annotation]]:
-        """
-        Down-sample each cluster to exactly 'self.cluster_size' members using either:
-        1) Center-based selection if cluster_centers are available.
-        2) Diversity-based selection (k-center greedy) if no centers are available.
-        """
-        final_clusters = {}
-        for cluster_id, cluster_annos in clusters_dict.items():
-            if len(cluster_annos) <= self.cluster_size:
-                # If cluster has <= cluster_size members, take them all
-                final_clusters[cluster_id] = cluster_annos
+    # ......................................................
+
+    def _cluster_core_set(self, X: np.ndarray):
+        """Run the selected clustering backend on *X* and return (labels, centres|None)."""
+        method = self.cluster_method
+        logging.info("Clustering method: %s", method)
+
+        if method == "minibatchkmeans":
+            k = max(1, int(X.shape[0] * 0.10))  # 10% heuristic
+            self.clustering_model = MiniBatchKMeans(n_clusters=k, random_state=self.random_state, batch_size=4096)
+            labels = self.clustering_model.fit_predict(X)
+            centres = self.clustering_model.cluster_centers_.astype(np.float32)
+
+        elif method == "agglomerative":
+            self.clustering_model = AgglomerativeClustering(
+                n_clusters=None, distance_threshold=5.0, linkage="ward"
+            )
+            labels = self.clustering_model.fit_predict(X)
+            centres = None  # Ward does not expose explicit centroids.
+
+        elif method == "gaussianmixture":
+            k = max(1, int(X.shape[0] * 0.15))
+            self.clustering_model = GaussianMixture(n_components=k, random_state=self.random_state)
+            self.clustering_model.fit(X)
+            labels = self.clustering_model.predict(X)
+            centres = self.clustering_model.means_.astype(np.float32)
+
+        else:
+            raise ValueError(f"Unknown clustering method: {method}")
+
+        logging.info("Clustering produced %d clusters.", len(set(labels)))
+        return labels, centres
+
+    # ......................................................
+
+    def _downsample_clusters(self, clusters: Dict[int, List[Annotation]], centres: Optional[np.ndarray]):
+        """Return a dict with at most *cluster_size* members in each cluster."""
+        final: Dict[int, List[Annotation]] = {}
+
+        for cid, annos in clusters.items():
+            # trivial cases -------------------------------------------------
+            if len(annos) <= self.cluster_size:
+                final[cid] = annos
                 continue
 
-            cluster_features = np.array([
-                np.concatenate([anno.logit_features, [anno.uncertainty]])
-                for anno in cluster_annos
-            ], dtype=np.float32)
+            # build feature block for selection
+            feats = np.vstack([self._annotation_to_vec(a) for a in annos]).astype(np.float32)
 
-            if cluster_centers is not None:
-                # Pick members closest to the cluster center
-                center = cluster_centers[cluster_id]
-                dists = np.linalg.norm(cluster_features - center, axis=1)
-                closest_indices = np.argsort(dists)[:self.cluster_size]
-                selected_annotations = [cluster_annos[idx] for idx in closest_indices]
+            if centres is not None:
+                centre = centres[cid]
+                dists = np.linalg.norm(feats - centre, axis=1)
+                chosen = np.argsort(dists)[: self.cluster_size]
             else:
-                # Pick members via k-center greedy
-                selected_indices = k_center_greedy_numba(
-                    cluster_features,
+                chosen = k_center_greedy_numba(
+                    feats,
                     self.cluster_size,
-                    random_state=42
+                    random_state=self.random_state,
                 )
-                selected_annotations = [cluster_annos[idx] for idx in selected_indices]
 
-            final_clusters[cluster_id] = selected_annotations
+            final[cid] = [annos[i] for i in chosen]
 
-        return final_clusters
+        return final

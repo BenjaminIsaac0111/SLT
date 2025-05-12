@@ -11,6 +11,7 @@ from GUI.configuration.configuration import CLASS_COMPONENTS
 from GUI.models.Annotation import Annotation
 # Use unified interface
 from GUI.models.ImageDataModel import BaseImageDataModel
+from GUI.models.PointAnnotationGenerator import CenterPointAnnotationGenerator
 from GUI.workers.AnnotationClusteringWorker import AnnotationClusteringWorker
 
 
@@ -83,7 +84,7 @@ class AnnotationClusteringController(QObject):
 
     clustering_started = pyqtSignal()
     clustering_progress = pyqtSignal(int)
-    clusters_ready = pyqtSignal(dict, object, object)
+    clusters_ready = pyqtSignal(dict)
     labeling_statistics_updated = pyqtSignal(dict)
     annotation_progress = pyqtSignal(int)
     annotation_progress_finished = pyqtSignal()
@@ -117,6 +118,20 @@ class AnnotationClusteringController(QObject):
         self.annotation_progress.emit(100)
         self.annotation_progress_finished.emit()
 
+        # ---------------------------------------------------- #
+        # Bypass clustering for centre-only sampling          #
+        # ---------------------------------------------------- #
+
+        if isinstance(self.annotation_generator, CenterPointAnnotationGenerator):
+            logging.info("Image-centre mode: skipping logit clustering.")
+            clusters = {i: [anno] for i, anno in enumerate(all_annotations)}
+            self.clusters = clusters
+            self.clusters_ready.emit(clusters)
+            self.hide_clustering_progress_bar.emit()
+            self.clustering_in_progress = False
+            self.compute_labeling_statistics()
+        return
+
         self.show_clustering_progress_bar.emit()
         self.clustering_progress.emit(-1)
 
@@ -132,11 +147,11 @@ class AnnotationClusteringController(QObject):
         worker.signals.progress_updated.connect(self.clustering_progress.emit)
         self.threadpool.start(worker)
 
-    @pyqtSlot(dict, object, object)
-    def on_clustering_finished(self, clusters: Dict[int, List[Annotation]], clustering_model, feature_matrix):
+    @pyqtSlot(dict)
+    def on_clustering_finished(self, clusters: Dict[int, List[Annotation]]):
         self.clustering_in_progress = False
         self.clusters = clusters
-        self.clusters_ready.emit(clusters, clustering_model, feature_matrix)
+        self.clusters_ready.emit(clusters)
         self.hide_clustering_progress_bar.emit()
         self.compute_labeling_statistics()
 
@@ -196,7 +211,7 @@ class AnnotationClusteringController(QObject):
 
                 # Count disagreements if labeled
                 if anno.model_prediction:
-                    model_class_id = self._get_class_id_from_prediction(anno.model_prediction)
+                    model_class_id = self.get_class_id_from_prediction(anno.model_prediction)
                     if model_class_id is not None and assigned_class not in (-1, -2, -3):
                         if assigned_class != model_class_id:
                             disagreement_count += 1
@@ -220,7 +235,7 @@ class AnnotationClusteringController(QObject):
             'class_counts': class_counts,
             'disagreement_count': disagreement_count,
             'agreement_percentage': agreement_percentage,
-            'class_weights': class_weights,  # Added class weights (excluding special classes)
+            'class_weights': class_weights,
         }
         logging.info(f"Labeling statistics computed: {statistics}")
         self.labeling_statistics_updated.emit(statistics)
@@ -317,14 +332,16 @@ class AnnotationClusteringController(QObject):
 
         return annotations
 
-    def _get_model_prediction(self, logit_feature: np.ndarray) -> str:
+    @staticmethod
+    def _get_model_prediction(logit_feature: np.ndarray) -> str:
         """
         Maps logit feature (highest index) to a class name.
         """
         class_index = np.argmax(logit_feature)
         return CLASS_COMPONENTS.get(class_index, "None")
 
-    def _get_class_id_from_prediction(self, prediction_name: str) -> Optional[int]:
+    @staticmethod
+    def get_class_id_from_prediction(prediction_name: str) -> Optional[int]:
         """
         Looks up the class ID from a predicted class name.
         """

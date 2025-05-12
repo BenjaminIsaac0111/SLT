@@ -33,18 +33,18 @@ class ClusteringControlsWidget(QGroupBox):
     request_clustering = pyqtSignal()
 
     def __init__(self):
-        super().__init__("Clustering")
+        super().__init__()
         self._init_ui()
 
     def _init_ui(self):
         layout = QVBoxLayout()
 
         # Clustering Button remains unchanged.
-        self.clustering_button = QPushButton("Start Clustering")
-        self.clustering_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.clustering_button.clicked.connect(self.request_clustering.emit)
-        self.clustering_button.setFocusPolicy(Qt.NoFocus)
-        layout.addWidget(self.clustering_button)
+        self.generate_annotations = QPushButton("Generate Annotations")
+        self.generate_annotations.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.generate_annotations.clicked.connect(self.request_clustering.emit)
+        self.generate_annotations.setFocusPolicy(Qt.NoFocus)
+        layout.addWidget(self.generate_annotations)
 
         # Create a container for the progress bar and overlaid label
         progress_container = QWidget()
@@ -61,7 +61,7 @@ class ClusteringControlsWidget(QGroupBox):
         progress_container_layout.addWidget(self.clustering_progress_bar, 0, 0)
 
         # Overlay QLabel for displaying text
-        self.clustering_progress_label = QLabel("Clustering annotations")
+        self.clustering_progress_label = QLabel("Clustering Annotations")
         self.clustering_progress_label.setAlignment(Qt.AlignCenter)
         self.clustering_progress_label.setStyleSheet("background: transparent; color: black;")
         self.clustering_progress_label.setVisible(False)
@@ -108,12 +108,11 @@ class ClusteringControlsWidget(QGroupBox):
 # Navigation Controls Widget
 # ---------------------------------------------------------------------------
 class NavigationControlsWidget(QGroupBox):
-    # Signals
-    sample_cluster = pyqtSignal(int)  # unchanged
+    sample_cluster = pyqtSignal(int)
     next_recommended_cluster_requested = pyqtSignal()
 
     def __init__(self):
-        super().__init__("Cluster Navigation")
+        super().__init__("Navigation")
         self._init_ui()
 
     def _init_ui(self):
@@ -123,7 +122,7 @@ class NavigationControlsWidget(QGroupBox):
         self.cluster_combo.currentIndexChanged.connect(self.on_cluster_selected)
         layout.addWidget(self.cluster_combo)
 
-        self.next_recommended_button = QPushButton("Go to Recommended Cluster (⏎)")
+        self.next_recommended_button = QPushButton("Go to next recommended (⏎)")
         self.next_recommended_button.clicked.connect(self.on_next_recommended)
         self.next_recommended_button.setFocusPolicy(Qt.NoFocus)
         layout.addWidget(self.next_recommended_button)
@@ -495,9 +494,6 @@ class ClusteredCropsView(QWidget):
         control_panel = QWidget()
         control_panel_layout = QVBoxLayout(control_panel)
 
-        self.annotation_method_widget = AnnotationMethodWidget()
-        control_panel_layout.addWidget(self.annotation_method_widget)
-
         self.clustering_widget = ClusteringControlsWidget()
         self.clustering_widget.request_clustering.connect(self.request_clustering.emit)
         control_panel_layout.addWidget(self.clustering_widget)
@@ -515,14 +511,6 @@ class ClusteredCropsView(QWidget):
         self.class_labels_widget.agree_with_model.connect(self.on_agree_with_model_clicked)
         control_panel_layout.addWidget(self.class_labels_widget)
 
-        self.file_ops_widget = FileOperationsWidget()
-        self.file_ops_widget.load_project_state_requested.connect(self.on_load_project_state)
-        self.file_ops_widget.save_project_requested.connect(self.save_project_requested.emit)
-        self.file_ops_widget.save_project_as_requested.connect(self.save_project_as_requested.emit)
-        self.file_ops_widget.export_annotations_requested.connect(self.on_export_annotations)
-        control_panel_layout.addWidget(self.file_ops_widget)
-
-        # Remove the extra stretches and add the statistics widget with a stretch factor.
         self.statistics_widget = LabelingStatisticsWidget()
         control_panel_layout.addWidget(self.statistics_widget, stretch=1)
 

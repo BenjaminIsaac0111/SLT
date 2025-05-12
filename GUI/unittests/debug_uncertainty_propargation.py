@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from itertools import count
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -49,6 +50,11 @@ def analyze_uncertainty(
         *,
         show: bool = True,
         save_path: Optional[Path] = None,
+        # NEW optional overrides  ↓↓↓
+        hist_range: tuple[float, float] | None = None,
+        scatter_xlim: tuple[float, float] | None = None,
+        scatter_ylim: tuple[float, float] | None = None,
+        diff_clim: tuple[float, float] | None = None,
 ) -> UncertaintyDebugStats:
     """
     Compute summary statistics and (optionally) plot original vs. adjusted
@@ -93,18 +99,19 @@ def analyze_uncertainty(
 
         # Histogram
         bins = "auto"
-        ax[0].hist(orig, bins=bins, alpha=0.6, label="Original")
-        ax[0].hist(adj, bins=bins, alpha=0.6, label="Adjusted")
-        ax[0].set_xlabel("Uncertainty")
-        ax[0].set_ylabel("Frequency")
-        ax[0].set_title("Distribution of uncertainties")
-        ax[0].legend()
+        ax[0].hist(orig, bins=bins, alpha=0.6, label="Original", range=hist_range)
+        ax[0].hist(adj, bins=bins, alpha=0.6, label="Adjusted", range=hist_range)
+        if hist_range is not None:
+            ax[0].set_xlim(hist_range)
 
         # Scatter
-        sc = ax[1].scatter(orig, adj, c=diff, cmap="viridis", alpha=0.5)
-        ax[1].plot([orig.min(), orig.max()],
-                   [orig.min(), orig.max()],
-                   ls="--", lw=0.7, color="grey")
+        sc = ax[1].scatter(orig, adj, c=diff, cmap="viridis", alpha=0.5,
+                           vmin=None if diff_clim is None else diff_clim[0],
+                           vmax=None if diff_clim is None else diff_clim[1])
+        if scatter_xlim is not None:
+            ax[1].set_xlim(scatter_xlim)
+        if scatter_ylim is not None:
+            ax[1].set_ylim(scatter_ylim)
         ax[1].set_xlabel("Original")
         ax[1].set_ylabel("Adjusted")
         ax[1].set_title("Original vs. adjusted")
@@ -121,3 +128,50 @@ def analyze_uncertainty(
             plt.close(fig)
 
     return stats_out
+
+
+class ProgressFilmer:
+    FRAME_EVERY_N = 2
+    _counter = count(0)
+
+    def __init__(self, out_dir: Path):
+        self.out_dir = Path(out_dir)
+        self.out_dir.mkdir(parents=True, exist_ok=True)
+
+        # -------- running extrema --------
+        self.xmin = np.inf
+        self.xmax = -np.inf
+        self.ymin = np.inf
+        self.ymax = -np.inf
+        self.dmin = np.inf  # diff = orig-adj
+        self.dmax = -np.inf
+
+    # --------------------------------------------------- public hook
+    def maybe_record_frame(self, annotations: Sequence["Annotation"]) -> None:
+        i = next(self._counter)
+        if i % self.FRAME_EVERY_N:
+            return
+
+        # --- update global extrema first ---------------------------
+        orig = np.asarray([a.uncertainty for a in annotations], dtype=float)
+        adj = np.asarray([a.adjusted_uncertainty for a in annotations], dtype=float)
+        diff = orig - adj
+
+        self.xmin = min(self.xmin, orig.min())
+        self.xmax = max(self.xmax, orig.max())
+        self.ymin = min(self.ymin, adj.min())
+        self.ymax = max(self.ymax, adj.max())
+        self.dmin = min(self.dmin, diff.min())
+        self.dmax = max(self.dmax, diff.max())
+
+        # --- hand off to the plotting routine ----------------------
+        analyze_uncertainty(
+            annotations,
+            show=False,
+            save_path=self.out_dir / f"frame_{i:05d}.png",
+            hist_range=(self.xmin, self.xmax),
+            scatter_xlim=(self.xmin, self.xmax),
+            scatter_ylim=(self.ymin, self.ymax),
+            diff_clim=(self.dmin, self.dmax),
+        )
+        plt.close('all')

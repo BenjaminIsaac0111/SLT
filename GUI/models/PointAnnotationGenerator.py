@@ -5,124 +5,197 @@ import numpy as np
 from numpy import ndarray
 from scipy.ndimage import gaussian_filter, maximum_filter
 
+logger = logging.getLogger(__name__)  # module-level logger
 
+
+# ----------------------------------------------------------------------------- #
+#                               BASE CLASS
+# ----------------------------------------------------------------------------- #
 class BasePointAnnotationGenerator:
-    """
-    Abstract base class for generating point annotations.
-    It provides utility methods to prepare the uncertainty map and extract logit features.
-    Subclasses must implement the `_generate_coords` method.
-    """
+    """Abstract base class for generating point annotations."""
 
     def __init__(self, edge_buffer: int = 64):
         self.edge_buffer = edge_buffer
+        logger.info(
+            "%s initialised (edge_buffer=%d)",
+            self.__class__.__name__, edge_buffer,
+        )
 
+    # ---------------------------- utilities --------------------------------- #
     def _prepare_uncertainty_map(self, uncertainty_map: np.ndarray) -> np.ndarray:
+        """
+        Reduce a 3-D uncertainty volume to 2-D (mean over last axis) or pass
+        through a 2-D map.  Raises ``ValueError`` otherwise.
+        """
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "Preparing uncertainty map: dtype=%s, shape=%s",
+                uncertainty_map.dtype, uncertainty_map.shape,
+            )
+
         if uncertainty_map.ndim == 3:
             uncertainty_map_2d = np.mean(uncertainty_map, axis=-1)
-            logging.debug("Aggregated 3D uncertainty map into 2D using mean.")
+            logger.debug("Aggregated 3-D map across axis −1 → shape %s",
+                         uncertainty_map_2d.shape)
         elif uncertainty_map.ndim == 2:
             uncertainty_map_2d = uncertainty_map
-            logging.debug("Uncertainty map is already 2D.")
+            logger.debug("Uncertainty map already 2-D.")
         else:
-            raise ValueError("Uncertainty map must be a 2D or 3D numpy array.")
-        return uncertainty_map_2d.astype(np.float32)
+            raise ValueError("Uncertainty map must be 2-D or 3-D.")
 
-    def _extract_logit_features(self, logits: np.ndarray, coords: List[Tuple[int, int]]) -> np.ndarray:
+        return uncertainty_map_2d.astype(np.float32, copy=False)
+
+    def _extract_logit_features(
+            self, logits: np.ndarray, coords: List[Tuple[int, int]]
+    ) -> np.ndarray:
         if not coords:
-            logging.warning("No coordinates provided for logit feature extraction.")
+            logger.warning("No coordinates for logit extraction.")
             return np.array([])
         rows, cols = zip(*coords)
-        logit_features = logits[rows, cols, :]  # Shape: (n_coords, num_classes)
-        return logit_features.astype(np.float32)
+        feats = logits[rows, cols, :]  # (n_coords, n_classes)
 
-    def generate_annotations(self, uncertainty_map: np.ndarray, logits: np.ndarray) -> Tuple[ndarray, List[tuple]]:
+        logger.debug(
+            "Extracted logits @ %d coords → shape %s", len(coords), feats.shape
+        )
+        return feats.astype(np.float32, copy=False)
+
+    # --------------------- public dispatcher -------------------------------- #
+    def generate_annotations(
+            self, uncertainty_map: np.ndarray, logits: np.ndarray
+    ) -> Tuple[ndarray, List[tuple]]:
         """
-        Prepares the uncertainty map, generates coordinates using the subclass's method,
-        and extracts logit features at these coordinates.
+        1. Prepare map → 2. generate coords → 3. extract logits.
+        Returns ``(logits_at_points, coords)``.
         """
-        uncertainty_map_2d = self._prepare_uncertainty_map(uncertainty_map)
-        coords = self._generate_coords(uncertainty_map_2d)
+        map2d = self._prepare_uncertainty_map(uncertainty_map)
+        coords = self._generate_coords(map2d)
+
         if not coords:
-            logging.warning("No coordinates found.")
+            logger.warning("%s: no coordinates produced.", self.__class__.__name__)
             return np.array([]), []
-        logit_features = self._extract_logit_features(logits, coords)
-        return logit_features, coords
 
+        feats = self._extract_logit_features(logits, coords)
+        logger.info("%s produced %d annotations.", self.__class__.__name__, len(coords))
+        return feats, coords
+
+    # enforced in subclasses
     def _generate_coords(self, uncertainty_map: np.ndarray) -> List[tuple]:
-        raise NotImplementedError("Subclasses must implement _generate_coords.")
+        raise NotImplementedError
 
 
+# ----------------------------------------------------------------------------- #
+#                    LOCAL-MAXIMA IMPLEMENTATION
+# ----------------------------------------------------------------------------- #
 class LocalMaximaPointAnnotationGenerator(BasePointAnnotationGenerator):
     """
-    Generates annotations by identifying local maxima in the uncertainty map.
-    Optionally applies Gaussian smoothing prior to detection.
+    Find local maxima in an uncertainty map (with optional Gaussian smoothing).
     """
 
-    def __init__(self, filter_size: int = 48, gaussian_sigma: float = 4.0,
-                 edge_buffer: int = 64, use_gaussian: bool = False):
+    def __init__(
+            self,
+            filter_size: int = 48,
+            gaussian_sigma: float = 4.0,
+            edge_buffer: int = 64,
+            use_gaussian: bool = False,
+    ):
         super().__init__(edge_buffer=edge_buffer)
+
+        # validate
+        if filter_size <= 0:
+            raise ValueError("filter_size must be positive.")
+        if gaussian_sigma <= 0:
+            raise ValueError("gaussian_sigma must be positive.")
+        if not isinstance(use_gaussian, bool):
+            raise ValueError("use_gaussian must be a bool.")
+
         self.filter_size = filter_size
         self.gaussian_sigma = gaussian_sigma
         self.use_gaussian = use_gaussian
 
-        # Parameter validation
-        if not isinstance(filter_size, int) or filter_size <= 0:
-            raise ValueError("filter_size must be a positive integer.")
-        if not isinstance(gaussian_sigma, (int, float)) or gaussian_sigma <= 0:
-            raise ValueError("gaussian_sigma must be a positive float.")
-        if not isinstance(use_gaussian, bool):
-            raise ValueError("use_gaussian must be a boolean.")
+        logger.info(
+            "LocalMaximaPointAnnotationGenerator(filter=%d, sigma=%.1f, "
+            "use_gaussian=%s)",
+            filter_size, gaussian_sigma, use_gaussian,
+        )
 
-        logging.info("LocalMaximaPointAnnotationGenerator initialized with filter_size=%d, "
-                     "gaussian_sigma=%.2f, use_gaussian=%s, edge_buffer=%d.",
-                     filter_size, gaussian_sigma, use_gaussian, edge_buffer)
-
+    # --------------------------------------------------------------------- #
     def _generate_coords(self, uncertainty_map: np.ndarray) -> List[tuple]:
-        # Optionally apply Gaussian smoothing
         if self.use_gaussian:
-            processed_map = gaussian_filter(uncertainty_map, sigma=self.gaussian_sigma)
-            logging.debug("Applied Gaussian filter with sigma=%.2f.", self.gaussian_sigma)
+            processed = gaussian_filter(uncertainty_map, sigma=self.gaussian_sigma)
+            logger.debug("Applied Gaussian σ=%.1f", self.gaussian_sigma)
         else:
-            processed_map = uncertainty_map
-            logging.debug("Skipping Gaussian filter as per configuration.")
+            processed = uncertainty_map
+            logger.debug("Gaussian smoothing disabled.")
 
-        # Identify local maxima using a maximum filter
-        local_max = maximum_filter(processed_map, size=self.filter_size, mode='constant') == processed_map
+        # local-max test
+        local_max = maximum_filter(
+            processed, size=self.filter_size, mode="constant"
+        ) == processed
         coords = np.argwhere(local_max)
 
-        rows, cols = uncertainty_map.shape
-        valid_mask = (
-                (coords[:, 0] >= self.edge_buffer) &
-                (coords[:, 0] < rows - self.edge_buffer) &
-                (coords[:, 1] >= self.edge_buffer) &
-                (coords[:, 1] < cols - self.edge_buffer)
+        # border mask
+        r, c = uncertainty_map.shape
+        mask = (
+                (coords[:, 0] >= self.edge_buffer)
+                & (coords[:, 0] < r - self.edge_buffer)
+                & (coords[:, 1] >= self.edge_buffer)
+                & (coords[:, 1] < c - self.edge_buffer)
         )
-        valid_coords = coords[valid_mask]
-        valid_coords = [tuple(coord) for coord in valid_coords]
-        logging.debug("Identified %d significant coordinates using local maxima.", len(valid_coords))
-        return valid_coords
+        before, after = coords.shape[0], mask.sum()
+        coords = [tuple(x) for x in coords[mask]]
+
+        logger.debug(
+            "Local maxima: %d raw, %d after edge buffer (%d px).",
+            before, after, self.edge_buffer,
+        )
+        return coords
 
 
+# ----------------------------------------------------------------------------- #
+#                   EQUIDISTANT GRID IMPLEMENTATION
+# ----------------------------------------------------------------------------- #
 class EquidistantPointAnnotationGenerator(BasePointAnnotationGenerator):
-    """
-    Generates annotations by creating a uniform grid (equidistant spots)
-    over the uncertainty map.
-    """
+    """Uniform grid of points."""
 
     def __init__(self, grid_spacing: int = 64, edge_buffer: int = 64):
         super().__init__(edge_buffer=edge_buffer)
+        if grid_spacing <= 0:
+            raise ValueError("grid_spacing must be positive.")
         self.grid_spacing = grid_spacing
+        logger.info(
+            "EquidistantPointAnnotationGenerator(spacing=%d, edge_buffer=%d)",
+            grid_spacing, edge_buffer,
+        )
 
-        if not isinstance(grid_spacing, int) or grid_spacing <= 0:
-            raise ValueError("grid_spacing must be a positive integer.")
-        logging.info("EquidistantPointAnnotationGenerator initialized with grid_spacing=%d, edge_buffer=%d.",
-                     grid_spacing, edge_buffer)
-
+    # --------------------------------------------------------------------- #
     def _generate_coords(self, uncertainty_map: np.ndarray) -> List[tuple]:
         rows, cols = uncertainty_map.shape
-        coords = []
-        for row in range(self.edge_buffer, rows - self.edge_buffer, self.grid_spacing):
-            for col in range(self.edge_buffer, cols - self.edge_buffer, self.grid_spacing):
-                coords.append((row, col))
-        logging.debug("Generated equidistant grid with %d coordinates.", len(coords))
+        coords = [
+            (r, c)
+            for r in range(self.edge_buffer, rows - self.edge_buffer, self.grid_spacing)
+            for c in range(self.edge_buffer, cols - self.edge_buffer, self.grid_spacing)
+        ]
+        logger.debug(
+            "Equidistant grid: produced %d coords (spacing=%d).",
+            len(coords), self.grid_spacing,
+        )
         return coords
+
+
+# ----------------------------------------------------------------------------- #
+#                    CENTRE-ONLY IMPLEMENTATION
+# ----------------------------------------------------------------------------- #
+class CenterPointAnnotationGenerator(BasePointAnnotationGenerator):
+    """Always return the geometric centre."""
+
+    def __init__(self):
+        super().__init__(edge_buffer=0)  # no margin needed
+
+    # --------------------------------------------------------------------- #
+    def _generate_coords(self, uncertainty_map: np.ndarray) -> List[Tuple[int, int]]:
+        if uncertainty_map.ndim != 2:
+            raise ValueError("uncertainty_map must be 2-D.")
+        r, c = uncertainty_map.shape
+        centre = (r // 2, c // 2)
+        logger.debug("Centre point at %s", centre)
+        return [centre]

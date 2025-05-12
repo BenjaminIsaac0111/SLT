@@ -17,7 +17,7 @@ from PyQt5.QtWidgets import (
     QLabel,
     QPushButton,
     QFileDialog,
-    QMessageBox,
+    QMessageBox, QAction, QActionGroup,
 )
 
 from GUI.configuration.configuration import MIME_FILTER, LEGACY_FILTER, PROJECT_EXT, LEGACY_EXT, AUTOSAVE_DIR, \
@@ -160,6 +160,33 @@ def _main_window(view: QDialog) -> QMainWindow:
     tabs = QTabWidget()
     tabs.addTab(view, "Clustered Crops")
     win.setCentralWidget(tabs)
+
+    mb = win.menuBar()  # ← NEW
+
+    # ---------------------------- File menu
+    file_menu = mb.addMenu("&File")
+    act_load = file_menu.addAction("Load Project…")
+    act_save = file_menu.addAction("Save")
+    act_save_as = file_menu.addAction("Save As…")
+    file_menu.addSeparator()
+    act_export = file_menu.addAction("Export Annotations…")
+
+    act_load.triggered.connect(view.load_project_state_requested)
+    act_save.triggered.connect(view.save_project_requested)
+    act_save_as.triggered.connect(view.save_project_as_requested)
+    act_export.triggered.connect(view.export_annotations_requested)
+
+    ann_menu = mb.addMenu("Annotation Method")
+    ann_group = QActionGroup(win)
+    for label in ["Local Uncertainty Maxima", "Equidistant Spots", "Image Centre"]:
+        act = QAction(label, win, checkable=True)
+        ann_group.addAction(act)
+        ann_menu.addAction(act)
+    ann_group.actions()[0].setChecked(True)  # default selection
+    ann_group.triggered.connect(
+        lambda a: view.annotation_method_changed.emit(a.text())
+    )
+
     win.setWindowTitle("Guided Labelling Tool")
     win.resize(1920, 1080)
 

@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import json
 import logging
-from collections import OrderedDict
+from collections import OrderedDict, Counter
 from pathlib import Path
 from typing import Optional, Dict, List
 
 import numpy as np
+import scipy
 from PyQt5.QtCore import QObject, pyqtSlot, QTimer, QCoreApplication
 from PyQt5.QtWidgets import QFileDialog, QMessageBox
 
@@ -17,16 +18,15 @@ from GUI.controllers.ImageProcessingController import ImageProcessingController
 from GUI.controllers.ProjectStateController import ProjectStateController
 from GUI.models import StatePersistance
 from GUI.models.Annotation import Annotation
-from GUI.models.ClusterRanker import score_cluster
 # Use unified interface and factory
 from GUI.models.ImageDataModel import BaseImageDataModel, create_image_data_model
 from GUI.models.PointAnnotationGenerator import (
     LocalMaximaPointAnnotationGenerator,
-    EquidistantPointAnnotationGenerator,
+    EquidistantPointAnnotationGenerator, CenterPointAnnotationGenerator,
 )
 from GUI.models.StatePersistance import ProjectState
 from GUI.models.UncertaintyPropagator import propagate_for_annotations
-from GUI.unittests.debug_uncertainty_propargation import analyze_uncertainty
+from GUI.unittests.debug_uncertainty_propargation import analyze_uncertainty, ProgressFilmer
 from GUI.views.ClusteredCropsView import ClusteredCropsView
 
 
@@ -47,6 +47,8 @@ class MainController(QObject):
         self.view = view
         self._nav_history: list[int] = []
         self.annotation_generator = LocalMaximaPointAnnotationGenerator()
+        self._use_greedy_nav: bool = True  # updated in on_label_generator_method_changed
+        self._seq_cursor: Optional[int] = None  # stores the “current” cluster id for sequential mode
 
         # Controllers use BaseImageDataModel interface
         self.clustering_controller = AnnotationClusteringController(
@@ -58,6 +60,10 @@ class MainController(QObject):
         self._dirty = False  # ← any unsaved change?
         self._idle_timer = QTimer(singleShot=True)
         self._idle_timer.timeout.connect(self._autosave_if_dirty)
+
+        self._filmer = ProgressFilmer(
+            self.project_state_controller.get_frames_dir()
+        )
 
         self.connect_signals()
         QCoreApplication.instance().aboutToQuit.connect(self.cleanup)
@@ -129,22 +135,27 @@ class MainController(QObject):
             self.annotation_generator = LocalMaximaPointAnnotationGenerator(
                 filter_size=48, gaussian_sigma=4.0, use_gaussian=False
             )
+            self._use_greedy_nav = True
         elif method == "Equidistant Spots":
             self.annotation_generator = EquidistantPointAnnotationGenerator(grid_spacing=48)
+            self._use_greedy_nav = True
+        elif method == "Image Centre":
+            self.annotation_generator = CenterPointAnnotationGenerator()
+            self._use_greedy_nav = False
         else:
             self.annotation_generator = LocalMaximaPointAnnotationGenerator(
                 filter_size=48, gaussian_sigma=4.0, use_gaussian=False
             )
             logging.warning("Unknown annotation method selected; defaulting to Local Maxima.")
-
+        self._seq_cursor = None
         self.clustering_controller.annotation_generator = self.annotation_generator
         logging.info("Annotation generator updated to method: %s", method)
 
         self._dirty = True
         self._idle_timer.start(self.AUTOSAVE_IDLE_MS)
 
-    @pyqtSlot(dict, object, object)
-    def on_clusters_ready(self, clusters: Dict[int, List[Annotation]], clustering_model, feature_matrix):
+    @pyqtSlot(dict)
+    def on_clusters_ready(self, clusters: Dict[int, List[Annotation]]):
         """
         Handles when clusters are ready after clustering finishes.
         Updates the ImageProcessingController with the new clusters.
@@ -253,15 +264,19 @@ class MainController(QObject):
     def on_next_recommended_cluster(self):
         current = self.view.get_selected_cluster_id()
         if current is not None:
-            self._nav_history.append(current)  # push
-        next_cluster_id = self.select_next_cluster_based_on_greedy_metric()
+            self._nav_history.append(current)
+        if self._use_greedy_nav:
+            next_cluster_id = self.select_next_cluster_based_on_greedy_metric()
+        else:
+            next_cluster_id = self._select_next_cluster_sequential(current)
+
         if next_cluster_id is not None:
-            # Update view to display the recommended cluster
             updated_cluster_info = self.clustering_controller.generate_cluster_info()
             self.view.populate_cluster_selection(updated_cluster_info, selected_cluster_id=next_cluster_id)
             self.on_select_cluster(next_cluster_id)
         else:
             logging.info("No next recommended cluster found.")
+        self._filmer.maybe_record_frame(self._get_all_annotations())
 
     @pyqtSlot()
     def on_backtrack_requested(self):
@@ -318,37 +333,147 @@ class MainController(QObject):
         )
         logging.info("Uncertainty debug summary: %s", stats_out.to_log_string())
 
-    def select_next_cluster_based_on_greedy_metric(self) -> Optional[int]:
+    def select_next_cluster_based_on_greedy_metric(
+            self, *, skip_current: bool = True
+    ) -> Optional[int]:
         """
-        Computes an aggregated uncertainty score for each cluster based on the adjusted uncertainties,
-        and returns the ID of the cluster with the highest average adjusted uncertainty.
+        Return the cluster ID with the highest composite z-score *excluding*
+        (1) the cluster currently shown in the UI   and
+        (2) clusters that are fully labelled.
 
-        This serves as the greedy criterion for selecting the next cluster to label.
-
-        Returns:
-            The cluster ID with the highest mean adjusted uncertainty, or None if no clusters exist.
+        Parameters
+        ----------
+        skip_current : bool, default True
+            If True, the cluster that is selected in the GUI at call-time will be
+            omitted from consideration.  This prevents immediately revisiting the
+            same cluster after the user has just labelled it.
         """
         clusters = self.clustering_controller.get_clusters()
-        best_score = -float("inf")
-        best_cluster_id = None
+        if not clusters:
+            return None
 
-        for cid, annotations in clusters.items():
-            if annotations:
-                aggregated_uncertainty = [anno.adjusted_uncertainty for anno in annotations]
-                score = score_cluster(aggregated_uncertainty, method='topk', k=3)
-                if score > best_score:
-                    best_score = score
-                    best_cluster_id = cid
+        # -------------------------------------------------- #
+        #  Identify cluster(s) to skip
+        # -------------------------------------------------- #
+        current_cid = self.view.get_selected_cluster_id() if skip_current else None
 
-        logging.info(f"Next recommended cluster: {best_cluster_id} with aggregated uncertainty {best_score:.4f}")
-        return best_cluster_id
+        # Remove clusters that are fully labelled
+        def _has_unlabelled(annos):
+            return any(a.class_id == -1 for a in annos)
+
+        candidate_items = {
+            cid: annos
+            for cid, annos in clusters.items()
+            if _has_unlabelled(annos) and cid != current_cid
+        }
+        if not candidate_items:
+            logging.info("All remaining clusters are fully labelled or only current cluster left.")
+            return None
+
+        # -------------------------------------------------- #
+        #  Global label stats for rarity & coverage terms
+        # -------------------------------------------------- #
+        labeled_annos = [
+            a for annos in clusters.values()
+            for a in annos if a.class_id not in (-1, -2, -3)
+        ]
+        label_counts = Counter(a.class_id for a in labeled_annos) or {0: 1}
+
+        kd = None
+        if labeled_annos:
+            feats_lab = np.vstack([a.logit_features for a in labeled_annos])
+            kd = scipy.spatial.cKDTree(feats_lab)
+
+        # -------------------------------------------------- #
+        #  Per-cluster raw metrics
+        # -------------------------------------------------- #
+        per_cluster = []  # (cid, U, D, R, C)
+
+        for cid, annos in candidate_items.items():
+            unlab = [a for a in annos if a.class_id == -1]
+            lab = [a for a in annos if a.class_id not in (-1, -2, -3)]
+
+            # mean adjusted uncertainty of *unlabelled* members
+            U = float(np.mean([a.adjusted_uncertainty for a in unlab])) if unlab else 0.0
+
+            # disagreement rate among labelled members
+            if lab:
+                disagreements = [
+                    1
+                    for a in lab
+                    if (mp := self.clustering_controller.get_class_id_from_prediction(a.model_prediction)) is not None
+                       and mp != a.class_id
+                ]
+                D = sum(disagreements) / len(lab)
+            else:
+                D = 0.0
+
+            # rarity of majority class in the cluster
+            if lab:
+                maj_cls = Counter(a.class_id for a in lab).most_common(1)[0][0]
+            else:  # no labels yet in this cluster → use first unlabelled prediction
+                maj_cls = self.clustering_controller.get_class_id_from_prediction(unlab[0].model_prediction)
+            R = 1.0 / (label_counts.get(maj_cls, 0) + 1)
+
+            # distance to nearest labelled sample (coverage)
+            if kd is not None:
+                centre = np.mean([a.logit_features for a in annos], axis=0)
+                C = kd.query(centre)[0]
+            else:
+                C = 0.0
+
+            per_cluster.append((cid, U, D, R, C))
+
+        # -------------------------------------------------- #
+        #  z-score normalisation & selection
+        # -------------------------------------------------- #
+        mat = np.asarray([t[1:] for t in per_cluster], dtype=np.float32)  # shape (m,4)
+        means = mat.mean(axis=0)
+        stds = mat.std(axis=0)
+        stds[stds == 0] = 1.0  # avoid divide-by-zero
+
+        best_cid, best_score = None, -np.inf
+        for cid, U, D, R, C in per_cluster:
+            z = ((U - means[0]) / stds[0] +
+                 (D - means[1]) / stds[1] +
+                 (R - means[2]) / stds[2] +
+                 (C - means[3]) / stds[3])
+            if z > best_score:
+                best_score, best_cid = z, cid
+
+        logging.info(
+            "Next recommended cluster (z-score rule, skipping %s): %s  [score %.3f]",
+            current_cid, best_cid, best_score,
+        )
+        return best_cid
+
+    def _select_next_cluster_sequential(self, current: Optional[int]) -> Optional[int]:
+        """
+        Returns the next cluster id in ascending order, wrapping around once.
+        Keeps an internal cursor so repeated presses iterate deterministically.
+        """
+        cluster_ids = sorted(self.clustering_controller.get_clusters())
+        if not cluster_ids:
+            return None
+
+        # Initialise cursor
+        if self._seq_cursor is None or self._seq_cursor not in cluster_ids:
+            self._seq_cursor = cluster_ids[0]
+        else:
+            # advance to next id
+            idx = cluster_ids.index(self._seq_cursor)
+            self._seq_cursor = cluster_ids[(idx + 1) % len(cluster_ids)]
+
+        # Do not return the same cluster twice in a row
+        if self._seq_cursor == current and len(cluster_ids) > 1:
+            idx = cluster_ids.index(self._seq_cursor)
+            self._seq_cursor = cluster_ids[(idx + 1) % len(cluster_ids)]
+
+        return self._seq_cursor
 
     # -------------------------------------------------------------------------
     #                           PROJECT STATE
     # -------------------------------------------------------------------------
-    # -----------------------------------------------------------------
-    #            PROJECT STATE  – new implementation
-    # -----------------------------------------------------------------
     def get_current_state(self) -> StatePersistance.ProjectState:
         """Return a fully‑validated ProjectState instance."""
         if self.image_data_model is None:
@@ -405,11 +530,6 @@ class MainController(QObject):
         if not path:
             return self.save_project_as()
         self.project_state_controller.save_project_state(self.get_current_state(), path)
-
-    # at the top of the file or in a shared constants module ------------
-    PROJECT_EXT = ".slt"  # Smart‑Labelling‑Tool file
-    MIME_FILTER = f"SLT Project (*{PROJECT_EXT})"
-    LEGACY_FILTER = "Legacy Project (*.json.gz)"
 
     # -------------------------------------------------------------------
     @pyqtSlot()
