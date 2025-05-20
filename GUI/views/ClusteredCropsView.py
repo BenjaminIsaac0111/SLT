@@ -285,7 +285,7 @@ class ClassLabelsWidget(QGroupBox):
 
 
 # ---------------------------------------------------------------------------
-# File Operations Widget
+# File Operations Widget - Not in Use
 # ---------------------------------------------------------------------------
 class FileOperationsWidget(QGroupBox):
     load_project_state_requested = pyqtSignal()
@@ -429,8 +429,8 @@ class CropGraphicsView(QGraphicsView):
             super().wheelEvent(event)
 
 
+# Not in use
 class AnnotationMethodWidget(QGroupBox):
-    # Emit the selected method as a string, e.g., "Local Maxima" or "Equidistant Spots"
     annotation_method_changed = pyqtSignal(str)
 
     def __init__(self, parent=None):
@@ -451,8 +451,8 @@ class ClusteredCropsView(QWidget):
     annotation_method_changed = pyqtSignal(str)
     sample_cluster = pyqtSignal(int)
     backtrack_requested = pyqtSignal()
-    bulk_label_changed = pyqtSignal(int)  # class_id for all visible crops
-    crop_label_changed = pyqtSignal(dict, int)  # (annotation_dict, class_id)
+    bulk_label_changed = pyqtSignal(int)
+    crop_label_changed = pyqtSignal(dict, int)
     save_project_state_requested = pyqtSignal()
     export_annotations_requested = pyqtSignal()
     save_project_requested = pyqtSignal()
@@ -540,6 +540,7 @@ class ClusteredCropsView(QWidget):
 
     def keyPressEvent(self, event):
         key = event.key()
+        mods = event.modifiers()
         if Qt.Key_0 <= key <= Qt.Key_8:
             class_id = key - Qt.Key_0
             if class_id in CLASS_COMPONENTS:
@@ -554,8 +555,14 @@ class ClusteredCropsView(QWidget):
         if event.text() == '!':
             self.on_class_button_clicked(-3)
             return
+        # Force-agree  (Ctrl + Space)
+        if key == Qt.Key_Space and (mods & Qt.ControlModifier):
+            self.on_agree_with_model_clicked(force=True)
+            return
+        # Normal agree – *skip* locked crops
         if key == Qt.Key_Space:
-            self.on_agree_with_model_clicked()
+            self.on_agree_with_model_clicked(force=False)
+            return
             return
         if key in (Qt.Key_Return, Qt.Key_Enter):
             self.navigation_widget.on_next_recommended()
@@ -734,30 +741,42 @@ class ClusteredCropsView(QWidget):
         if class_id is None:
             class_id = -1
         for crop in self.selected_crops:
-            annotation: Annotation = crop['annotation']
-            annotation.class_id = class_id
-            # If unlabeling, restore adjusted_uncertainty from original uncertainty.
-            if class_id == -1:
-                annotation.adjusted_uncertainty = annotation.uncertainty
+            ann: Annotation = crop['annotation']
+            ann.class_id = class_id
+            ann.is_manual = (class_id != -1)  # mark only real labels as manual
+            if class_id == -1:  # unlabel: restore
+                ann.adjusted_uncertainty = ann.uncertainty
+                ann.is_manual = False
         self.bulk_label_changed.emit(class_id)
         self.arrange_crops()
 
-    def on_agree_with_model_clicked(self):
+    def on_agree_with_model_clicked(self, *, force: bool = False):
         changes_made = False
         for crop_data in self.selected_crops:
-            annotation = crop_data['annotation']
-            if annotation.model_prediction is not None:
-                model_class_id = self.get_class_id_from_model_prediction(annotation.model_prediction)
-                if model_class_id is not None:
-                    old_class = annotation.class_id
-                    annotation.class_id = model_class_id
-                    if annotation.class_id != old_class:
-                        changes_made = True
-                        self.crop_label_changed.emit(annotation.to_dict(), model_class_id)
+            ann = crop_data['annotation']
+
+            # Skip manual labels unless force==True
+            if ann.is_manual and not force:
+                continue
+
+            if ann.model_prediction is None:
+                continue
+
+            model_cid = self.get_class_id_from_model_prediction(ann.model_prediction)
+            if model_cid is None:
+                continue
+
+            if ann.class_id != model_cid:
+                ann.class_id = model_cid
+                ann.is_manual = False  # becomes “model” again
+                changes_made = True
+                self.crop_label_changed.emit(ann.to_dict(), model_cid)
+
         if changes_made:
             self.arrange_crops()
 
-    def get_class_id_from_model_prediction(self, model_prediction: str) -> Optional[int]:
+    @staticmethod
+    def get_class_id_from_model_prediction(model_prediction: str) -> Optional[int]:
         for cid, cname in CLASS_COMPONENTS.items():
             if cname == model_prediction:
                 return cid

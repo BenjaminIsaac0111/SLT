@@ -92,7 +92,7 @@ class AnnotationClusteringWorker(QRunnable):
         Backend algorithm applied on the core‑set.
     cluster_size : int, default 6
         How many elements to return per final cluster.
-    include_uncertainty : bool, default True
+    include_uncertainty_in_feature_vector : bool, default True
         Whether to append the per‑annotation uncertainty score to the feature
         vector used *throughout* the pipeline.
     random_state : int | None, default 42
@@ -106,7 +106,7 @@ class AnnotationClusteringWorker(QRunnable):
             cluster_method: str = "minibatchkmeans",
             cluster_size: int = 8,
             *,
-            include_uncertainty: bool = True,
+            include_uncertainty_in_feature_vector: bool = False,
             random_state: Optional[int] = 42,
     ):
         super().__init__()
@@ -117,7 +117,7 @@ class AnnotationClusteringWorker(QRunnable):
         self.subsample_ratio = float(np.clip(subsample_ratio, 0.0, 1.0))  # guard
         self.cluster_method = cluster_method.lower()
         self.cluster_size = int(cluster_size)
-        self.include_uncertainty = include_uncertainty
+        self.include_uncertainty = include_uncertainty_in_feature_vector
         self.random_state = random_state
 
         # runtime artefacts

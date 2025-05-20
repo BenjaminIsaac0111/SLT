@@ -2,7 +2,6 @@ import logging
 from typing import List, Tuple
 
 import numpy as np
-from numpy import ndarray
 from scipy.ndimage import gaussian_filter, maximum_filter
 
 logger = logging.getLogger(__name__)  # module-level logger
@@ -22,7 +21,8 @@ class BasePointAnnotationGenerator:
         )
 
     # ---------------------------- utilities --------------------------------- #
-    def _prepare_uncertainty_map(self, uncertainty_map: np.ndarray) -> np.ndarray:
+    @staticmethod
+    def _prepare_uncertainty_map(uncertainty_map: np.ndarray) -> np.ndarray:
         """
         Reduce a 3-D uncertainty volume to 2-D (mean over last axis) or pass
         through a 2-D map.  Raises ``ValueError`` otherwise.
@@ -45,8 +45,9 @@ class BasePointAnnotationGenerator:
 
         return uncertainty_map_2d.astype(np.float32, copy=False)
 
+    @staticmethod
     def _extract_logit_features(
-            self, logits: np.ndarray, coords: List[Tuple[int, int]]
+            logits: np.ndarray, coords: List[tuple]
     ) -> np.ndarray:
         if not coords:
             logger.warning("No coordinates for logit extraction.")
@@ -62,7 +63,7 @@ class BasePointAnnotationGenerator:
     # --------------------- public dispatcher -------------------------------- #
     def generate_annotations(
             self, uncertainty_map: np.ndarray, logits: np.ndarray
-    ) -> Tuple[ndarray, List[tuple]]:
+    ) -> Tuple[np.ndarray, List[tuple]]:
         """
         1. Prepare map → 2. generate coords → 3. extract logits.
         Returns ``(logits_at_points, coords)``.
@@ -72,11 +73,11 @@ class BasePointAnnotationGenerator:
 
         if not coords:
             logger.warning("%s: no coordinates produced.", self.__class__.__name__)
-            return np.array([]), []
+            return np.empty((0, logits.shape[-1]), dtype=np.float32), []
 
         feats = self._extract_logit_features(logits, coords)
         logger.info("%s produced %d annotations.", self.__class__.__name__, len(coords))
-        return feats, coords
+        return feats.astype(np.float32, copy=False), coords
 
     # enforced in subclasses
     def _generate_coords(self, uncertainty_map: np.ndarray) -> List[tuple]:

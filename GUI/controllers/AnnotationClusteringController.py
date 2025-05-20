@@ -59,6 +59,10 @@ class AnnotationExtractionWorker(QThread):
         )
 
         for coord, logit_feature in zip(coords, logit_features):
+            if not logit_feature.any():
+                logging.debug("Zero-logits at %s in %s (unc %.4f)",
+                              coord, filename, uncertainty_map[tuple(coord)])
+                continue
             anno = Annotation(
                 filename=filename,
                 coord=coord,

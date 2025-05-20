@@ -62,7 +62,7 @@ class MainController(QObject):
         self._idle_timer.timeout.connect(self._autosave_if_dirty)
 
         self._filmer = ProgressFilmer(
-            self.project_state_controller.get_frames_dir()
+            self.project_state_controller.get_frames_dir
         )
 
         self.connect_signals()
@@ -230,33 +230,41 @@ class MainController(QObject):
         """
         Handles when a class label is set for an individual crop.
         """
-        cluster_id = int(crop_data['cluster_id'])
-        image_index = int(crop_data['image_index'])
-        coord = tuple(crop_data['coord'])
+        cluster_id = int(crop_data["cluster_id"])
+        image_index = int(crop_data["image_index"])
+        coord = tuple(crop_data["coord"])
 
         clusters = self.clustering_controller.get_clusters()
         annotations = clusters.get(cluster_id, [])
 
-        # Update the annotation matching the provided crop data.
         for anno in annotations:
             if anno.image_index == image_index and anno.coord == coord:
                 anno.class_id = class_id
-                label_action = "unlabeled" if class_id == -1 else "labeled"
+                if class_id == -1:  # user chose “Unlabel”
+                    anno.is_manual = False
+                    anno.reset_uncertainty()  # adjusted ← original prior
+                    label_action = "un-labeled"
+                else:
+                    anno.is_manual = True  # manual lock
+                    label_action = "labeled"
+
                 logging.debug(
-                    f"Annotation for image {image_index}, coord {coord} {label_action} with class_id {class_id}"
+                    f"Annotation {image_index=} {coord=} {label_action} "
+                    f"with class_id {class_id}"
                 )
                 break
         else:
-            logging.warning(f"Annotation for image {image_index}, coord {coord} not found in cluster {cluster_id}")
+            logging.warning(
+                f"Annotation for image {image_index}, coord {coord} "
+                f"not found in cluster {cluster_id}"
+            )
 
-        # Propagate uncertainty changes
         self.propagate_labeling_changes()
-
-        # Recompute labeling statistics
         self.clustering_controller.compute_labeling_statistics()
 
         cluster_info = self.clustering_controller.generate_cluster_info()
-        self.view.populate_cluster_selection(cluster_info, selected_cluster_id=cluster_id)
+        self.view.populate_cluster_selection(cluster_info,
+                                             selected_cluster_id=cluster_id)
 
         self._dirty = True
         self._idle_timer.start(self.AUTOSAVE_IDLE_MS)
@@ -334,55 +342,53 @@ class MainController(QObject):
         )
         logging.info("Uncertainty debug summary: %s", stats_out.to_log_string())
 
-    def select_next_cluster_based_on_greedy_metric(
-            self, *, skip_current: bool = True
-    ) -> Optional[int]:
+    def select_next_cluster_based_on_greedy_metric(self, *, skip_current: bool = True) -> Optional[int]:
         """
-        Return the cluster ID with the highest composite z-score *excluding*
-        (1) the cluster currently shown in the UI   and
-        (2) clusters that are fully labelled.
+        Return the cluster ID with the highest composite z-score, ignoring
+          • the cluster currently shown in the UI (if *skip_current* is True)
+          • clusters that are already fully labelled.
 
-        Parameters
-        ----------
-        skip_current : bool, default True
-            If True, the cluster that is selected in the GUI at call-time will be
-            omitted from consideration.  This prevents immediately revisiting the
-            same cluster after the user has just labelled it.
+        Composite score = z(U_c) + z(R_c) + z(C_c)
+        where
+            U_c : mean adjusted uncertainty of *unlabelled* items
+            R_c : rarity proxy 1 / (label_count(majority_class) + 1)
+                  – majority class is taken from *labels if present*, else from
+                    the model’s top-1 predictions over **all** items in the cluster
+            C_c : distance from cluster centre to nearest *labelled* sample
         """
         clusters = self.clustering_controller.get_clusters()
         if not clusters:
             return None
 
         # -------------------------------------------------- #
-        #  Identify cluster(s) to skip
+        #  Filter candidate clusters
         # -------------------------------------------------- #
         current_cid = self.view.get_selected_cluster_id() if skip_current else None
 
-        # Remove clusters that are fully labelled
-        def _has_unlabelled(annos):
+        def has_unlabelled(annos):
             return any(a.class_id == -1 for a in annos)
 
         candidate_items = {
             cid: annos
             for cid, annos in clusters.items()
-            if _has_unlabelled(annos) and cid != current_cid
+            if has_unlabelled(annos) and cid != current_cid
         }
         if not candidate_items:
-            logging.info("All remaining clusters are fully labelled or only current cluster left.")
+            logging.info("No candidate clusters left.")
             return None
 
         # -------------------------------------------------- #
-        #  Global label stats for rarity & coverage terms
+        #  Global stats for rarity & coverage
         # -------------------------------------------------- #
-        labeled_annos = [
+        labelled_annos = [
             a for annos in clusters.values()
             for a in annos if a.class_id not in (-1, -2, -3)
         ]
-        label_counts = Counter(a.class_id for a in labeled_annos) or {0: 1}
+        label_counts = Counter(a.class_id for a in labelled_annos) or {0: 1}
 
         kd = None
-        if labeled_annos:
-            feats_lab = np.vstack([a.logit_features for a in labeled_annos])
+        if labelled_annos:
+            feats_lab = np.vstack([a.logit_features for a in labelled_annos])
             kd = scipy.spatial.cKDTree(feats_lab)
 
         # -------------------------------------------------- #
@@ -394,17 +400,22 @@ class MainController(QObject):
             unlab = [a for a in annos if a.class_id == -1]
             lab = [a for a in annos if a.class_id not in (-1, -2, -3)]
 
-            # mean adjusted uncertainty of *unlabelled* members
+            # ---- uncertainty (unlabelled only) ----------------------------
             U = float(np.mean([a.adjusted_uncertainty for a in unlab])) if unlab else 0.0
 
-            # rarity of majority class in the cluster
+            # ---- rarity based on majority class (labels preferred) --------
             if lab:
-                maj_cls = Counter(a.class_id for a in lab).most_common(1)[0][0]
-            else:  # no labels yet in this cluster → use first unlabelled prediction
-                maj_cls = self.clustering_controller.get_class_id_from_prediction(unlab[0].model_prediction)
-            R = 1.0 / (label_counts.get(maj_cls, 0) + 1)
+                majority_class = Counter(a.class_id for a in lab).most_common(1)[0][0]
+            else:  # no human labels yet → vote from *all* model predictions
+                preds = [
+                    self.clustering_controller.get_class_id_from_prediction(a.model_prediction)
+                    for a in annos
+                ]
+                majority_class = Counter(preds).most_common(1)[0][0]
 
-            # distance to nearest labelled sample (coverage)
+            R = 1.0 / (label_counts.get(majority_class, 0) + 1)
+
+            # ---- coverage distance to nearest labelled sample ------------
             if kd is not None:
                 centre = np.mean([a.logit_features for a in annos], axis=0)
                 C = kd.query(centre)[0]
@@ -414,23 +425,23 @@ class MainController(QObject):
             per_cluster.append((cid, U, R, C))
 
         # -------------------------------------------------- #
-        #  z-score normalisation & selection
+        #  z-score normalisation and selection
         # -------------------------------------------------- #
-        mat = np.asarray([t[1:] for t in per_cluster], dtype=np.float32)  # shape (m,4)
+        mat = np.asarray([t[1:] for t in per_cluster], dtype=np.float32)  # (m,3)
         means = mat.mean(axis=0)
         stds = mat.std(axis=0)
-        stds[stds == 0] = 1.0  # avoid divide-by-zero
+        stds[stds == 0] = 1.0  # guard for zero variance
 
         best_cid, best_score = None, -np.inf
         for cid, U, R, C in per_cluster:
             z = ((U - means[0]) / stds[0] +
-                 (R - means[2]) / stds[2] +
-                 (C - means[3]) / stds[3])
+                 (R - means[1]) / stds[1] +
+                 (C - means[2]) / stds[2])
             if z > best_score:
                 best_score, best_cid = z, cid
 
         logging.info(
-            "Next recommended cluster (z-score rule, skipping %s): %s  [score %.3f]",
+            "Next recommended cluster (full-cluster rarity, skipping %s): %s  [score %.3f]",
             current_cid, best_cid, best_score,
         )
         return best_cid

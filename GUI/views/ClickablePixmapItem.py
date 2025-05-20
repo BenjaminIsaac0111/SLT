@@ -104,6 +104,17 @@ class ClickablePixmapItem(QGraphicsObject):
         painter.drawText(label_x, label_y, human_label_text)
         painter.restore()
 
+        border_color = Qt.black
+        if self.annotation.is_manual:
+            border_color = Qt.black
+        elif self.hovered:
+            border_color = Qt.blue
+
+        pen = QPen(border_color)
+        pen.setWidth(2 if (self.selected or self.hovered or self.annotation.is_manual) else 1)
+        painter.setPen(pen)
+        painter.drawRect(QRectF(0, 0, pixmap_width, pixmap_height))
+
         # Draw model prediction in the top-right corner above the image
         if self.model_prediction:
             # Determine model_prediction class_id by reverse lookup in CLASS_COMPONENTS
@@ -191,4 +202,3 @@ class ClickablePixmapItem(QGraphicsObject):
 
         self.menu.exec_(event.screenPos())
         self.scene().context_menu_open = False  # Unset the flag
-
