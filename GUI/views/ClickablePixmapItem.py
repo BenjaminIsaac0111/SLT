@@ -1,6 +1,7 @@
 from functools import partial
+from typing import Tuple
 
-from PyQt5.QtCore import pyqtSignal, QRectF, Qt
+from PyQt5.QtCore import QRectF, Qt, QPointF, pyqtSignal
 from PyQt5.QtGui import QPixmap, QFont, QFontMetrics, QPainter, QPen
 from PyQt5.QtWidgets import QGraphicsObject, QApplication, QMenu, QAction
 
@@ -13,192 +14,173 @@ class ClickablePixmapItem(QGraphicsObject):
     A QGraphicsObject that displays a QPixmap and emits signals when interacted with.
     It holds a reference to an Annotation instance.
     """
-    class_label_changed = pyqtSignal(dict, int)  # Emits (annotation_dict, class_id)
+    class_label_changed = pyqtSignal(dict, int)
 
-    def __init__(self, annotation: Annotation, pixmap: QPixmap, *args, **kwargs):
+    def __init__(self, annotation: Annotation, pixmap: QPixmap, coord_pos: Tuple[int, int], *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.annotation = annotation
         self.pixmap = pixmap
+        self.coord_pos = coord_pos
         self.class_id = annotation.class_id
-        self.model_prediction = annotation.model_prediction  # Use model_prediction from annotation
+        self.model_prediction = annotation.model_prediction
+
         self.setAcceptHoverEvents(True)
         self.hovered = False
         self.selected = False
-        self.scale_factor = 1.0  # Initialize scale factor
+        self.scale_factor = 1.0
 
-        # Calculate font size based on screen DPI
         screen = QApplication.primaryScreen()
-        logical_dpi = screen.logicalDotsPerInch()
-        standard_dpi = 96.0  # Standard Windows DPI
-        self.dpi_scaling = logical_dpi / standard_dpi
-        self.base_font_size = 12  # Base font size
-
-        # Set up font and metrics
-        font_size = int(self.base_font_size * self.dpi_scaling)
+        self.dpi_scaling = screen.logicalDotsPerInch() / 96.0
+        font_size = int(12 * self.dpi_scaling)
         self.font = QFont("Arial", font_size)
         self.font_metrics = QFontMetrics(self.font)
         self.label_height = self.font_metrics.height()
 
-        # Prefixes for labels
         self.human_prefix = "Human: "
         self.model_prefix = "Model: "
 
-    def setScaleFactor(self, scale):
-        """
-        Sets the scale factor for the image.
-        """
+    # ----- API -------------------------------------------------------
+    def setScaleFactor(self, scale: float):
         self.scale_factor = scale
-        self.update()  # Trigger a repaint
+        self.update()
 
     def set_crop_class(self, class_id: int):
         self.annotation.class_id = class_id
         self.class_id = class_id
         self.class_label_changed.emit(self.annotation.to_dict(), self.class_id)
-        self.update()  # Redraw the item to reflect the new label
+        self.update()
 
+    # ----- geometry --------------------------------------------------
     def boundingRect(self):
-        """
-        Adjusts the bounding rectangle to include the scaled image and the label above it.
-        """
-        pixmap_width = self.pixmap.width() * self.scale_factor
-        pixmap_height = self.pixmap.height() * self.scale_factor
-        # Adjust the bounding rect to include space for labels above the image
-        return QRectF(0, -self.label_height, pixmap_width, pixmap_height + self.label_height)
+        w = self.pixmap.width() * self.scale_factor
+        h = self.pixmap.height() * self.scale_factor
+        return QRectF(0, -self.label_height, w, h + self.label_height)
 
+    # ----- drawing ---------------------------------------------------
     def paint(self, painter: QPainter, option, widget):
+        """Draw pixmap, border, labels, and ✓/✗."""
+        scene = self.scene()
+        # 1) Draw the scaled image
         painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
-
-        # Draw the scaled pixmap
         painter.save()
         painter.scale(self.scale_factor, self.scale_factor)
         painter.drawPixmap(0, 0, self.pixmap)
         painter.restore()
 
-        # Draw border around the scaled image
-        pixmap_width = self.pixmap.width() * self.scale_factor
-        pixmap_height = self.pixmap.height() * self.scale_factor
-        pen = QPen(Qt.black if not self.hovered else Qt.blue)
-        pen.setWidth(2 if self.selected or self.hovered else 1)
+        # 2) Compute scaled dimensions
+        pw = self.pixmap.width() * self.scale_factor
+        ph = self.pixmap.height() * self.scale_factor
+
+        if scene and getattr(scene, "overlays_visible", True):
+            x0 = self.coord_pos[0] * self.scale_factor
+            y0 = self.coord_pos[1] * self.scale_factor
+            r = max(8.0, min(pw, ph) // 40)  # 5 % radius, ≥ 4 px
+
+            # green circle
+            painter.setPen(QPen(Qt.green, 2))
+            painter.drawEllipse(QPointF(x0, y0), r, r)
+
+            # hairlines with a gap = r
+            painter.setPen(QPen(Qt.black, 1))
+            painter.drawLine(x0, 0, x0, y0 - r)
+            painter.drawLine(x0, y0 + r, x0, ph)
+            painter.drawLine(0, y0, x0 - r, y0)
+            painter.drawLine(x0 + r, y0, pw, y0)
+
+        # 3) Draw border (blue if hovered, thicker if selected)
+        pen = QPen(Qt.blue if self.hovered else Qt.black)
+        pen.setWidth(2 if (self.selected or self.hovered) else 1)
         painter.setPen(pen)
-        painter.drawRect(QRectF(0, 0, pixmap_width, pixmap_height))
+        painter.drawRect(QRectF(0, 0, pw, ph))
 
-        # Determine the color for the human label based on class_id
+        # 4) Human label (top-left)
         if self.class_id == -1:
-            human_label_color = Qt.black  # Unlabeled
+            human_col = Qt.black
         elif self.class_id == -2:
-            human_label_color = Qt.darkYellow  # Unsure/Amber
+            human_col = Qt.darkYellow
         elif self.class_id == -3:
-            human_label_color = Qt.magenta  # Artifact
-        elif self.class_id is not None and self.class_id >= 0 and self.class_id in CLASS_COMPONENTS:
-            human_label_color = Qt.green  # Human-labeled (recognized class)
+            human_col = Qt.magenta
+        elif self.class_id in CLASS_COMPONENTS:
+            human_col = Qt.green
         else:
-            human_label_color = Qt.red  # Unknown/error
+            human_col = Qt.red
 
-        # Draw human label in the top-left corner above the image
         painter.save()
         painter.setFont(self.font)
-        painter.setPen(human_label_color)
-        human_label_text = self.human_prefix + self.get_human_label_text()
-        label_x = 0  # Left-aligned
-        label_y = -self.font_metrics.descent()  # Slight adjustment for baseline
-        painter.drawText(label_x, label_y, human_label_text)
+        painter.setPen(human_col)
+        painter.drawText(
+            0,
+            -self.font_metrics.descent(),
+            self.human_prefix + self.get_human_label_text()
+        )
         painter.restore()
 
-        border_color = Qt.black
-        if self.annotation.is_manual:
-            border_color = Qt.black
-        elif self.hovered:
-            border_color = Qt.blue
-
-        pen = QPen(border_color)
-        pen.setWidth(2 if (self.selected or self.hovered or self.annotation.is_manual) else 1)
-        painter.setPen(pen)
-        painter.drawRect(QRectF(0, 0, pixmap_width, pixmap_height))
-
-        # Draw model prediction in the top-right corner above the image
+        # 5) Model prediction + ✓/✗ glyph (top-right)
         if self.model_prediction:
-            # Determine model_prediction class_id by reverse lookup in CLASS_COMPONENTS
-            model_class_id = None
-            for cid, cname in CLASS_COMPONENTS.items():
-                if cname == self.model_prediction:
-                    model_class_id = cid
-                    break
+            model_cid = next(
+                (cid for cid, nm in CLASS_COMPONENTS.items() if nm == self.model_prediction),
+                None
+            )
+            agree = (model_cid == self.class_id)
+            glyph = "✓" if agree else "✗"
 
-            # If model_class_id matches human class_id, color is green, else red
             painter.save()
             painter.setFont(self.font)
-            if model_class_id is not None and model_class_id == self.class_id:
-                painter.setPen(Qt.green)  # Agree: green text
-            else:
-                painter.setPen(Qt.red)  # Disagree: red text
+            painter.setPen(Qt.green if agree else Qt.red)
 
-            prediction_text = self.model_prefix + self.model_prediction
-            text_width = self.font_metrics.width(prediction_text)
+            text = self.model_prefix + self.model_prediction
+            gw = self.font_metrics.width(glyph)
+            tw = self.font_metrics.width(text)
 
-            prediction_x = pixmap_width - text_width  # Right-aligned
-            prediction_y = -self.font_metrics.descent()  # Slight adjustment for baseline
-            painter.drawText(prediction_x, prediction_y, prediction_text)
+            x_text = pw - tw
+            x_glyph = x_text - gw - 4
+            y = -self.font_metrics.descent()
+
+            painter.drawText(x_glyph, y, glyph)
+            painter.drawText(x_text, y, text)
             painter.restore()
 
-    def get_human_label_text(self) -> str:
-        """
-        Returns the human label text to display based on class_id.
-        """
+    # ----- helpers / events ------------------------------------------
+    def get_human_label_text(self):
         if self.class_id == -2:
             return "Unsure"
-        elif self.class_id == -1 or None:
+        if self.class_id in (-1, None):
             return "Unlabelled"
-        elif self.class_id == -3:
+        if self.class_id == -3:
             return "Artefact"
-        elif self.class_id in CLASS_COMPONENTS:
-            # If it's a recognized class_id in CLASS_COMPONENTS
-            return CLASS_COMPONENTS[self.class_id]
-        else:
-            return "ERROR"
+        return CLASS_COMPONENTS.get(self.class_id, "ERROR")
 
-    def hoverEnterEvent(self, event):
-        self.hovered = True
-        self.update()
-        super().hoverEnterEvent(event)
+    def hoverEnterEvent(self, e):
+        self.hovered = True;
+        self.update();
+        super().hoverEnterEvent(e)
 
-    def hoverLeaveEvent(self, event):
-        self.hovered = False
-        self.update()
-        super().hoverLeaveEvent(event)
+    def hoverLeaveEvent(self, e):
+        self.hovered = False;
+        self.update();
+        super().hoverLeaveEvent(e)
 
-    def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            self.selected = not self.selected  # Toggle selection
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton:
+            self.selected = not self.selected
             self.update()
 
     def contextMenuEvent(self, event):
-        self.scene().context_menu_open = True  # Set the flag in the scene
-        self.menu = QMenu()
+        self.scene().context_menu_open = True
+        menu = QMenu()
+        for index, (cid, cname) in enumerate(CLASS_COMPONENTS.items()):
+            act = QAction(f"{index}. {cname}", menu)
+            act.triggered.connect(partial(self.set_crop_class, cid))
+            menu.addAction(act)
+        menu.addSeparator()
+        for cid, title in [(-2, "Unsure (?)"), (-1, "Unlabel (-)"), (-3, "Artifact (!)")]:
+            act = QAction(title, menu)
+            act.triggered.connect(partial(self.set_crop_class, cid))
+            menu.addAction(act)
+        menu.exec_(event.screenPos())
+        self.scene().context_menu_open = False
+        self.scene().views()[0].parentWidget().setFocus(Qt.OtherFocusReason)
 
-        # Add numbered class actions
-        for index, (class_id, class_name) in enumerate(CLASS_COMPONENTS.items(), start=0):
-            action_text = f"{index}. {class_name}"  # Include the list number
-            action = QAction(action_text, self.menu)
-            action.triggered.connect(partial(self.set_crop_class, class_id))
-            self.menu.addAction(action)
-
-        # Add a separator to distinguish the special actions
-        self.menu.addSeparator()
-
-        # Add "Unsure" option with class_id -2
-        unsure_action = QAction("Unsure (?)", self.menu)
-        unsure_action.triggered.connect(partial(self.set_crop_class, -2))
-        self.menu.addAction(unsure_action)
-
-        # Add "Unlabel" option with class_id -1
-        unlabel_action = QAction("Unlabel (-)", self.menu)
-        unlabel_action.triggered.connect(partial(self.set_crop_class, -1))
-        self.menu.addAction(unlabel_action)
-
-        # Add "Artifact" option with class_id -3
-        artifact_action = QAction("Artifact (!)", self.menu)
-        artifact_action.triggered.connect(partial(self.set_crop_class, -3))
-        self.menu.addAction(artifact_action)
-
-        self.menu.exec_(event.screenPos())
-        self.scene().context_menu_open = False  # Unset the flag
+    def _view(self):
+        views = self.scene().views() if self.scene() else []
+        return views[0] if views else None

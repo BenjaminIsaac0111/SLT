@@ -3,13 +3,13 @@ from functools import partial
 from typing import List, Dict, Optional
 
 import numpy as np
-from PyQt5.QtCore import pyqtSignal, Qt
+from PyQt5.QtCore import pyqtSignal, Qt, QTimer
 from PyQt5.QtGui import QPainter, QPixmap, QImage
 from PyQt5.QtWidgets import (
     QWidget, QComboBox, QPushButton, QVBoxLayout, QLabel,
     QProgressBar, QGraphicsView, QGraphicsScene, QGridLayout,
     QGroupBox, QSizePolicy, QSplitter, QGraphicsItem, QApplication,
-    QHBoxLayout, QScrollArea, QTableWidget, QTableWidgetItem, QHeaderView
+    QHBoxLayout, QScrollArea, QTableWidget, QTableWidgetItem, QHeaderView, QCheckBox, QSpinBox
 )
 
 from GUI.configuration.configuration import CLASS_COMPONENTS
@@ -118,14 +118,34 @@ class NavigationControlsWidget(QGroupBox):
     def _init_ui(self):
         layout = QVBoxLayout()
 
+        # ---------------- cluster chooser ----------------
         self.cluster_combo = QComboBox()
         self.cluster_combo.currentIndexChanged.connect(self.on_cluster_selected)
         layout.addWidget(self.cluster_combo)
 
+        # ---------------- next-recommended ----------------
         self.next_recommended_button = QPushButton("Go to next recommended (⏎)")
         self.next_recommended_button.clicked.connect(self.on_next_recommended)
         self.next_recommended_button.setFocusPolicy(Qt.NoFocus)
         layout.addWidget(self.next_recommended_button)
+
+        # ---------------- workflow prefs -----------------
+        self.auto_advance_checkbox = QCheckBox("Auto-advance after Agree")
+        self.auto_advance_checkbox.setChecked(True)
+        layout.addWidget(self.auto_advance_checkbox)
+
+        delay_row = QHBoxLayout()
+        delay_row.addWidget(QLabel("Delay (ms):"))
+        self.delay_spinbox = QSpinBox()
+        self.delay_spinbox.setRange(0, 3000)
+        self.delay_spinbox.setValue(1000)
+        delay_row.addWidget(self.delay_spinbox)
+        layout.addLayout(delay_row)
+
+        self.cluster_combo.setFocusPolicy(Qt.NoFocus)
+        self.next_recommended_button.setFocusPolicy(Qt.NoFocus)
+        self.auto_advance_checkbox.setFocusPolicy(Qt.NoFocus)
+        self.delay_spinbox.setFocusPolicy(Qt.NoFocus)
 
         self.setLayout(layout)
 
@@ -466,22 +486,21 @@ class ClusteredCropsView(QWidget):
         self._nav_history: List[int] = []
 
         self._init_ui()
-        self.setFocus(Qt.OtherFocusReason)
+        self.setFocusPolicy(Qt.StrongFocus)
         self.setFocus()
 
     def _init_ui(self):
         # Main layout uses a splitter: left for graphics view, right for controls.
         self.splitter = QSplitter(Qt.Horizontal)
 
-        # Left Panel: Control Panel (wrapped in a scroll area)
-        left_panel = self._create_left_panel()
-        left_panel.setMinimumWidth(300)
+        right_panel = self._create_control_panel()
+        right_panel.setMinimumWidth(300)
 
-        # Right Panel: Graphics View
+        # Left Panel: Graphics View
         self._create_graphics_view()
 
         self.splitter.addWidget(self.graphics_view)
-        self.splitter.addWidget(left_panel)
+        self.splitter.addWidget(right_panel)
         self.splitter.splitterMoved.connect(self.on_splitter_moved)
 
         main_layout = QVBoxLayout(self)
@@ -490,7 +509,7 @@ class ClusteredCropsView(QWidget):
         self.setWindowTitle("Clustered Crops Viewer")
         self.resize(1200, 800)
 
-    def _create_left_panel(self) -> QScrollArea:
+    def _create_control_panel(self) -> QScrollArea:
         control_panel = QWidget()
         control_panel_layout = QVBoxLayout(control_panel)
 
@@ -525,6 +544,7 @@ class ClusteredCropsView(QWidget):
     def _create_graphics_view(self):
         self.graphics_view = CropGraphicsView(main_view=self)
         self.scene = QGraphicsScene(self)
+        self.overlays_visible = True
         self.graphics_view.setScene(self.scene)
 
         self.crop_loading_progress_bar = QProgressBar(self.graphics_view.viewport())
@@ -541,34 +561,47 @@ class ClusteredCropsView(QWidget):
     def keyPressEvent(self, event):
         key = event.key()
         mods = event.modifiers()
+
         if Qt.Key_0 <= key <= Qt.Key_8:
             class_id = key - Qt.Key_0
             if class_id in CLASS_COMPONENTS:
                 self.on_class_button_clicked(class_id)
                 return
+
         if key in (Qt.Key_Minus, Qt.Key_Underscore):
             self.on_class_button_clicked(-1)
             return
+
         if event.text() == '?':
             self.on_class_button_clicked(-2)
             return
+
         if event.text() == '!':
             self.on_class_button_clicked(-3)
             return
+
         # Force-agree  (Ctrl + Space)
         if key == Qt.Key_Space and (mods & Qt.ControlModifier):
             self.on_agree_with_model_clicked(force=True)
             return
+
         # Normal agree – *skip* locked crops
         if key == Qt.Key_Space:
             self.on_agree_with_model_clicked(force=False)
             return
-            return
+
         if key in (Qt.Key_Return, Qt.Key_Enter):
             self.navigation_widget.on_next_recommended()
             return
+
         if key == Qt.Key_Backspace:
             self.backtrack_requested.emit()
+            return
+
+        if event.key() == Qt.Key_H:
+            self.scene.overlays_visible = not getattr(self.scene,
+                                                      "overlays_visible", True)
+            self.scene.invalidate()
             return
         super().keyPressEvent(event)
 
@@ -688,7 +721,7 @@ class ClusteredCropsView(QWidget):
                 logging.warning(f"Invalid QPixmap for image index {annotation.image_index}. Skipping.")
                 continue
 
-            pixmap_item = ClickablePixmapItem(annotation=annotation, pixmap=pixmap)
+            pixmap_item = ClickablePixmapItem(annotation=annotation, pixmap=pixmap, coord_pos=crop_data['coord_pos'])
             pixmap_item.setFlag(QGraphicsItem.ItemIsSelectable, True)
             pixmap_item.class_label_changed.connect(self.crop_label_changed.emit)
 
@@ -751,29 +784,25 @@ class ClusteredCropsView(QWidget):
         self.arrange_crops()
 
     def on_agree_with_model_clicked(self, *, force: bool = False):
-        changes_made = False
-        for crop_data in self.selected_crops:
-            ann = crop_data['annotation']
-
-            # Skip manual labels unless force==True
+        changes = False
+        for crop in self.selected_crops:
+            ann = crop["annotation"]
             if ann.is_manual and not force:
                 continue
+            cid = self.get_class_id_from_model_prediction(ann.model_prediction)
+            if cid is not None and cid != ann.class_id:
+                ann.class_id = cid
+                ann.is_manual = False
+                self.crop_label_changed.emit(ann.to_dict(), cid)
+                changes = True
 
-            if ann.model_prediction is None:
-                continue
-
-            model_cid = self.get_class_id_from_model_prediction(ann.model_prediction)
-            if model_cid is None:
-                continue
-
-            if ann.class_id != model_cid:
-                ann.class_id = model_cid
-                ann.is_manual = False  # becomes “model” again
-                changes_made = True
-                self.crop_label_changed.emit(ann.to_dict(), model_cid)
-
-        if changes_made:
+        if changes:
             self.arrange_crops()
+
+        nav = self.navigation_widget
+        if nav.auto_advance_checkbox.isChecked():
+            QTimer.singleShot(nav.delay_spinbox.value(),
+                              nav.on_next_recommended)
 
     @staticmethod
     def get_class_id_from_model_prediction(model_prediction: str) -> Optional[int]:

@@ -35,6 +35,7 @@ class MainController(QObject):
     Main orchestrator of the application, backend-agnostic data model
     """
     AUTOSAVE_IDLE_MS = 10_000
+    _UNASSESSED_LABELS = {-1}
 
     def __init__(
             self,
@@ -46,6 +47,7 @@ class MainController(QObject):
         self.image_data_model: Optional[BaseImageDataModel] = model
         self.view = view
         self._nav_history: list[int] = []
+        self._current_cluster_id = None
         self.annotation_generator = LocalMaximaPointAnnotationGenerator()
         self._use_greedy_nav: bool = True  # updated in on_label_generator_method_changed
         self._seq_cursor: Optional[int] = None  # stores the “current” cluster id for sequential mode
@@ -170,19 +172,45 @@ class MainController(QObject):
         self.view.hide_clustering_progress_bar()
 
     @pyqtSlot(int)
-    def on_select_cluster(self, cluster_id: int):
+    def on_select_cluster(self, cluster_id: int, force: bool = False):
         """
         Handles the request to sample a cluster and display its crops.
 
         :param cluster_id: The ID of the cluster to sample.
+
+        Args:
+            force:
         """
+        if (
+                not force
+                and getattr(self, "_current_cluster_id", None) is not None
+                and cluster_id != self._current_cluster_id
+                and not self._visible_crops_complete()
+        ):
+            cmb = self.view.navigation_widget.cluster_combo
+            cmb.blockSignals(True)
+            idx = cmb.findData(self._current_cluster_id)
+
+            if idx != -1:
+                cmb.setCurrentIndex(idx)
+                cmb.blockSignals(False)
+                QMessageBox.information(
+                    self.view,
+                    "Finish labelling first",
+                    ("Please label all crops currently in view\n"
+                     "before moving to another cluster.")
+                )
+                return
+
         clusters = self.clustering_controller.get_clusters()
-        annotations = clusters.get(cluster_id, [])
-        if not annotations:
+        annos = clusters.get(cluster_id, [])
+        if not annos:
             logging.warning(f"No annotations found in cluster {cluster_id}.")
             self.view.display_sampled_crops([])
             return
-        self.image_processing_controller.display_crops(annotations, cluster_id)
+        self.image_processing_controller.display_crops(annos, cluster_id)
+        self._current_cluster_id = cluster_id
+        self._update_navigation_lock()
 
     def handle_sampling_parameters_changed(self):
         """
@@ -223,7 +251,9 @@ class MainController(QObject):
         cluster_info = self.clustering_controller.generate_cluster_info()
         self.view.populate_cluster_selection(cluster_info, selected_cluster_id=selected_cluster_id)
 
-        self.autosave_project_state()
+        self._dirty = True
+        self._idle_timer.start(self.AUTOSAVE_IDLE_MS)
+        self._update_navigation_lock()
 
     @pyqtSlot(dict, int)
     def on_crop_label_changed(self, crop_data: dict, class_id: int):
@@ -268,9 +298,18 @@ class MainController(QObject):
 
         self._dirty = True
         self._idle_timer.start(self.AUTOSAVE_IDLE_MS)
+        self._update_navigation_lock()
 
     @pyqtSlot()
     def on_next_recommended_cluster(self):
+        if not self._visible_crops_complete():
+            QMessageBox.information(
+                self.view,
+                "Finish labelling first",
+                ("Please label all crops currently in view\n"
+                 + "before moving to another cluster.")
+            )
+            return
         current = self.view.get_selected_cluster_id()
         if current is not None:
             self._nav_history.append(current)
@@ -297,7 +336,7 @@ class MainController(QObject):
         last = self._nav_history.pop()
         cluster_info = self.clustering_controller.generate_cluster_info()
         self.view.populate_cluster_selection(cluster_info, selected_cluster_id=last)
-        self.on_select_cluster(last)
+        self.on_select_cluster(last, force=True)
 
     def _get_all_annotations(self) -> List[Annotation]:
         """
@@ -470,6 +509,28 @@ class MainController(QObject):
 
         return self._seq_cursor
 
+    # ---------- soft-lock helpers ------------------------------------
+
+    def _visible_crops_complete(self) -> bool:
+        """
+        Return True if *every* crop currently displayed in the view
+        has a label outside _UNASSESSED_LABELS.
+        """
+        for crop in self.view.selected_crops:  # ← populated by ClusteredCropsView
+            if crop["annotation"].class_id in self._UNASSESSED_LABELS:
+                return False
+        return True
+
+    def _update_navigation_lock(self) -> None:
+        """
+        Enable / disable cluster navigation widgets according to the
+        completion status of the visible crops.
+        """
+        locked = not self._visible_crops_complete()
+        nav = self.view.navigation_widget
+        nav.next_recommended_button.setEnabled(not locked)
+        nav.cluster_combo.setEnabled(not locked)
+
     # -------------------------------------------------------------------------
     #                           PROJECT STATE
     # -------------------------------------------------------------------------
@@ -629,7 +690,7 @@ class MainController(QObject):
         self.view.populate_cluster_selection(cluster_info, selected_cluster_id=selected_cluster_id)
 
         if selected_cluster_id and selected_cluster_id in clusters_data:
-            self.on_select_cluster(selected_cluster_id)
+            self.on_select_cluster(selected_cluster_id, force=True)
         else:
             first_cluster_id = next(iter(clusters_data), None)
             if first_cluster_id is not None:

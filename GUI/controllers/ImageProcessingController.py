@@ -228,9 +228,9 @@ class ImageProcessingController(QObject):
                 continue
 
             q_pixmap = self._numpy_to_qpixmap(np_image)
-            q_pixmap = QPixmap.fromImage(
-                self.annotator.draw_annotation(q_pixmap.toImage(), coord_pos)
-            )
+            # q_pixmap = QPixmap.fromImage(
+            #     self.annotator.draw_annotation(q_pixmap.toImage(), coord_pos)
+            # )
 
             sampled_crops.append({
                 'annotation': anno,

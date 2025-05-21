@@ -104,7 +104,7 @@ class AnnotationClusteringWorker(QRunnable):
             annotations: List[Annotation],
             subsample_ratio: float = 1.0,
             cluster_method: str = "minibatchkmeans",
-            cluster_size: int = 8,
+            cluster_size: int = 6,
             *,
             include_uncertainty_in_feature_vector: bool = False,
             random_state: Optional[int] = 42,
