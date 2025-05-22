@@ -2,99 +2,13 @@ import logging
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
-from PyQt5.QtCore import QObject, pyqtSignal, QThreadPool, pyqtSlot, QPoint
-from PyQt5.QtGui import QPixmap, QPainter, QPen, QColor, QImage
+from PyQt5.QtCore import QObject, pyqtSignal, QThreadPool, pyqtSlot
+from PyQt5.QtGui import QPixmap, QImage
 
 from GUI.models.Annotation import Annotation
 from GUI.models.ImageDataModel import BaseImageDataModel
 from GUI.models.ImageProcessor import ImageProcessor
 from GUI.workers.ImageProcessingWorker import ImageProcessingWorker
-
-
-class ImageAnnotator:
-    """
-    Handles drawing annotations (circle and crosshair) on images.
-    """
-
-    def __init__(self,
-                 circle_color: QColor = QColor(0, 255, 0),
-                 circle_width: int = 5,
-                 crosshair_color: QColor = QColor(0, 0, 0),
-                 crosshair_width: int = 2):
-        """
-        :param circle_color: The color to use for the annotation circle.
-        :param circle_width: The line width of the annotation circle.
-        :param crosshair_color: The color to use for the crosshair lines.
-        :param crosshair_width: The line width of the crosshair lines.
-        """
-        self.circle_color = circle_color
-        self.circle_width = circle_width
-        self.crosshair_color = crosshair_color
-        self.crosshair_width = crosshair_width
-
-    def draw_annotation(self, image: QImage, coord_pos: Tuple[int, int]) -> QImage:
-        """
-        Draws a circle and crosshair on the provided QImage at coord_pos.
-        """
-        annotated_image = image.copy()
-        painter = QPainter(annotated_image)
-        painter.setRenderHint(QPainter.Antialiasing)
-
-        pos_x_zoomed, pos_y_zoomed = coord_pos
-
-        # Clamp position within image bounds
-        pos_x_zoomed = min(max(pos_x_zoomed, 0), annotated_image.width() - 1)
-        pos_y_zoomed = min(max(pos_y_zoomed, 0), annotated_image.height() - 1)
-
-        center = QPoint(int(pos_x_zoomed), int(pos_y_zoomed))
-
-        # Define a radius for the circle
-        radius = max(8, min(annotated_image.width(), annotated_image.height()) // 40)
-
-        self._draw_circle(painter, center, radius)
-        self._draw_crosshair_with_gap(
-            painter,
-            center,
-            radius + self.circle_width // 2,
-            (annotated_image.width(), annotated_image.height())
-        )
-
-        painter.end()
-        return annotated_image
-
-    def _draw_circle(self, painter: QPainter, center, radius: int):
-        """
-        Draws an unfilled circle at the specified center with the given radius.
-        """
-        pen = QPen(self.circle_color)
-        pen.setWidth(self.circle_width)
-        painter.setPen(pen)
-        painter.drawEllipse(center, radius, radius)
-
-    def _draw_crosshair_with_gap(self,
-                                 painter: QPainter,
-                                 center,
-                                 gap_radius: int,
-                                 image_size: Tuple[int, int]):
-        """
-        Draws a crosshair with a gap around the circle.
-        """
-        width_img, height_img = image_size
-
-        pen = QPen(self.crosshair_color)
-        pen.setWidth(self.crosshair_width)
-        painter.setPen(pen)
-
-        cx = center.x()
-        cy = center.y()
-
-        # Vertical lines
-        painter.drawLine(cx, 0, cx, cy - gap_radius)
-        painter.drawLine(cx, cy + gap_radius, cx, height_img)
-
-        # Horizontal lines
-        painter.drawLine(0, cy, cx - gap_radius, cy)
-        painter.drawLine(cx + gap_radius, cy, width_img, cy)
 
 
 class ImageProcessingController(QObject):
@@ -116,13 +30,11 @@ class ImageProcessingController(QObject):
         super().__init__()
         self.model = model
         self.image_processor = ImageProcessor()
-        self.annotator = ImageAnnotator()
 
         # Use the global thread pool instead of manual QThreads
         self.threadpool = QThreadPool.globalInstance()
 
         self.loading_images = False
-        self.crops_per_cluster = 10
 
         self.clusters: Dict[int, List[Annotation]] = {}
         self.cluster_ids: List[int] = []
@@ -137,18 +49,10 @@ class ImageProcessingController(QObject):
         self.clusters = clusters
         self.cluster_ids = list(clusters.keys())
 
-    def set_crops_per_cluster(self, num_crops: int, current_cluster_id: Optional[int] = None):
-        """
-        Updates the crops-per-cluster and refreshes the current cluster view.
-        """
-        self.crops_per_cluster = num_crops
-        logging.info(f"Crops per cluster set to {num_crops}.")
-        self.refresh_current_cluster(current_cluster_id)
-
     # -------------------------------------------------------------------------
     #                         DISPLAY & PROCESS CROPS
     # -------------------------------------------------------------------------
-    def display_crops(self, annotations: List[Annotation], cluster_id: int):
+    def display_crops(self, annotations: List[Annotation]):
         """
         Displays crops for the top 'n' annotations from a single cluster.
         """
@@ -158,8 +62,7 @@ class ImageProcessingController(QObject):
         self.loading_images = True
         self.crop_loading_started.emit()
 
-        sorted_annotations = self._sort_annotations_by_uncertainty(annotations)
-        selected = sorted_annotations[:min(self.crops_per_cluster, len(sorted_annotations))]
+        selected = self._sort_annotations_by_uncertainty(annotations)
 
         processed_annos, uncached_annos = self._split_cached_and_uncached(selected)
 
@@ -174,7 +77,7 @@ class ImageProcessingController(QObject):
         Reloads crops for the specified cluster, if valid.
         """
         if current_cluster_id is not None and current_cluster_id in self.clusters:
-            self.display_crops(self.clusters[current_cluster_id], current_cluster_id)
+            self.display_crops(self.clusters[current_cluster_id])
         else:
             logging.warning(f"Invalid cluster ID for refresh: {current_cluster_id}")
 
@@ -228,9 +131,6 @@ class ImageProcessingController(QObject):
                 continue
 
             q_pixmap = self._numpy_to_qpixmap(np_image)
-            # q_pixmap = QPixmap.fromImage(
-            #     self.annotator.draw_annotation(q_pixmap.toImage(), coord_pos)
-            # )
 
             sampled_crops.append({
                 'annotation': anno,

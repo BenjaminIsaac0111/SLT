@@ -50,7 +50,7 @@ class Annotation:
                 if isinstance(self.adjusted_uncertainty, np.ndarray)
                 else float(self.adjusted_uncertainty)
             ),
-            "is_manual": bool(self.is_manual),  # NEW FIELD
+            "is_manual": bool(self.is_manual),
             "class_id": int(self.class_id) if self.class_id is not None else -1,
             "cluster_id": (
                 int(self.cluster_id) if self.cluster_id is not None else None

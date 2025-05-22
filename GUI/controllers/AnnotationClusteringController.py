@@ -1,355 +1,282 @@
 #!/usr/bin/env python3
+"""
+Annotation-Clustering Controller
+================================
+A single self-contained module that
+
+1.  extracts point annotations from every image (cancellable QThread);
+2.  clusters those points (cancellable QRunnable on the global QThreadPool);
+3.  keeps ``self.clusters`` up-to-date and emits basic statistics.
+
+All UI feedback is provided through the *signals* declared at the top.
+"""
+
+from __future__ import annotations
+
 import logging
 from collections import OrderedDict
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional
 
 import numpy as np
-from PyQt5.QtCore import QObject, pyqtSignal, QThread, pyqtSlot, QThreadPool
+from PyQt5.QtCore import (
+    QObject, QThread, QThreadPool, pyqtSignal, pyqtSlot
+)
 from sklearn.utils.class_weight import compute_class_weight
 
 from GUI.configuration.configuration import CLASS_COMPONENTS
 from GUI.models.Annotation import Annotation
-# Use unified interface
 from GUI.models.ImageDataModel import BaseImageDataModel
 from GUI.models.PointAnnotationGenerator import CenterPointAnnotationGenerator
 from GUI.workers.AnnotationClusteringWorker import AnnotationClusteringWorker
 
 
+# ──────────────────────────────── 1 · extraction worker ──────────────────
 class AnnotationExtractionWorker(QThread):
-    """
-    Extracts annotations from all images in the model, emitting progress signals.
-    """
-    progress = pyqtSignal(int)
-    finished = pyqtSignal(list)
+    """Per-image sampling; terminates early when `cancel()` is called."""
 
-    def __init__(self, model: BaseImageDataModel, annotation_generator: Any, parent=None):
+    progress = pyqtSignal(int)  # 0–100
+    finished = pyqtSignal(list)  # list[Annotation]
+    cancelled = pyqtSignal()  # early abort
+
+    def __init__(self, model: BaseImageDataModel, generator, parent=None):
         super().__init__(parent)
-        self.model: BaseImageDataModel = model
-        self.annotation_generator = annotation_generator
+        self._model = model
+        self._generator = generator
+        self._abort = False
 
+    # public ----------------------------------------------------
+    def cancel(self):
+        self._abort = True
+
+    # worker entry ----------------------------------------------
     def run(self):
-        annotations: List[Annotation] = []
-        total_images = self.model.get_number_of_images()
-        for idx in range(total_images):
-            image_data = self.model.get_image_data(idx)
-            annos = self.extract_annotations_from_image(image_data, idx)
-            annotations.extend(annos)
+        annos: list[Annotation] = []
+        n_images = self._model.get_number_of_images()
+        for idx in range(n_images):
+            if self._abort:
+                self.cancelled.emit()
+                return
 
-            # Emit progress
-            progress_pct = int((idx + 1) / total_images * 100)
-            self.progress.emit(progress_pct)
+            img = self._model.get_image_data(idx)
+            annos.extend(self._extract_from_image(img, idx))
+            self.progress.emit(int((idx + 1) / n_images * 100))
 
-        self.finished.emit(annotations)
+        self.finished.emit(annos)
 
-    def extract_annotations_from_image(self, image_data: Dict[str, Any], image_index: int) -> List[Annotation]:
-        """
-        Extracts annotations from a single image.
-        """
-        annotations: List[Annotation] = []
-        uncertainty_map = image_data.get('uncertainty')
-        logits = image_data.get('logits')
-        filename = image_data.get('filename')
+    # helpers ---------------------------------------------------
+    def _extract_from_image(self, img: dict, idx: int) -> list[Annotation]:
+        out: list[Annotation] = []
+        umap, logits, fname = img.get("uncertainty"), img.get("logits"), img.get("filename")
+        if umap is None or logits is None or fname is None:
+            return out
 
-        if uncertainty_map is None or logits is None or filename is None:
-            return annotations
-
-        logit_features, coords = self.annotation_generator.generate_annotations(
-            uncertainty_map=uncertainty_map,
-            logits=logits
-        )
-
-        for coord, logit_feature in zip(coords, logit_features):
-            if not logit_feature.any():
-                logging.debug("Zero-logits at %s in %s (unc %.4f)",
-                              coord, filename, uncertainty_map[tuple(coord)])
+        feats, coords = self._generator.generate_annotations(uncertainty_map=umap, logits=logits)
+        for c, f in zip(coords, feats):
+            if not f.any():
                 continue
-            anno = Annotation(
-                filename=filename,
-                coord=coord,
-                logit_features=logit_feature,
-                class_id=-1,
-                image_index=image_index,
-                uncertainty=uncertainty_map[tuple(coord)],
-                cluster_id=None,
-                model_prediction=CLASS_COMPONENTS.get(np.argmax(logit_feature), "None")
+            out.append(
+                Annotation(
+                    filename=fname,
+                    coord=c,
+                    logit_features=f,
+                    class_id=-1,
+                    image_index=idx,
+                    uncertainty=float(umap[tuple(c)]),
+                    cluster_id=None,
+                    model_prediction=CLASS_COMPONENTS.get(int(np.argmax(f)), "None"),
+                )
             )
-            annotations.append(anno)
-
-        return annotations
+        return out
 
 
+# ──────────────────────────────── 2 · controller ─────────────────────────
 class AnnotationClusteringController(QObject):
     """
-    ClusteringController handles:
-      1) Annotation extraction
-      2) Clustering
-      3) Labeling statistics
+    Drives extraction → clustering → statistics and supports cancellation.
     """
 
+    # progress / life-cycle
     clustering_started = pyqtSignal()
-    clustering_progress = pyqtSignal(int)
-    clusters_ready = pyqtSignal(dict)
-    labeling_statistics_updated = pyqtSignal(dict)
     annotation_progress = pyqtSignal(int)
     annotation_progress_finished = pyqtSignal()
-    show_clustering_progress_bar = pyqtSignal()
-    hide_clustering_progress_bar = pyqtSignal()
+    clustering_progress = pyqtSignal(int)  # -1 ⇒ “busy” bar
+    clusters_ready = pyqtSignal(dict)  # {cid: [Annotation]}
+    cancelled = pyqtSignal()
 
-    def __init__(self, model: BaseImageDataModel, annotation_generator: Any):
+    # analytics
+    labeling_statistics_updated = pyqtSignal(dict)
+
+    # init -------------------------------------------------------
+    def __init__(self, model: BaseImageDataModel, annotation_generator):
         super().__init__()
-        self.model: BaseImageDataModel = model
+        self.model = model
         self.annotation_generator = annotation_generator
 
         self.clusters: Dict[int, List[Annotation]] = {}
         self.cluster_labels: Dict[int, str] = {}
 
-        self.clustering_in_progress = False
-        self.annotation_extraction_worker: Optional[AnnotationExtractionWorker] = None
-        self.threadpool = QThreadPool.globalInstance()
+        self._extract_worker: Optional[AnnotationExtractionWorker] = None
+        self._cluster_worker: Optional[AnnotationClusteringWorker] = None
 
+        self._abort = False
+        self._in_progress = False
+        self._pool = QThreadPool.globalInstance()
+
+    # ---------------------------------------------------------------- API
     @pyqtSlot()
     def start_clustering(self):
-        if self.clustering_in_progress:
+        """Kick off a new job if none is currently running."""
+        if self._in_progress:
             logging.warning("Clustering already running.")
             return
-        logging.info("Clustering initiated.")
-        self.clustering_in_progress = True
-        self.clustering_started.emit()
-        self._init_annotation_extraction()
 
+        logging.info("Clustering job started.")
+        self._abort = False
+        self._in_progress = True
+        self.clustering_started.emit()
+
+        self._extract_worker = AnnotationExtractionWorker(self.model, self.annotation_generator)
+        self._extract_worker.progress.connect(self.annotation_progress)
+        self._extract_worker.finished.connect(self._on_annotations_extracted)
+        self._extract_worker.cancelled.connect(self._on_cancelled)
+
+        self.annotation_progress.emit(0)
+        self._extract_worker.start()
+
+    @pyqtSlot()
+    def cancel_clustering(self):
+        """User abort from the GUI."""
+        if not self._in_progress:
+            return
+        self._abort = True
+        if self._extract_worker and self._extract_worker.isRunning():
+            self._extract_worker.cancel()
+        if self._cluster_worker:
+            self._cluster_worker.cancel()
+
+    # ─────────────────── extraction callbacks ───────────────────
     @pyqtSlot(list)
-    def on_annotation_extraction_finished(self, all_annotations: List[Annotation]):
+    def _on_annotations_extracted(self, annos: List[Annotation]):
         self.annotation_progress.emit(100)
         self.annotation_progress_finished.emit()
 
-        # ---------------------------------------------------- #
-        # Bypass clustering for centre-only sampling          #
-        # ---------------------------------------------------- #
-
-        if isinstance(self.annotation_generator, CenterPointAnnotationGenerator):
-            logging.info("Image-centre mode: skipping logit clustering.")
-            clusters = {i: [anno] for i, anno in enumerate(all_annotations)}
-            self.clusters = clusters
-            self.clusters_ready.emit(clusters)
-            self.hide_clustering_progress_bar.emit()
-            self.clustering_in_progress = False
-            self.compute_labeling_statistics()
+        if self._abort:
+            self._on_cancelled();
             return
 
-        self.show_clustering_progress_bar.emit()
+        # centre-only generator → bypass clustering
+        if isinstance(self.annotation_generator, CenterPointAnnotationGenerator):
+            self.clusters = {i: [a] for i, a in enumerate(annos)}
+            self._finish_success();
+            return
+
+        # kick off clustering worker
         self.clustering_progress.emit(-1)
-
-        self._start_clustering_with_annotations(all_annotations)
-
-    def _start_clustering_with_annotations(self, all_annotations: List[Annotation]):
-        worker = AnnotationClusteringWorker(
-            annotations=all_annotations,
+        self._cluster_worker = AnnotationClusteringWorker(
+            annotations=annos,
             subsample_ratio=1.0,
-            cluster_method="minibatchkmeans"
+            cluster_method="minibatchkmeans",
         )
-        worker.signals.clustering_finished.connect(self.on_clustering_finished)
-        worker.signals.progress_updated.connect(self.clustering_progress.emit)
-        self.threadpool.start(worker)
+        self._cluster_worker.signals.progress_updated.connect(self.clustering_progress.emit)
+        self._cluster_worker.signals.clustering_finished.connect(self._on_clustering_finished)
+        self._cluster_worker.signals.cancelled.connect(self._on_cancelled)
+        self._pool.start(self._cluster_worker)
 
+    # ─────────────────── clustering callbacks ───────────────────
     @pyqtSlot(dict)
-    def on_clustering_finished(self, clusters: Dict[int, List[Annotation]]):
-        self.clustering_in_progress = False
+    def _on_clustering_finished(self, clusters: Dict[int, List[Annotation]]):
+        if self._abort:
+            self._on_cancelled();
+            return
         self.clusters = clusters
-        self.clusters_ready.emit(clusters)
-        self.hide_clustering_progress_bar.emit()
-        self.compute_labeling_statistics()
+        self._finish_success()
 
-    def collect_all_annotations(self) -> List[Annotation]:
-        """
-        (Optional) Collects annotations synchronously without threading.
-        """
-        total_images = self.model.get_number_of_images()
-        annotations = []
-        for idx in range(total_images):
-            try:
-                image_data = self.model.get_image_data(idx)
-                annotations.extend(self._extract_annotations_from_image(image_data, idx))
-            except Exception as e:
-                logging.error(f"Error collecting annotations from image {idx}: {e}")
-                continue
+    # ───────────────── unified paths ─────────────────────────────
+    def _finish_success(self):
+        self._in_progress = False
+        self.clusters_ready.emit(self.clusters)
+        self._emit_label_stats()
 
-            progress = int((idx + 1) / total_images * 100)
-            self.annotation_progress.emit(progress)
+    @pyqtSlot()
+    def _on_cancelled(self):
+        if not self._in_progress:
+            return
+        logging.info("Clustering job cancelled.")
+        self._in_progress = False
+        self.cancelled.emit()
 
-        logging.info(f"Total annotations collected: {len(annotations)}")
-        return annotations
+    # ───────────────────────── statistics ───────────────────────
+    def _emit_label_stats(self):
+        self.labeling_statistics_updated.emit(self.compute_labeling_statistics())
 
-    def compute_labeling_statistics(self):
-        """
-        Computes and emits updated labeling statistics (counts, disagreements, etc.),
-        and computes class weights using sklearn's compute_class_weight, ignoring
-        special classes (-1, -2, -3).
-        """
-        clusters = self.get_clusters()
-        total_annotations = 0
-        total_labeled = 0
+    def compute_labeling_statistics(self) -> dict:
+        total = sum(len(v) for v in self.clusters.values())
+        class_counts = {cid: 0 for cid in CLASS_COMPONENTS}
+        class_counts.update({-1: 0, -2: 0, -3: 0})
 
-        # Initialize class counts, including special IDs
-        class_counts = {cid: 0 for cid in CLASS_COMPONENTS.keys()}
-        class_counts[-1] = 0  # Unlabeled
-        class_counts[-2] = 0  # Unsure
-        class_counts[-3] = 0  # Artifact
+        labeled, disagreements = 0, 0
+        y_all: list[int] = []
 
-        disagreement_count = 0
-        all_labels = []  # For computing class weights
+        for annos in self.clusters.values():
+            for a in annos:
+                cid = a.class_id if a.class_id is not None else -1
+                class_counts[cid] = class_counts.get(cid, 0) + 1
+                y_all.append(cid)
 
-        for cluster_id, annotations in clusters.items():
-            for anno in annotations:
-                total_annotations += 1
-                # Use -1 if class_id is None
-                assigned_class = anno.class_id if anno.class_id is not None else -1
-                all_labels.append(assigned_class)
+                if cid not in (-1, -2, -3):
+                    labeled += 1
+                    pred = self.get_class_id_from_prediction(a.model_prediction)
+                    if pred is not None and pred != cid:
+                        disagreements += 1
 
-                if assigned_class not in class_counts:
-                    class_counts[assigned_class] = 0
-                class_counts[assigned_class] += 1
+        agree_pct = 0.0 if labeled == 0 else (labeled - disagreements) / labeled * 100
+        weights = {}
+        filtered = [c for c in y_all if c not in (-1, -2, -3)]
+        if filtered:
+            cls = np.unique(filtered)
+            weights = dict(zip(cls, compute_class_weight("balanced", classes=cls, y=filtered)))
 
-                # Count labeled (excluding special IDs)
-                if assigned_class not in (-1, -2, -3):
-                    total_labeled += 1
-
-                # Count disagreements if labeled
-                if anno.model_prediction:
-                    model_class_id = self.get_class_id_from_prediction(anno.model_prediction)
-                    if model_class_id is not None and assigned_class not in (-1, -2, -3):
-                        if assigned_class != model_class_id:
-                            disagreement_count += 1
-
-        agreement_percentage = 0.0
-        if total_labeled > 0:
-            agreement_percentage = ((total_labeled - disagreement_count) / total_labeled) * 100
-
-        # Filter out special labels (-1, -2, -3) before computing weights
-        filtered_labels = [label for label in all_labels if label not in (-1, -2, -3)]
-        class_weights = {}
-        if filtered_labels:
-            # Compute weights for the unique classes in filtered_labels
-            classes = np.unique(filtered_labels)
-            weights = compute_class_weight(class_weight='balanced', classes=classes, y=filtered_labels)
-            class_weights = dict(zip(classes, weights))
-
-        statistics = {
-            'total_annotations': total_annotations,
-            'total_labeled': total_labeled,
-            'class_counts': class_counts,
-            'disagreement_count': disagreement_count,
-            'agreement_percentage': agreement_percentage,
-            'class_weights': class_weights,
+        return {
+            "total_annotations": total,
+            "total_labeled": labeled,
+            "class_counts": class_counts,
+            "disagreement_count": disagreements,
+            "agreement_percentage": agree_pct,
+            "class_weights": weights,
         }
-        logging.info(f"Labeling statistics computed: {statistics}")
-        self.labeling_statistics_updated.emit(statistics)
 
+    # ─────────────────────── cluster meta ───────────────────────
     def generate_cluster_info(self) -> Dict[int, dict]:
-        """
-        Returns cluster metadata for each cluster ID.
-        """
-        cluster_info = OrderedDict()
-        for cluster_id, annotations in self.clusters.items():
-            num_annotations = len(annotations)
-            num_labeled = sum(1 for a in annotations if a.class_id != -1)
-            labeled_percentage = (num_labeled / num_annotations) * 100 if num_annotations > 0 else 0
-
-            cluster_info[cluster_id] = {
-                'num_annotations': num_annotations,
-                'num_images': len({a.filename for a in annotations}),
-                'labeled_percentage': labeled_percentage,
-                'label': self.cluster_labels.get(cluster_id, ''),
-                'average_adjusted_uncertainty': np.mean(
-                    [annotation.adjusted_uncertainty for annotation in annotations]),
-                'average_uncertainty': np.mean([annotation.uncertainty for annotation in annotations]),
-
+        """Return light-weight per-cluster metadata for the UI."""
+        info = OrderedDict()
+        for cid, annos in self.clusters.items():
+            num = len(annos)
+            labeled = sum(1 for a in annos if a.class_id != -1)
+            info[cid] = {
+                "num_annotations": num,
+                "num_images": len({a.filename for a in annos}),
+                "labeled_percentage": (labeled / num * 100) if num else 0.0,
+                "label": self.cluster_labels.get(cid, ""),
+                "average_adjusted_uncertainty": float(np.mean([a.adjusted_uncertainty for a in annos] or [0])),
+                "average_uncertainty": float(np.mean([a.uncertainty for a in annos] or [0])),
             }
-        return cluster_info
+        return info
 
+    # ───────────────────────── utilities ────────────────────────
     def update_cluster_labels(self, cluster_id: int, label: str):
-        """
-        Updates the label for a specific cluster (user-defined).
-        """
         self.cluster_labels[cluster_id] = label
-        logging.info(f"Cluster {cluster_id} label updated to '{label}'.")
 
     def get_clusters(self) -> Dict[int, List[Annotation]]:
         return self.clusters
 
     def cleanup(self):
-        """
-        Cleans up resources, if necessary.
-        """
-        pass
+        """Called by MainController on app exit."""
+        self.cancel_clustering()  # best-effort; threads quit on their own
 
-    # -------------------------------------------------------------------------
-    #                            PRIVATE HELPERS
-    # -------------------------------------------------------------------------
-
-    def _init_annotation_extraction(self):
-        """
-        Sets up and starts the AnnotationExtractionWorker (QThread-based or also refactor to QRunnable if you want).
-        """
-        self.annotation_extraction_worker = AnnotationExtractionWorker(self.model, self.annotation_generator)
-        self.annotation_extraction_worker.progress.connect(self.annotation_progress.emit)
-        self.annotation_extraction_worker.finished.connect(self.on_annotation_extraction_finished)
-
-        self.annotation_progress.emit(0)
-        self.annotation_extraction_worker.start()
-
-    def _clustering_thread_is_running(self) -> bool:
-        """
-        Checks if a clustering thread is currently running.
-        """
-        return (self.clustering_thread and self.clustering_thread.isRunning()) if self.clustering_thread else False
-
-    def _extract_annotations_from_image(self, image_data: Dict[str, Any], image_index: int) -> List[Annotation]:
-        """
-        Extracts annotations from a single image (used in the synchronous path).
-        """
-        annotations = []
-        uncertainty_map = image_data.get('uncertainty')
-        logits = image_data.get('logits')
-        filename = image_data.get('filename')
-
-        if uncertainty_map is None or logits is None or filename is None:
-            logging.warning(f"Missing data for image index {image_index}. Skipping.")
-            return annotations
-
-        logit_features, coords = self.annotation_generator.generate_annotations(
-            uncertainty_map=uncertainty_map,
-            logits=logits
-        )
-
-        for coord, logit_feature in zip(coords, logit_features):
-            annotation = Annotation(
-                filename=filename,
-                coord=coord,
-                logit_features=logit_feature,
-                class_id=-1,
-                image_index=image_index,
-                uncertainty=uncertainty_map[tuple(coord)],
-                cluster_id=None,
-                model_prediction=self._get_model_prediction(logit_feature)
-            )
-            annotations.append(annotation)
-
-        return annotations
-
+    # ───────────────────────── helpers ──────────────────────────
     @staticmethod
-    def _get_model_prediction(logit_feature: np.ndarray) -> str:
-        """
-        Maps logit feature (highest index) to a class name.
-        """
-        class_index = np.argmax(logit_feature)
-        return CLASS_COMPONENTS.get(class_index, "None")
-
-    @staticmethod
-    def get_class_id_from_prediction(prediction_name: str) -> Optional[int]:
-        """
-        Looks up the class ID from a predicted class name.
-        """
-        for cid, cname in CLASS_COMPONENTS.items():
-            if cname == prediction_name:
+    def get_class_id_from_prediction(pred: str) -> Optional[int]:
+        for cid, name in CLASS_COMPONENTS.items():
+            if name == pred:
                 return cid
         return None

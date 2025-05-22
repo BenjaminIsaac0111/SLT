@@ -28,6 +28,7 @@ from GUI.models.StatePersistance import ProjectState
 from GUI.models.UncertaintyPropagator import propagate_for_annotations
 from GUI.unittests.debug_uncertainty_propargation import analyze_uncertainty, ProgressFilmer
 from GUI.views.ClusteredCropsView import ClusteredCropsView
+from GUI.views.ClusteringProgressDialog import ClusteringProgressDialog
 
 
 class MainController(QObject):
@@ -49,6 +50,7 @@ class MainController(QObject):
         self._nav_history: list[int] = []
         self._current_cluster_id = None
         self.annotation_generator = LocalMaximaPointAnnotationGenerator()
+        self._progress_dlg: Optional[ClusteringProgressDialog] = None
         self._use_greedy_nav: bool = True  # updated in on_label_generator_method_changed
         self._seq_cursor: Optional[int] = None  # stores the “current” cluster id for sequential mode
 
@@ -85,11 +87,8 @@ class MainController(QObject):
         logging.info("Data model set: %s", model.data_path)
 
     def connect_signals(self):
-        """
-        Connects signals from the view and other controllers to the appropriate methods.
-        """
-        # --- View -> Controller ---
-        self.view.request_clustering.connect(self.clustering_controller.start_clustering)
+        # --------------------------- View → Controller ------------------
+        self.view.request_clustering.connect(self._begin_generate_annotations)
         self.view.sample_cluster.connect(self.on_select_cluster)
         self.view.annotation_method_changed.connect(self.on_label_generator_method_changed)
         self.view.bulk_label_changed.connect(self.on_bulk_label_changed)
@@ -101,22 +100,19 @@ class MainController(QObject):
         self.view.save_project_as_requested.connect(self.save_project_as)
         self.view.navigation_widget.next_recommended_cluster_requested.connect(self.on_next_recommended_cluster)
         self.view.backtrack_requested.connect(self.on_backtrack_requested)
-        # --- ClusteringController -> View ---
-        self.clustering_controller.show_clustering_progress_bar.connect(self.view.show_clustering_progress_bar)
-        self.clustering_controller.hide_clustering_progress_bar.connect(self.view.hide_clustering_progress_bar)
-        self.clustering_controller.clustering_progress.connect(self.view.update_clustering_progress_bar)
-        self.clustering_controller.annotation_progress.connect(self.view.update_annotation_progress_bar)
-        self.clustering_controller.annotation_progress_finished.connect(self.view.hide_annotation_progress_bar)
+
+        # ---------------- ClusteringController → MainController ---------
+        # No UI progress bars in the side-panel any more – handled by dialog
         self.clustering_controller.clusters_ready.connect(self.on_clusters_ready)
         self.clustering_controller.labeling_statistics_updated.connect(self.view.update_labeling_statistics)
 
-        # --- ImageProcessingController -> View ---
+        # ---------------- ImageProcessingController → View --------------
         self.image_processing_controller.crops_ready.connect(self.view.display_sampled_crops)
         self.image_processing_controller.progress_updated.connect(self.view.update_crop_loading_progress_bar)
         self.image_processing_controller.crop_loading_started.connect(self.view.show_crop_loading_progress_bar)
         self.image_processing_controller.crop_loading_finished.connect(self.view.hide_crop_loading_progress_bar)
 
-        # --- ProjectStateController -> Slots ---
+        # ---------------- ProjectStateController callbacks --------------
         self.project_state_controller.autosave_finished.connect(self.on_autosave_finished)
         self.project_state_controller.project_loaded.connect(self.on_project_loaded)
         self.project_state_controller.project_saved.connect(self.on_project_saved)
@@ -165,13 +161,51 @@ class MainController(QObject):
         """
         self.image_processing_controller.set_clusters(clusters)
         cluster_info = self.clustering_controller.generate_cluster_info()
-        first_cluster_id = list(cluster_info.keys())[0] if cluster_info else None
-        self.view.populate_cluster_selection(cluster_info, selected_cluster_id=first_cluster_id)
-        if first_cluster_id is not None:
-            self.on_select_cluster(first_cluster_id)
-        self.view.hide_clustering_progress_bar()
+        recommended_start_cluster_id = self.select_next_cluster_based_on_greedy_metric()
+        self.view.populate_cluster_selection(cluster_info, selected_cluster_id=recommended_start_cluster_id)
+        if recommended_start_cluster_id is not None:
+            self.on_select_cluster(recommended_start_cluster_id, force=True)
 
-    @pyqtSlot(int)
+    def _begin_generate_annotations(self):
+        if self._progress_dlg:
+            return
+
+        self._progress_dlg = ClusteringProgressDialog(self.view)
+        dlg = self._progress_dlg
+
+        self.clustering_controller.annotation_progress.connect(
+            lambda v: dlg.update_phase("Extracting", v)
+        )
+        self.clustering_controller.clustering_progress.connect(
+            lambda v: dlg.update_phase("Clustering", v)
+        )
+
+        self.clustering_controller.clusters_ready.connect(self._finish_progress_dialog)
+        self.clustering_controller.cancelled.connect(self._finish_progress_dialog)
+
+        dlg.cancel_requested.connect(self.clustering_controller.cancel_clustering)
+        dlg.cancel_requested.connect(self._finish_progress_dialog)
+
+        dlg.show()
+        self.clustering_controller.start_clustering()
+
+    def _finish_progress_dialog(self):
+        if not self._progress_dlg:
+            return
+
+        try:
+            self.clustering_controller.annotation_progress.disconnect()
+            self.clustering_controller.clustering_progress.disconnect()
+            self.clustering_controller.clusters_ready.disconnect()
+            self.clustering_controller.cancelled.disconnect()
+        except TypeError:
+            pass  # already disconnected
+
+        self._progress_dlg.close()
+        self._progress_dlg.deleteLater()
+        self._progress_dlg = None
+
+    @pyqtSlot(int, bool)
     def on_select_cluster(self, cluster_id: int, force: bool = False):
         """
         Handles the request to sample a cluster and display its crops.
@@ -179,7 +213,8 @@ class MainController(QObject):
         :param cluster_id: The ID of the cluster to sample.
 
         Args:
-            force:
+        cluster_id: The ID of the cluster to fetch.
+            force: Force fetch.
         """
         if (
                 not force
@@ -208,22 +243,9 @@ class MainController(QObject):
             logging.warning(f"No annotations found in cluster {cluster_id}.")
             self.view.display_sampled_crops([])
             return
-        self.image_processing_controller.display_crops(annos, cluster_id)
+        self.image_processing_controller.display_crops(annos)
         self._current_cluster_id = cluster_id
-        self._update_navigation_lock()
 
-    def handle_sampling_parameters_changed(self):
-        """
-        Handles the sampling parameters after debouncing.
-        Refreshes the displayed crops based on the updated parameters.
-        """
-        logging.info("Handling debounced sampling parameter changes.")
-        selected_cluster_id = self.view.get_selected_cluster_id()
-        if selected_cluster_id is not None:
-            self.on_select_cluster(selected_cluster_id)
-        else:
-            logging.warning("No cluster is currently selected. Clearing displayed crops.")
-            self.view.display_sampled_crops([])
 
     # -------------------------------------------------------------------------
     #                       LABELING / ANNOTATION HANDLERS
@@ -236,24 +258,24 @@ class MainController(QObject):
         labeled_annotations = clusters.get(selected_cluster_id, [])
 
         if class_id == -1:
-            for anno in labeled_annotations[:self.image_processing_controller.crops_per_cluster]:
+            for anno in labeled_annotations:
                 anno.class_id = class_id
                 anno.adjusted_uncertainty = anno.uncertainty
         else:
-            for anno in labeled_annotations[:self.image_processing_controller.crops_per_cluster]:
+            for anno in labeled_annotations:
                 anno.class_id = class_id
                 anno.adjusted_uncertainty = 0.0
 
         # Propagate changes and update statistics
         self.propagate_labeling_changes()
-        self.clustering_controller.compute_labeling_statistics()
+        stats = self.clustering_controller.compute_labeling_statistics()
+        self.view.update_labeling_statistics(stats)
 
         cluster_info = self.clustering_controller.generate_cluster_info()
         self.view.populate_cluster_selection(cluster_info, selected_cluster_id=selected_cluster_id)
 
         self._dirty = True
         self._idle_timer.start(self.AUTOSAVE_IDLE_MS)
-        self._update_navigation_lock()
 
     @pyqtSlot(dict, int)
     def on_crop_label_changed(self, crop_data: dict, class_id: int):
@@ -290,7 +312,8 @@ class MainController(QObject):
             )
 
         self.propagate_labeling_changes()
-        self.clustering_controller.compute_labeling_statistics()
+        stats = self.clustering_controller.compute_labeling_statistics()
+        self.view.update_labeling_statistics(stats)
 
         cluster_info = self.clustering_controller.generate_cluster_info()
         self.view.populate_cluster_selection(cluster_info,
@@ -298,7 +321,6 @@ class MainController(QObject):
 
         self._dirty = True
         self._idle_timer.start(self.AUTOSAVE_IDLE_MS)
-        self._update_navigation_lock()
 
     @pyqtSlot()
     def on_next_recommended_cluster(self):
@@ -521,16 +543,6 @@ class MainController(QObject):
                 return False
         return True
 
-    def _update_navigation_lock(self) -> None:
-        """
-        Enable / disable cluster navigation widgets according to the
-        completion status of the visible crops.
-        """
-        locked = not self._visible_crops_complete()
-        nav = self.view.navigation_widget
-        nav.next_recommended_button.setEnabled(not locked)
-        nav.cluster_combo.setEnabled(not locked)
-
     # -------------------------------------------------------------------------
     #                           PROJECT STATE
     # -------------------------------------------------------------------------
@@ -697,7 +709,8 @@ class MainController(QObject):
                 self.on_select_cluster(first_cluster_id)
 
         self.view.hide_progress_bar()
-        self.clustering_controller.compute_labeling_statistics()
+        stats = self.clustering_controller.compute_labeling_statistics()
+        self.view.update_labeling_statistics(stats)
 
     @pyqtSlot(str)
     def on_project_saved(self, file_path: str):

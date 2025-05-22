@@ -39,13 +39,6 @@ class ClusteringControlsWidget(QGroupBox):
     def _init_ui(self):
         layout = QVBoxLayout()
 
-        # Clustering Button remains unchanged.
-        self.generate_annotations = QPushButton("Generate Annotations")
-        self.generate_annotations.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.generate_annotations.clicked.connect(self.request_clustering.emit)
-        self.generate_annotations.setFocusPolicy(Qt.NoFocus)
-        layout.addWidget(self.generate_annotations)
-
         # Create a container for the progress bar and overlaid label
         progress_container = QWidget()
         progress_container_layout = QGridLayout(progress_container)
@@ -108,7 +101,7 @@ class ClusteringControlsWidget(QGroupBox):
 # Navigation Controls Widget
 # ---------------------------------------------------------------------------
 class NavigationControlsWidget(QGroupBox):
-    sample_cluster = pyqtSignal(int)
+    sample_cluster = pyqtSignal(int, bool)
     next_recommended_cluster_requested = pyqtSignal()
 
     def __init__(self):
@@ -156,7 +149,7 @@ class NavigationControlsWidget(QGroupBox):
         cluster_id = self.cluster_combo.itemData(index)
         if cluster_id is not None:
             logging.debug(f"Cluster selected: {cluster_id}")
-            self.sample_cluster.emit(cluster_id)
+            self.sample_cluster.emit(cluster_id, True)
 
     def on_prev_cluster(self):
         current_index = self.cluster_combo.currentIndex()
@@ -255,13 +248,13 @@ class ClassLabelsWidget(QGroupBox):
         unlabel_button.setStyleSheet("background-color: #f08080;")
         special_actions_layout.addWidget(unlabel_button)
 
-        unsure_button = QPushButton("Unsure (?)")
+        unsure_button = QPushButton("Unsure (U)")
         unsure_button.clicked.connect(partial(self.class_label_selected.emit, -2))
         unsure_button.setFocusPolicy(Qt.NoFocus)
         unsure_button.setStyleSheet("background-color: #ffa500;")
         special_actions_layout.addWidget(unsure_button)
 
-        artifact_button = QPushButton("Artifact (!)")
+        artifact_button = QPushButton("Artifact (A)")
         artifact_button.clicked.connect(partial(self.class_label_selected.emit, -3))
         artifact_button.setFocusPolicy(Qt.NoFocus)
         artifact_button.setStyleSheet("background-color: #d3d3d3;")
@@ -272,7 +265,7 @@ class ClassLabelsWidget(QGroupBox):
         # Class Buttons Grid
         row, col = 1, 0
         for class_id, class_name in CLASS_COMPONENTS.items():
-            button_text = f"{class_name} ({class_id})"
+            button_text = f"{class_name.upper()} ({class_id})"
             btn = QPushButton(button_text)
             btn.clicked.connect(partial(self.class_label_selected.emit, class_id))
             btn.setFocusPolicy(Qt.NoFocus)
@@ -294,8 +287,8 @@ class ClassLabelsWidget(QGroupBox):
             "Shortcuts:\n"
             "Number Keys 1-9 = Main Class Labels\n"
             "- = Unlabel\n"
-            "? = Unsure\n"
-            "! = Artifact\n"
+            "U = Unsure\n"
+            "A = Artifact\n"
             "Spacebar = Agree with Model Predictions"
         )
         hint_label.setWordWrap(True)
@@ -378,7 +371,7 @@ class LabelingStatisticsWidget(QGroupBox):
 
         self.setLayout(layout)
 
-    def update_statistics(self, statistics: dict):
+    def update_statistics_table(self, statistics: dict):
         """
         Update the table and summary label with new statistics.
         Expects a statistics dict containing:
@@ -449,27 +442,13 @@ class CropGraphicsView(QGraphicsView):
             super().wheelEvent(event)
 
 
-# Not in use
-class AnnotationMethodWidget(QGroupBox):
-    annotation_method_changed = pyqtSignal(str)
-
-    def __init__(self, parent=None):
-        super().__init__("Annotation Method", parent)
-        layout = QVBoxLayout(self)
-        self.combo_box = QComboBox()
-        self.combo_box.addItems(["Local Uncertainty Maxima", "Equidistant Spots"])
-        self.combo_box.currentTextChanged.connect(self.annotation_method_changed.emit)
-        layout.addWidget(self.combo_box)
-
-
 # ---------------------------------------------------------------------------
 # Main ClusteredCropsView Class
 # ---------------------------------------------------------------------------
 class ClusteredCropsView(QWidget):
-    # Aggregate signals from child widgets
     request_clustering = pyqtSignal()
     annotation_method_changed = pyqtSignal(str)
-    sample_cluster = pyqtSignal(int)
+    sample_cluster = pyqtSignal(int, bool)
     backtrack_requested = pyqtSignal()
     bulk_label_changed = pyqtSignal(int)
     crop_label_changed = pyqtSignal(dict, int)
@@ -493,11 +472,12 @@ class ClusteredCropsView(QWidget):
         # Main layout uses a splitter: left for graphics view, right for controls.
         self.splitter = QSplitter(Qt.Horizontal)
 
+        # ---- left: graphics view
+        self._create_graphics_view()
+
+        # ---- right: control panel
         right_panel = self._create_control_panel()
         right_panel.setMinimumWidth(300)
-
-        # Left Panel: Graphics View
-        self._create_graphics_view()
 
         self.splitter.addWidget(self.graphics_view)
         self.splitter.addWidget(right_panel)
@@ -512,10 +492,6 @@ class ClusteredCropsView(QWidget):
     def _create_control_panel(self) -> QScrollArea:
         control_panel = QWidget()
         control_panel_layout = QVBoxLayout(control_panel)
-
-        self.clustering_widget = ClusteringControlsWidget()
-        self.clustering_widget.request_clustering.connect(self.request_clustering.emit)
-        control_panel_layout.addWidget(self.clustering_widget)
 
         self.navigation_widget = NavigationControlsWidget()
         self.navigation_widget.sample_cluster.connect(self.sample_cluster.emit)
@@ -572,11 +548,11 @@ class ClusteredCropsView(QWidget):
             self.on_class_button_clicked(-1)
             return
 
-        if event.text() == '?':
+        if event.key() == Qt.Key_U:
             self.on_class_button_clicked(-2)
             return
 
-        if event.text() == '!':
+        if event.key() == Qt.Key_A:
             self.on_class_button_clicked(-3)
             return
 
@@ -815,7 +791,7 @@ class ClusteredCropsView(QWidget):
         self.navigation_widget.next_recommended_button.setText(f"Go to Recommended Cluster (ID: {cluster_id})")
 
     def update_labeling_statistics(self, statistics: dict):
-        self.statistics_widget.update_statistics(statistics)
+        self.statistics_widget.update_statistics_table(statistics)
 
     # --- File & Project Signals ---
     def on_load_project_state(self):

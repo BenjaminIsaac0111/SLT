@@ -101,7 +101,7 @@ class ClickablePixmapItem(QGraphicsObject):
         elif self.class_id == -3:
             human_col = Qt.magenta
         elif self.class_id in CLASS_COMPONENTS:
-            human_col = Qt.green
+            human_col = Qt.darkGreen
         else:
             human_col = Qt.red
 
@@ -126,7 +126,7 @@ class ClickablePixmapItem(QGraphicsObject):
 
             painter.save()
             painter.setFont(self.font)
-            painter.setPen(Qt.green if agree else Qt.red)
+            painter.setPen(Qt.darkGreen if agree else Qt.red)
 
             text = self.model_prefix + self.model_prediction
             gw = self.font_metrics.width(glyph)
