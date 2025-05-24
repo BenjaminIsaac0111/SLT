@@ -195,7 +195,7 @@ def _main_window(view: QDialog) -> QMainWindow:
     ann_group.actions()[0].setChecked(True)
     ann_group.triggered.connect(lambda a: view.annotation_method_changed.emit(a.text()))
 
-    win.setWindowTitle("Guided Labelling Tool")
+    win.setWindowTitle("Smart Labelling Tool")
     win.resize(1920, 1080)
 
     center = QApplication.primaryScreen().availableGeometry().center()

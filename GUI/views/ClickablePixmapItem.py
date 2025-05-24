@@ -87,9 +87,8 @@ class ClickablePixmapItem(QGraphicsObject):
             painter.drawLine(0, y0, x0 - r, y0)
             painter.drawLine(x0 + r, y0, pw, y0)
 
-        # 3) Draw border (blue if hovered, thicker if selected)
-        pen = QPen(Qt.blue if self.hovered else Qt.black)
-        pen.setWidth(2 if (self.selected or self.hovered) else 1)
+        pen = QPen(Qt.darkGray if self.hovered else Qt.black)
+        pen.setWidth(4 if (self.selected or self.hovered or self.annotation.is_manual) else 1)
         painter.setPen(pen)
         painter.drawRect(QRectF(0, 0, pw, ph))
 
