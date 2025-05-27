@@ -3,12 +3,11 @@ from __future__ import annotations
 
 import json
 import logging
-from collections import OrderedDict, Counter
+from collections import OrderedDict
 from pathlib import Path
 from typing import Optional, Dict, List
 
 import numpy as np
-import scipy
 from PyQt5.QtCore import QObject, pyqtSlot, QTimer, QCoreApplication
 from PyQt5.QtWidgets import QFileDialog, QMessageBox
 
@@ -18,14 +17,15 @@ from GUI.controllers.ImageProcessingController import ImageProcessingController
 from GUI.controllers.ProjectStateController import ProjectStateController
 from GUI.models import StatePersistance
 from GUI.models.Annotation import Annotation
-# Use unified interface and factory
 from GUI.models.ImageDataModel import BaseImageDataModel, create_image_data_model
 from GUI.models.PointAnnotationGenerator import (
     LocalMaximaPointAnnotationGenerator,
-    EquidistantPointAnnotationGenerator, CenterPointAnnotationGenerator,
+    EquidistantPointAnnotationGenerator,
+    CenterPointAnnotationGenerator,
 )
 from GUI.models.StatePersistance import ProjectState
 from GUI.models.UncertaintyPropagator import propagate_for_annotations
+from GUI.models.domain.ClusterSelection import make_selector
 from GUI.unittests.debug_uncertainty_propargation import analyze_uncertainty, ProgressFilmer
 from GUI.views.ClusteredCropsView import ClusteredCropsView
 from GUI.views.ClusteringProgressDialog import ClusteringProgressDialog
@@ -51,13 +51,12 @@ class MainController(QObject):
         self._current_cluster_id = None
         self.annotation_generator = LocalMaximaPointAnnotationGenerator()
         self._progress_dlg: Optional[ClusteringProgressDialog] = None
-        self._use_greedy_nav: bool = True  # updated in on_label_generator_method_changed
-        self._seq_cursor: Optional[int] = None  # stores the “current” cluster id for sequential mode
 
         # Controllers use BaseImageDataModel interface
         self.clustering_controller = AnnotationClusteringController(
             self.image_data_model, self.annotation_generator
         )
+        self.cluster_selector = make_selector("greedy", self.clustering_controller)
         self.image_processing_controller = ImageProcessingController(self.image_data_model)
         self.project_state_controller = ProjectStateController(self.image_data_model)
 
@@ -161,7 +160,7 @@ class MainController(QObject):
         """
         self.image_processing_controller.set_clusters(clusters)
         cluster_info = self.clustering_controller.generate_cluster_info()
-        recommended_start_cluster_id = self.select_next_cluster_based_on_greedy_metric()
+        recommended_start_cluster_id = self.cluster_selector.select_next()
         self.view.populate_cluster_selection(cluster_info, selected_cluster_id=recommended_start_cluster_id)
         if recommended_start_cluster_id is not None:
             self.on_select_cluster(recommended_start_cluster_id, force=True)
@@ -245,7 +244,6 @@ class MainController(QObject):
             return
         self.image_processing_controller.display_crops(annos)
         self._current_cluster_id = cluster_id
-
 
     # -------------------------------------------------------------------------
     #                       LABELING / ANNOTATION HANDLERS
@@ -335,10 +333,10 @@ class MainController(QObject):
         current = self.view.get_selected_cluster_id()
         if current is not None:
             self._nav_history.append(current)
-        if self._use_greedy_nav:
-            next_cluster_id = self.select_next_cluster_based_on_greedy_metric()
-        else:
-            next_cluster_id = self._select_next_cluster_sequential(current)
+
+        next_cluster_id = self.cluster_selector.select_next(
+            current_cluster_id=current
+        )
 
         if next_cluster_id is not None:
             updated_cluster_info = self.clustering_controller.generate_cluster_info()
@@ -402,134 +400,6 @@ class MainController(QObject):
             save_path=Path(save_plot_to) if save_plot_to else None,
         )
         logging.info("Uncertainty debug summary: %s", stats_out.to_log_string())
-
-    def select_next_cluster_based_on_greedy_metric(self, *, skip_current: bool = True) -> Optional[int]:
-        """
-        Return the cluster ID with the highest composite z-score, ignoring
-          • the cluster currently shown in the UI (if *skip_current* is True)
-          • clusters that are already fully labelled.
-
-        Composite score = z(U_c) + z(R_c) + z(C_c)
-        where
-            U_c : mean adjusted uncertainty of *unlabelled* items
-            R_c : rarity proxy 1 / (label_count(majority_class) + 1)
-                  – majority class is taken from *labels if present*, else from
-                    the model’s top-1 predictions over **all** items in the cluster
-            C_c : distance from cluster centre to nearest *labelled* sample
-        """
-        clusters = self.clustering_controller.get_clusters()
-        if not clusters:
-            return None
-
-        # -------------------------------------------------- #
-        #  Filter candidate clusters
-        # -------------------------------------------------- #
-        current_cid = self.view.get_selected_cluster_id() if skip_current else None
-
-        def has_unlabelled(annos):
-            return any(a.class_id == -1 for a in annos)
-
-        candidate_items = {
-            cid: annos
-            for cid, annos in clusters.items()
-            if has_unlabelled(annos) and cid != current_cid
-        }
-        if not candidate_items:
-            logging.info("No candidate clusters left.")
-            return None
-
-        # -------------------------------------------------- #
-        #  Global stats for rarity & coverage
-        # -------------------------------------------------- #
-        labelled_annos = [
-            a for annos in clusters.values()
-            for a in annos if a.class_id not in (-1, -2, -3)
-        ]
-        label_counts = Counter(a.class_id for a in labelled_annos) or {0: 1}
-
-        kd = None
-        if labelled_annos:
-            feats_lab = np.vstack([a.logit_features for a in labelled_annos])
-            kd = scipy.spatial.cKDTree(feats_lab)
-
-        # -------------------------------------------------- #
-        #  Per-cluster raw metrics
-        # -------------------------------------------------- #
-        per_cluster = []  # (cid, U, R, C)
-
-        for cid, annos in candidate_items.items():
-            unlab = [a for a in annos if a.class_id == -1]
-            lab = [a for a in annos if a.class_id not in (-1, -2, -3)]
-
-            # ---- uncertainty (unlabelled only) ----------------------------
-            U = float(np.mean([a.adjusted_uncertainty for a in unlab])) if unlab else 0.0
-
-            # ---- rarity based on majority class (labels preferred) --------
-            if lab:
-                majority_class = Counter(a.class_id for a in lab).most_common(1)[0][0]
-            else:  # no human labels yet → vote from *all* model predictions
-                preds = [
-                    self.clustering_controller.get_class_id_from_prediction(a.model_prediction)
-                    for a in annos
-                ]
-                majority_class = Counter(preds).most_common(1)[0][0]
-
-            R = 1.0 / (label_counts.get(majority_class, 0) + 1)
-
-            # ---- coverage distance to nearest labelled sample ------------
-            if kd is not None:
-                centre = np.mean([a.logit_features for a in annos], axis=0)
-                C = kd.query(centre)[0]
-            else:
-                C = 0.0
-
-            per_cluster.append((cid, U, R, C))
-
-        # -------------------------------------------------- #
-        #  z-score normalisation and selection
-        # -------------------------------------------------- #
-        mat = np.asarray([t[1:] for t in per_cluster], dtype=np.float32)  # (m,3)
-        means = mat.mean(axis=0)
-        stds = mat.std(axis=0)
-        stds[stds == 0] = 1.0  # guard for zero variance
-
-        best_cid, best_score = None, -np.inf
-        for cid, U, R, C in per_cluster:
-            z = ((U - means[0]) / stds[0] +
-                 (R - means[1]) / stds[1] +
-                 (C - means[2]) / stds[2])
-            if z > best_score:
-                best_score, best_cid = z, cid
-
-        logging.info(
-            "Next recommended cluster (full-cluster rarity, skipping %s): %s  [score %.3f]",
-            current_cid, best_cid, best_score,
-        )
-        return best_cid
-
-    def _select_next_cluster_sequential(self, current: Optional[int]) -> Optional[int]:
-        """
-        Returns the next cluster id in ascending order, wrapping around once.
-        Keeps an internal cursor so repeated presses iterate deterministically.
-        """
-        cluster_ids = sorted(self.clustering_controller.get_clusters())
-        if not cluster_ids:
-            return None
-
-        # Initialise cursor
-        if self._seq_cursor is None or self._seq_cursor not in cluster_ids:
-            self._seq_cursor = cluster_ids[0]
-        else:
-            # advance to next id
-            idx = cluster_ids.index(self._seq_cursor)
-            self._seq_cursor = cluster_ids[(idx + 1) % len(cluster_ids)]
-
-        # Do not return the same cluster twice in a row
-        if self._seq_cursor == current and len(cluster_ids) > 1:
-            idx = cluster_ids.index(self._seq_cursor)
-            self._seq_cursor = cluster_ids[(idx + 1) % len(cluster_ids)]
-
-        return self._seq_cursor
 
     # ---------- soft-lock helpers ------------------------------------
 
@@ -975,3 +845,7 @@ class MainController(QObject):
         self._dirty = False
         project_state = self.get_current_state()
         self.project_state_controller.autosave_project_state(project_state)
+
+    @pyqtSlot(str)
+    def on_navigation_policy_changed(self, name: str):
+        self.cluster_selector = make_selector(name, self.clustering_controller)
