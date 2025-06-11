@@ -17,3 +17,4 @@ Run the unit tests with `pytest` from the repository root. All changes to Python
 - `Processing/` – data transforms and augmentation.
 - `Dataloader/` – dataset helpers.
 - `GUI/` – Qt-based graphical interface.
+- See `GUI/AGENTS.md` for contribution guidelines specific to the GUI.
