@@ -1,20 +1,23 @@
 import argparse
-import os
 import csv
+import os
 from pathlib import Path
+
 import numpy as np
 import tensorflow as tf
+from sklearn.metrics import f1_score
 from tensorflow.keras import optimizers, mixed_precision
 from tensorflow.keras.models import load_model
-from tensorflow.keras.utils import Progbar
 from tensorflow.keras.regularizers import l2
-from sklearn.metrics import f1_score
-from attention_unet.losses.losses import focal_loss, ce_loss
-from attention_unet.processing.transforms import Transforms
-from attention_unet.models.unets import build_unet
-from attention_unet.models.custom_layers import AttentionBlock, GroupNormalization, SpatialConcreteDropout, DropoutAttentionBlock
-from attention_unet.config.config import load_config
-from attention_unet.dataloader.dataloader import get_dataset
+from tensorflow.keras.utils import Progbar
+
+from DeepLearning.config.config import load_config
+from DeepLearning.dataloader.dataloader import get_dataset
+from DeepLearning.losses.losses import focal_loss, ce_loss
+from DeepLearning.models.custom_layers import AttentionBlock, GroupNormalization, SpatialConcreteDropout, \
+    DropoutAttentionBlock
+from DeepLearning.models.unets import build_unet
+from DeepLearning.processing.transforms import Transforms
 
 gpus = tf.config.experimental.list_physical_devices('GPU')
 for gpu in gpus:

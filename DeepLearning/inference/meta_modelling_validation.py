@@ -1,13 +1,14 @@
 import argparse
+from pathlib import Path
+from time import time
+
 import h5py
+import joblib
 import numpy as np
 import pandas as pd
-from pathlib import Path
 import yaml
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, classification_report, \
     confusion_matrix
-import joblib
-from time import time
 
 
 def load_config(config_path):

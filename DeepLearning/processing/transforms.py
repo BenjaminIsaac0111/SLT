@@ -1,6 +1,6 @@
 import tensorflow as tf
-from tensorflow.keras.layers.experimental import preprocessing
 from tensorflow.keras import mixed_precision
+from tensorflow.keras.layers.experimental import preprocessing
 
 
 class Transforms(tf.keras.layers.Layer):

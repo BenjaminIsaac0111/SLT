@@ -2,11 +2,12 @@ import argparse
 import csv
 import os
 from pathlib import Path
-from sklearn.metrics import balanced_accuracy_score, classification_report, cohen_kappa_score, confusion_matrix
-import numpy as np
-import matplotlib.pyplot as plt
 
-from attention_unet.models.custom_layers import AttentionBlock
+import matplotlib.pyplot as plt
+import numpy as np
+from sklearn.metrics import balanced_accuracy_score, classification_report, cohen_kappa_score, confusion_matrix
+
+from DeepLearning.models.custom_layers import AttentionBlock
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Set before tf import else tf vomits logging INFO...
 
@@ -15,8 +16,8 @@ from tensorflow.keras.models import load_model
 from tensorflow.keras.utils import Progbar
 from tensorflow_addons.layers import GroupNormalization
 
-from attention_unet.config.config import load_config
-from attention_unet.dataloader.dataloader import get_dataset
+from DeepLearning.config.config import load_config
+from DeepLearning.dataloader.dataloader import get_dataset
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()

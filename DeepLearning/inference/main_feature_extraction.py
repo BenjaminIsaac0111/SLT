@@ -2,20 +2,20 @@ import argparse
 import os
 import sys
 from pathlib import Path
-import numpy as np
+
 import h5py
+import numpy as np
 from tqdm import tqdm
 
-from attention_unet.models.custom_layers import AttentionBlock, PixelShuffle
+from DeepLearning.models.custom_layers import AttentionBlock, PixelShuffle
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Set before tf import else tf vomits logging INFO...
 
-import tensorflow as tf
 from tensorflow.keras.models import load_model, Model
 from tensorflow_addons.layers import GroupNormalization
 
-from attention_unet.config.config import load_config
-from attention_unet.dataloader.dataloader import get_dataset
+from DeepLearning.config.config import load_config
+from DeepLearning.dataloader.dataloader import get_dataset
 import tensorflow as tf
 
 if __name__ == '__main__':
