@@ -22,5 +22,5 @@ dependencies:
       - tqdm
       - numba
       - joblib
-      - xgboost
       - PyQt5
+      - pydantic
