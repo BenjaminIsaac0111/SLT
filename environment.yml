@@ -1,4 +1,4 @@
-name: attention-unet
+name: SLT
 channels:
   - defaults
   - conda-forge
