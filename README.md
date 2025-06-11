@@ -44,6 +44,15 @@ Ensure you have the following installed:
 - tensorflow-addons==0.19.0
 - pyaml==23.5.8
 
+You can create a Conda environment with these dependencies using the provided
+`environment.yml` file:
+
+```bash
+conda env create -f environment.yml
+```
+
+This environment targets **Python 3.8** and installs TensorFlow **2.10.***.
+
 ### Data Preparations
 The data pipeline is designed to handle image datasets for segmentation tasks in a convenient way. This section guides you through preparing and structuring your dataset to work seamlessly with the provided TensorFlow data loading and augmentation scripts.
 
