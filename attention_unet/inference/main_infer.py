@@ -6,7 +6,7 @@ from sklearn.metrics import balanced_accuracy_score, classification_report, cohe
 import numpy as np
 import matplotlib.pyplot as plt
 
-from Model.custom_layers import AttentionBlock
+from attention_unet.models.custom_layers import AttentionBlock
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Set before tf import else tf vomits logging INFO...
 
@@ -15,8 +15,8 @@ from tensorflow.keras.models import load_model
 from tensorflow.keras.utils import Progbar
 from tensorflow_addons.layers import GroupNormalization
 
-from cfg.config import load_config
-from Dataloader.dataloader import get_dataset
+from attention_unet.config.config import load_config
+from attention_unet.dataloader.dataloader import get_dataset
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()

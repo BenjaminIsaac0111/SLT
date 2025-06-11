@@ -76,7 +76,7 @@ The data pipeline is designed to handle image datasets for segmentation tasks in
 
 ## Training a Model
 
-The Training pipeline is configured using a `.yaml` file with various parameters. Modify the configurations in configurations/configuration.yaml to suit your training needs and hardware setup. See cfg/example_config.yaml for an example configuration.
+The Training pipeline is configured using a `.yaml` file with various parameters. Modify the configurations in configurations/configuration.yaml to suit your training needs and hardware setup. See attention_unet/config/example_config.yaml for an example configuration.
 
 ### Configuration
 Ensure your configuration file (`configuration.yaml`) includes the correct paths and parameters relevant to your training run.
@@ -116,9 +116,9 @@ Ensure your configuration file (`configuration.yaml`) includes the correct paths
 - **CLASS_WEIGHTS**: List of weights for each class to handle class imbalance during training. Higher weights can be assigned to classes that are underrepresented or more important to detect accurately. 
 This is applied to both the focal or cross entropy losses if set.
 
-To train the model, run the following command with you specified configuration (see example file in cfg/):
+To train the model, run the following command with you specified configuration (see example file in attention_unet/config/):
 ```
-main.py --config cfg/config_example.yaml
+main.py --config attention_unet/config/config_example.yaml
 ```
 This script will train the model according to the parameters specified in the YAML configuration file. Training progress will be displayed on the console.
 
@@ -133,11 +133,11 @@ After training, you can validate the model performance on a separate test set co
 ## Customization
 You can customize the model architecture and training routine by modifying:
 
-`Model/unets.py` and `Model/custom_layers.py`: For changes to the U-Net architecture.
+`attention_unet/models/unets.py` and `attention_unet/models/custom_layers.py`: For changes to the U-Net architecture.
 
-`Losses/losses.py`: For custom loss functions.
+`attention_unet/losses/losses.py`: For custom loss functions.
 
-`Processing/transforms.py`: For data augmentation and preprocessing methods.
+`attention_unet/processing/transforms.py`: For data augmentation and preprocessing methods.
 
 ## Contributing
 Contributions to this project are welcome. Please ensure to follow the existing coding style and add unit tests for any new or changed functionality.

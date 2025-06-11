@@ -55,7 +55,7 @@ def get_dataset(
     # Iterate over each .txt file in the list
     for filelist in filelists:
         with open(filelist, 'r') as f:
-            # Read the file paths from the .txt file and prepend the directory from cfg
+            # Read the file paths from the .txt file and prepend the directory from attention_unet.config
             files_in_list = [os.path.join(cfg['DATA_DIR'], line.strip()) for line in f.readlines()]
             files_in_list = [patch.split('\t')[0] for patch in files_in_list]
             all_files.extend(files_in_list)  # Add to the collective list of file paths
@@ -217,7 +217,7 @@ def get_balanced_upsampled_dataset(cfg=None, repeat=True, transforms=None, filel
     # Iterate over each .txt file in the list
     for filelist in filelists:
         with open(filelist, 'r') as f:
-            # Read the file paths from the .txt file and prepend the directory from cfg
+            # Read the file paths from the .txt file and prepend the directory from attention_unet.config
             files_in_list = [os.path.join(cfg['DATA_DIR'], line.strip()) for line in f.readlines()]
             files_in_list = [patch.split('\t')[0] for patch in files_in_list]
             for file_path in files_in_list:

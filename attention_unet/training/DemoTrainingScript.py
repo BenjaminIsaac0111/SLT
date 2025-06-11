@@ -10,7 +10,7 @@ import tensorflow_datasets as tfds
 from tensorflow import keras
 from tensorflow.keras import mixed_precision
 
-from Model.models import MCDropoutUnetBuilder, EnsembleMCDropoutUnetBuilder
+from attention_unet.models.models import MCDropoutUnetBuilder, EnsembleMCDropoutUnetBuilder
 
 # Set global seeds for reproducibility.
 tf.random.set_seed(42)

@@ -3,7 +3,7 @@ from setuptools import setup, find_packages
 setup(
     name='SmartLabellingTool',
     version='0.9.0',
-    packages=find_packages(),
+    packages=find_packages(include=['attention_unet', 'attention_unet.*', 'GUI', 'GUI.*']),
     include_package_data=True,
     url='',
     license='GPT-3.0 License',
