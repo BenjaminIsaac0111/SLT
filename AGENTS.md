@@ -11,10 +11,12 @@ Run the unit tests with `pytest` from the repository root. All changes to Python
 - Include docstrings for public modules, classes and functions.
 
 ## Repository layout
-- `Model/` – network architectures and custom layers.
-- `Training/` – training scripts.
-- `Inference/` – inference utilities.
-- `Processing/` – data transforms and augmentation.
-- `Dataloader/` – dataset helpers.
+
+- `DeepLearning/config/` – loaders for config files
+- `DeepLearning/Model/` – network architectures and custom layers.
+- `DeepLearning/Training/` – training scripts.
+- `DeepLearning/Inference/` – inference utilities.
+- `DeepLearning/Processing/` – data transforms and augmentation.
+- `DeepLearning/Dataloader/` – dataset helpers.
 - `GUI/` – Qt-based graphical interface.
 - See `GUI/AGENTS.md` for contribution guidelines specific to the GUI.
