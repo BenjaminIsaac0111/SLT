@@ -1,19 +1,22 @@
+from __future__ import annotations
+
 import logging
 from functools import partial
 from typing import List, Dict, Optional
 
-import numpy as np
 from PyQt5.QtCore import pyqtSignal, Qt, QTimer
-from PyQt5.QtGui import QPainter, QPixmap, QImage
+from PyQt5.QtGui import QPainter, QPixmap
 from PyQt5.QtWidgets import (
     QWidget, QComboBox, QPushButton, QVBoxLayout, QLabel,
     QProgressBar, QGraphicsView, QGraphicsScene, QGridLayout,
     QGroupBox, QSizePolicy, QSplitter, QGraphicsItem, QApplication,
-    QHBoxLayout, QScrollArea, QTableWidget, QTableWidgetItem, QHeaderView, QCheckBox, QSpinBox
+    QHBoxLayout, QScrollArea, QTableWidget, QTableWidgetItem,
+    QHeaderView, QCheckBox, QDialog, QDialogButtonBox
 )
 
 from GUI.configuration.configuration import CLASS_COMPONENTS
 from GUI.models.Annotation import Annotation
+from GUI.models.export.ExportService import ExportOptions
 from GUI.views.ClickablePixmapItem import ClickablePixmapItem
 from GUI.views.LabelSlider import LabeledSlider
 
@@ -127,18 +130,10 @@ class NavigationControlsWidget(QGroupBox):
         self.auto_advance_checkbox.setChecked(True)
         layout.addWidget(self.auto_advance_checkbox)
 
-        delay_row = QHBoxLayout()
-        delay_row.addWidget(QLabel("Delay (ms):"))
-        self.delay_spinbox = QSpinBox()
-        self.delay_spinbox.setRange(0, 3000)
-        self.delay_spinbox.setValue(1000)
-        delay_row.addWidget(self.delay_spinbox)
-        layout.addLayout(delay_row)
 
         self.cluster_combo.setFocusPolicy(Qt.NoFocus)
         self.next_recommended_button.setFocusPolicy(Qt.NoFocus)
         self.auto_advance_checkbox.setFocusPolicy(Qt.NoFocus)
-        self.delay_spinbox.setFocusPolicy(Qt.NoFocus)
 
         self.setLayout(layout)
 
@@ -298,44 +293,6 @@ class ClassLabelsWidget(QGroupBox):
 
 
 # ---------------------------------------------------------------------------
-# File Operations Widget - Not in Use
-# ---------------------------------------------------------------------------
-class FileOperationsWidget(QGroupBox):
-    load_project_state_requested = pyqtSignal()
-    save_project_requested = pyqtSignal()
-    save_project_as_requested = pyqtSignal()
-    export_annotations_requested = pyqtSignal()
-
-    def __init__(self):
-        super().__init__("File Operations")
-        self._init_ui()
-
-    def _init_ui(self):
-        layout = QVBoxLayout()
-        self.load_project_button = QPushButton("Load Project")
-        self.load_project_button.clicked.connect(self.load_project_state_requested.emit)
-        self.load_project_button.setFocusPolicy(Qt.NoFocus)
-        layout.addWidget(self.load_project_button)
-
-        self.save_project_button = QPushButton("Save")
-        self.save_project_button.clicked.connect(self.save_project_requested.emit)
-        self.save_project_button.setFocusPolicy(Qt.NoFocus)
-        layout.addWidget(self.save_project_button)
-
-        self.save_project_as_button = QPushButton("Save As...")
-        self.save_project_as_button.clicked.connect(self.save_project_as_requested.emit)
-        self.save_project_as_button.setFocusPolicy(Qt.NoFocus)
-        layout.addWidget(self.save_project_as_button)
-
-        self.export_annotations_button = QPushButton("Export Annotations")
-        self.export_annotations_button.clicked.connect(self.export_annotations_requested.emit)
-        self.export_annotations_button.setFocusPolicy(Qt.NoFocus)
-        layout.addWidget(self.export_annotations_button)
-
-        self.setLayout(layout)
-
-
-# ---------------------------------------------------------------------------
 # Labeling Statistics Widget
 # ---------------------------------------------------------------------------
 class LabelingStatisticsWidget(QGroupBox):
@@ -453,10 +410,10 @@ class ClusteredCropsView(QWidget):
     bulk_label_changed = pyqtSignal(int)
     crop_label_changed = pyqtSignal(dict, int)
     save_project_state_requested = pyqtSignal()
-    export_annotations_requested = pyqtSignal()
+    export_annotations_requested = pyqtSignal(str)
     save_project_requested = pyqtSignal()
-    save_project_as_requested = pyqtSignal()
-    load_project_state_requested = pyqtSignal()
+    save_project_as_requested = pyqtSignal(str)
+    load_project_state_requested = pyqtSignal(str)
 
     def __init__(self):
         super().__init__()
@@ -600,6 +557,9 @@ class ClusteredCropsView(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
+        QTimer.singleShot(0, self._set_splitter_sizes)
+
+    def _set_splitter_sizes(self):
         total_width = self.width()
         control_panel_width = total_width // 3
         graphics_view_width = total_width - control_panel_width
@@ -775,10 +735,8 @@ class ClusteredCropsView(QWidget):
         if changes:
             self.arrange_crops()
 
-        nav = self.navigation_widget
-        if nav.auto_advance_checkbox.isChecked():
-            QTimer.singleShot(nav.delay_spinbox.value(),
-                              nav.on_next_recommended)
+        if self.navigation_widget.auto_advance_checkbox.isChecked():
+            QTimer.singleShot(300, self.navigation_widget.on_next_recommended)
 
     @staticmethod
     def get_class_id_from_model_prediction(model_prediction: str) -> Optional[int]:
@@ -800,10 +758,80 @@ class ClusteredCropsView(QWidget):
     def on_export_annotations(self):
         self.export_annotations_requested.emit()
 
-    @staticmethod
-    def _numpy_to_qpixmap(arr: np.ndarray) -> QPixmap:
-        h, w, _ = arr.shape
-        buf = arr.tobytes()  # deep copy – arr may be GC-ed later
-        qimg = QImage(buf, w, h, QImage.Format_RGB888)
-        qimg._buf = buf  # pin buffer
-        return QPixmap.fromImage(qimg)
+    def ask_export_options(
+            self,
+            flat_annos: list[tuple[int, Annotation]],
+    ) -> ExportOptions | None:
+        """Return the user’s choice or *None* on cancel."""
+        unlabeled = sum(
+            1 for _, a in flat_annos if a.class_id in {None, -1, -2}
+        )
+        artefacts = sum(1 for _, a in flat_annos if a.class_id == -3)
+
+        # optimisation: skip the dialog if nothing to ask
+        if unlabeled == 0 and artefacts == 0:
+            return ExportOptions(include_artifacts=True)
+
+        dlg = ExportAnnotationsDialog(self, unlabeled, artefacts)
+        return dlg.get_options()
+
+
+class ExportAnnotationsDialog(QDialog):
+    """
+    Modal dialog that asks two questions:
+
+        • Proceed despite un-labelled crops?
+        • Include artefacts (class_id == -3) ?
+
+    If the user clicks *Cancel* the caller gets `None`.
+    Otherwise, an `ExportOptions` instance is returned.
+    """
+
+    def __init__(
+            self,
+            parent: QWidget | None,
+            unlabeled_count: int,
+            artifact_count: int,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("Export annotations")
+
+        lay = QVBoxLayout(self)
+
+        # --- Un-labelled warning -----------------------------------
+        if unlabeled_count:
+            label = QLabel(
+                f"{unlabeled_count} annotations do not have a class label.\n"
+                "Do you still want to continue with the export?"
+            )
+            label.setWordWrap(True)
+            lay.addWidget(label)
+
+        # --- Artefacts checkbox -------------------------------------
+        self._ck_artifacts = QCheckBox(
+            f"Include {artifact_count} artefact annotations"
+        )
+        if artifact_count:
+            self._ck_artifacts.setChecked(True)
+            lay.addWidget(self._ck_artifacts)
+        else:
+            self._ck_artifacts.hide()
+
+        # --- OK / Cancel buttons ------------------------------------
+        btns = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel,
+            orientation=Qt.Horizontal,
+            parent=self,
+        )
+        lay.addWidget(btns)
+
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+
+    # ----------------------------------------------------------------
+    #  Public helper --------------------------------------------------
+    # ----------------------------------------------------------------
+    def get_options(self) -> ExportOptions | None:
+        if self.exec_() != QDialog.Accepted:
+            return None
+        return ExportOptions(include_artifacts=self._ck_artifacts.isChecked())

@@ -4,7 +4,7 @@ import logging
 from dataclasses import dataclass
 from itertools import count
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Optional, Sequence, Callable
 
 import numpy as np
 from matplotlib import pyplot as plt
@@ -50,7 +50,6 @@ def analyze_uncertainty(
         *,
         show: bool = True,
         save_path: Optional[Path] = None,
-        # NEW optional overrides  ↓↓↓
         hist_range: tuple[float, float] | None = None,
         scatter_xlim: tuple[float, float] | None = None,
         scatter_ylim: tuple[float, float] | None = None,
@@ -131,23 +130,52 @@ def analyze_uncertainty(
 
 
 class ProgressFilmer:
-    FRAME_EVERY_N = 2
-    _counter = count(0)
+    """
+    Record diagnostic frames every *FRAME_EVERY_N* calls.
 
-    def __init__(self, out_dir: Path):
-        self.out_dir = Path(out_dir)
-        self.out_dir.mkdir(parents=True, exist_ok=True)
+    Parameters
+    ----------
+    dir_supplier :
+        Zero-argument callable that returns the directory
+        where frames should be written **at this moment**.
+        (Typically  ``controller.get_frames_dir``.)
+    frame_every_n :
+        Skip factor.  Default = 2 (every other call).
+    """
 
-        # -------- running extrema --------
+    def __init__(self,
+                 dir_supplier: Callable[[], Path],
+                 frame_every_n: int = 2):
+        self.dir_supplier = dir_supplier
+        self.FRAME_EVERY_N = frame_every_n
+        self._current_dir: Path | None = None
+        self._counter = count(0)
+
+        # running global extrema for consistent colour scales
         self.xmin = np.inf
         self.xmax = -np.inf
         self.ymin = np.inf
         self.ymax = -np.inf
-        self.dmin = np.inf  # diff = orig-adj
+        self.dmin = np.inf  # diff = orig - adj
         self.dmax = -np.inf
 
     # --------------------------------------------------- public hook
-    def maybe_record_frame(self, annotations: Sequence["Annotation"]) -> None:
+    def maybe_record_frame(self, annotations: Sequence[Annotation]) -> None:
+        out_dir = self.dir_supplier()
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        if out_dir != self._current_dir:
+            self._current_dir = out_dir
+            # recompute starting index from existing files
+            existing = [
+                int(p.stem[6:]) for p in out_dir.glob("frame_*.png")
+                if p.stem.startswith("frame_") and p.stem[6:].isdigit()
+            ]
+            start_at = max(existing, default=-1) + 1
+            self._counter = count(start_at)
+            logging.debug("ProgressFilmer: switched to %s, next index = %d",
+                          out_dir, start_at)
+
         i = next(self._counter)
         if i % self.FRAME_EVERY_N:
             return
@@ -159,16 +187,16 @@ class ProgressFilmer:
 
         self.xmin = min(self.xmin, orig.min())
         self.xmax = max(self.xmax, orig.max())
-        self.ymin = min(self.ymin, adj.min())
-        self.ymax = max(self.ymax, adj.max())
+        self.ymin = min(self.ymin, orig.min())
+        self.ymax = max(self.ymax, orig.max())
         self.dmin = min(self.dmin, diff.min())
         self.dmax = max(self.dmax, diff.max())
 
-        # --- hand off to the plotting routine ----------------------
+        # --- invoke plotting routine -------------------------------
         analyze_uncertainty(
             annotations,
             show=False,
-            save_path=self.out_dir / f"frame_{i:05d}.png",
+            save_path=out_dir / f"frame_{i:05d}.png",
             hist_range=(self.xmin, self.xmax),
             scatter_xlim=(self.xmin, self.xmax),
             scatter_ylim=(self.ymin, self.ymax),

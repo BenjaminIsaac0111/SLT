@@ -79,15 +79,15 @@ class _ClusteringControllerProto(Protocol):
 
     Only two methods are required by all selector implementations.  By using a
     *protocol* instead of the concrete class, we keep the selectors independent
-    from PyQt and facilitate unit testing with light‑weight stubs.
+    of PyQt and facilitate unit testing with light‑weight stubs.
     """
 
     # pylint: disable=too-few-public-methods
 
-    def get_clusters(self) -> Dict[int, Sequence]:  # noqa: D401 – imperative mood
+    def get_clusters(self) -> Dict[int, Sequence]:
         """Return a mapping *cluster_id → sequence of Annotation objects*."""
 
-    def get_class_id_from_prediction(self, model_prediction) -> int:  # noqa: D401
+    def get_class_id_from_prediction(self, model_prediction) -> int:
         """Map a raw model prediction to the corresponding *class_id*."""
 
 

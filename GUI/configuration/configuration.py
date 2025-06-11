@@ -21,7 +21,7 @@ CLASS_COMPONENTS = {
     8: 'Muscle'
 }
 
-LATEST_SCHEMA_VERSION = 3
+LATEST_SCHEMA_VERSION = 4
 # ------------------------------------------------------------------ project
 PROJECT_EXT = ".slt"  # default save‑file extension
 MIME_FILTER = f"SLT Project (*{PROJECT_EXT})"

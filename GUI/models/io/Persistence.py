@@ -63,15 +63,14 @@ class ProjectState(BaseModel):
     clusters: Dict[str, List[AnnotationJSON]]
     cluster_order: List[int]
     selected_cluster_id: Optional[int]
+    annotation_method: str = "Local Uncertainty Maxima"
 
-    # ---------- derived helpers -------------------------------------------
     @validator("selected_cluster_id")
     def check_selected(cls, v, values):  # noqa: D401
         if v is not None and str(v) not in values["clusters"]:
             raise ValueError("selected_cluster_id not present in clusters")
         return v
 
-    # easier API for callers ------------------------------------------------
     def to_json(self, *, indent: int = 4) -> str:
         """
         Version‑agnostic JSON dump: works with pydantic v1 and v2.
@@ -124,12 +123,21 @@ def _v2_to_v3(raw: dict) -> dict:  # example migration
     return raw
 
 
-# registry maps *current* version → function that bumps to *next*
+def _v3_to_v4(raw: dict) -> dict:
+    """
+    Upgrade schema v3 → v4.
+
+    * add key "annotation_method" with default
+    """
+    raw.setdefault("annotation_method", "Local Uncertainty Maxima")
+    raw["schema_version"] = 4
+    return raw
+
+
 MIGRATIONS: Dict[int, MigrationFn] = {
     2: _v2_to_v3,
-    # 3: _v3_to_v4,  # add future migrations here
+    3: _v3_to_v4,
 }
-
 
 def migrate(raw: dict) -> dict:  # noqa: D401
     """Upgrade *raw* in‑place to LATEST_SCHEMA_VERSION.

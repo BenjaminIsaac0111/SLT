@@ -31,7 +31,7 @@ import numpy as np
 from PyQt5.QtCore import QObject
 
 from GUI.models.CacheManager import CacheManager
-from GUI.models.StatePersistance import ProjectState
+from GUI.models.io.Persistence import ProjectState
 
 
 # -----------------------------------------------------------------------------

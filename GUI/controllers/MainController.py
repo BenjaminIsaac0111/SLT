@@ -1,21 +1,16 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import json
 import logging
 from collections import OrderedDict
 from pathlib import Path
 from typing import Optional, Dict, List
 
-import numpy as np
 from PyQt5.QtCore import QObject, pyqtSlot, QTimer, QCoreApplication
-from PyQt5.QtWidgets import QFileDialog, QMessageBox
+from PyQt5.QtWidgets import QMessageBox
 
-from GUI.configuration.configuration import PROJECT_EXT, MIME_FILTER, LEGACY_FILTER
 from GUI.controllers.AnnotationClusteringController import AnnotationClusteringController
 from GUI.controllers.ImageProcessingController import ImageProcessingController
-from GUI.controllers.ProjectStateController import ProjectStateController
-from GUI.models import StatePersistance
 from GUI.models.Annotation import Annotation
 from GUI.models.ImageDataModel import BaseImageDataModel, create_image_data_model
 from GUI.models.PointAnnotationGenerator import (
@@ -23,100 +18,167 @@ from GUI.models.PointAnnotationGenerator import (
     EquidistantPointAnnotationGenerator,
     CenterPointAnnotationGenerator,
 )
-from GUI.models.StatePersistance import ProjectState
 from GUI.models.UncertaintyPropagator import propagate_for_annotations
-from GUI.models.domain.ClusterSelection import make_selector
-from GUI.unittests.debug_uncertainty_propargation import analyze_uncertainty, ProgressFilmer
+from GUI.models.export.Options import ExportOptions
+from GUI.models.export.Usecase import ExportAnnotationsUseCase
+from GUI.models.io.IOService import ProjectIOService
+from GUI.models.io.Persistence import ProjectState
+from GUI.models.navigation.ClusterSelection import make_selector
 from GUI.views.ClusteredCropsView import ClusteredCropsView
 from GUI.views.ClusteringProgressDialog import ClusteringProgressDialog
 
 
 class MainController(QObject):
-    """
-    Main orchestrator of the application, backend-agnostic data model
-    """
+    """Top‑level coordinator between GUI view and processing back‑end."""
+
     AUTOSAVE_IDLE_MS = 10_000
     _UNASSESSED_LABELS = {-1}
 
-    def __init__(
-            self,
-            model: Optional[BaseImageDataModel],
-            view: ClusteredCropsView
-    ):
+    def __init__(self, model: Optional[BaseImageDataModel], view: ClusteredCropsView):
         super().__init__()
-        self.feature_matrix = None
-        self.image_data_model: Optional[BaseImageDataModel] = model
+        self.image_data_model = model
         self.view = view
-        self._nav_history: list[int] = []
-        self._current_cluster_id = None
+
+        # ---------- core sub‑controllers ---------------------------------
         self.annotation_generator = LocalMaximaPointAnnotationGenerator()
-        self._progress_dlg: Optional[ClusteringProgressDialog] = None
+        self.clustering_controller = AnnotationClusteringController(model, self.annotation_generator)
+        self.image_processing_controller = ImageProcessingController(model)
+        self.io = ProjectIOService(data_anchor=Path(model.data_path) if model else None)
+        self._export_usecase = ExportAnnotationsUseCase()
 
-        # Controllers use BaseImageDataModel interface
-        self.clustering_controller = AnnotationClusteringController(
-            self.image_data_model, self.annotation_generator
-        )
         self.cluster_selector = make_selector("greedy", self.clustering_controller)
-        self.image_processing_controller = ImageProcessingController(self.image_data_model)
-        self.project_state_controller = ProjectStateController(self.image_data_model)
 
-        self._dirty = False  # ← any unsaved change?
+        # ---------- GUI state -------------------------------------------
+        self._progress_dlg: Optional[ClusteringProgressDialog] = None
+        self._nav_history: list[int] = []
+        self._current_cluster_id: Optional[int] = None
+        self._current_ann_method = "Local Uncertainty Maxima"
+
+        # ---------- dirty‑flag & idle‑flush -----------------------------
+        self._dirty = False
         self._idle_timer = QTimer(singleShot=True)
         self._idle_timer.timeout.connect(self._autosave_if_dirty)
 
-        self._filmer = ProgressFilmer(
-            self.project_state_controller.get_frames_dir
-        )
-
-        self.connect_signals()
+        self._connect_signals()
         QCoreApplication.instance().aboutToQuit.connect(self.cleanup)
-        logging.info("MainController initialized.")
+        logging.info("MainController initialised.")
 
-    def set_model(self, model: BaseImageDataModel):
-        """
-        Attach new data model (HDF5 or SQLite) and start autosave.
-        """
-        if self.image_data_model is model:
-            return
-        self.image_data_model = model
-        self.clustering_controller.model = model
-        self.image_processing_controller.model = model
-        self.project_state_controller.model = model
+    # ==================================================================
+    #  Signal wiring
+    # ==================================================================
+    def _connect_signals(self):
+        # -------- view → controller -----------------------------------
+        v = self.view
+        v.request_clustering.connect(self._begin_generate_annotations)
+        v.sample_cluster.connect(self.on_select_cluster)
+        v.annotation_method_changed.connect(self.on_label_generator_method_changed)
+        v.bulk_label_changed.connect(self.on_bulk_label_changed)
+        v.crop_label_changed.connect(self.on_crop_label_changed)
+        v.navigation_widget.next_recommended_cluster_requested.connect(self.on_next_cluster)
+        v.backtrack_requested.connect(self.on_backtrack_requested)
 
-        logging.info("Data model set: %s", model.data_path)
+        # these now come from AppMenuBar (connected in app_entry)
+        v.save_project_requested.connect(self.save_project)  # quick save
+        v.save_project_as_requested.connect(self.save_project_as)  # path:str
+        v.load_project_state_requested.connect(self.load_project)  # path:str
 
-    def connect_signals(self):
-        # --------------------------- View → Controller ------------------
-        self.view.request_clustering.connect(self._begin_generate_annotations)
-        self.view.sample_cluster.connect(self.on_select_cluster)
-        self.view.annotation_method_changed.connect(self.on_label_generator_method_changed)
-        self.view.bulk_label_changed.connect(self.on_bulk_label_changed)
-        self.view.crop_label_changed.connect(self.on_crop_label_changed)
-        self.view.save_project_state_requested.connect(self.save_project)
-        self.view.export_annotations_requested.connect(self.export_annotations)
-        self.view.load_project_state_requested.connect(self.load_project)
-        self.view.save_project_requested.connect(self.save_project)
-        self.view.save_project_as_requested.connect(self.save_project_as)
-        self.view.navigation_widget.next_recommended_cluster_requested.connect(self.on_next_recommended_cluster)
-        self.view.backtrack_requested.connect(self.on_backtrack_requested)
-
-        # ---------------- ClusteringController → MainController ---------
-        # No UI progress bars in the side-panel any more – handled by dialog
+        # -------- clustering → controller -----------------------------
         self.clustering_controller.clusters_ready.connect(self.on_clusters_ready)
-        self.clustering_controller.labeling_statistics_updated.connect(self.view.update_labeling_statistics)
+        self.clustering_controller.labeling_statistics_updated.connect(v.update_labeling_statistics)
 
-        # ---------------- ImageProcessingController → View --------------
-        self.image_processing_controller.crops_ready.connect(self.view.display_sampled_crops)
-        self.image_processing_controller.progress_updated.connect(self.view.update_crop_loading_progress_bar)
-        self.image_processing_controller.crop_loading_started.connect(self.view.show_crop_loading_progress_bar)
-        self.image_processing_controller.crop_loading_finished.connect(self.view.hide_crop_loading_progress_bar)
+        # -------- image‑processing → view -----------------------------
+        ip = self.image_processing_controller
+        ip.crops_ready.connect(v.display_sampled_crops)
+        ip.progress_updated.connect(v.update_crop_loading_progress_bar)
+        ip.crop_loading_started.connect(v.show_crop_loading_progress_bar)
+        ip.crop_loading_finished.connect(v.hide_crop_loading_progress_bar)
 
-        # ---------------- ProjectStateController callbacks --------------
-        self.project_state_controller.autosave_finished.connect(self.on_autosave_finished)
-        self.project_state_controller.project_loaded.connect(self.on_project_loaded)
-        self.project_state_controller.project_saved.connect(self.on_project_saved)
-        self.project_state_controller.save_failed.connect(self.on_save_failed)
-        self.project_state_controller.load_failed.connect(self.on_load_failed)
+        # -------- I/O service callbacks -------------------------------
+        self.io.project_saved.connect(self._on_project_saved)
+        self.io.project_loaded.connect(self._on_project_loaded)
+        self.io.save_failed.connect(self._on_save_failed)
+        self.io.load_failed.connect(self._on_load_failed)
+        self.io.autosave_finished.connect(self.on_autosave_finished)
+
+    # ==================================================================
+    #  Persistence API (slots expected by AppMenuBar)
+    # ==================================================================
+    @pyqtSlot()
+    def save_project(self):
+        if self.io.current_path is None:
+            # View should open Save‑As dialog instead; ignore quietly.
+            return
+        self.io.save_async(self.get_current_state(), self.io.current_path)
+
+    @pyqtSlot(str)
+    def save_project_as(self, path: str):
+        self.io.set_current_path(path)
+        self.io.save_async(self.get_current_state(), path)
+
+    @pyqtSlot(str)
+    def load_project(self, path: str):
+        self.io.load_async(path)
+
+    # restore from autosave ---------------------------------------------------
+    def restore_autosave(self):
+        latest = self.io.latest_autosave()
+        if latest:
+            self.io.load_async(str(latest))
+        else:
+            QMessageBox.information(self.view, "No Autosave Found", "There are no autosave files to restore.")
+
+    # ==================================================================
+    #  Autosave idle‑timer
+    # ==================================================================
+    def _autosave_if_dirty(self):
+        if not self._dirty:
+            return
+        self._dirty = False
+        self.io.autosave_async(self.get_current_state())
+
+    # slot for io.autosave_finished
+    @pyqtSlot(bool)
+    def on_autosave_finished(self, success: bool):
+        logging.info("Autosave %s", "succeeded" if success else "failed")
+
+    # ==================================================================
+    #  Callbacks for io.project_{loaded|saved|failed}
+    # ==================================================================
+    def _on_project_saved(self, path: str):
+        QMessageBox.information(self.view, "Project Saved", f"Project written to {path}")
+
+    def _on_save_failed(self, err: str):
+        QMessageBox.critical(self.view, "Save Error", err)
+
+    def _on_load_failed(self, err: str):
+        QMessageBox.critical(self.view, "Load Error", err)
+
+    # ==================================================================
+    #  Successful load handler (same logic as before, just renamed)
+    # ==================================================================
+    def _on_project_loaded(self, state: ProjectState):
+        self._initialize_model_if_needed(state)
+        clusters = self._clusters_from_state(state)
+        self.clustering_controller.clusters = clusters
+        self.image_processing_controller.set_clusters(clusters)
+        self.on_label_generator_method_changed(state.annotation_method)
+
+        mb = self.view.window().menuBar()
+        if hasattr(mb, "set_checked_annotation_method"):
+            mb.set_checked_annotation_method(state.annotation_method)
+
+        cluster_info = self.clustering_controller.generate_cluster_info()
+        sel = state.selected_cluster_id
+        self.view.populate_cluster_selection(cluster_info, selected_cluster_id=sel)
+
+        if sel and sel in clusters:
+            self.on_select_cluster(sel, force=True)
+        elif clusters:
+            self.on_select_cluster(next(iter(clusters)), force=True)
+
+        self.view.hide_progress_bar()
+        stats = self.clustering_controller.compute_labeling_statistics()
+        self.view.update_labeling_statistics(stats)
 
     # -------------------------------------------------------------------------
     #                           CLUSTERING HANDLERS
@@ -148,6 +210,8 @@ class MainController(QObject):
         self._seq_cursor = None
         self.clustering_controller.annotation_generator = self.annotation_generator
         logging.info("Annotation generator updated to method: %s", method)
+
+        self._current_ann_method = method
 
         self._dirty = True
         self._idle_timer.start(self.AUTOSAVE_IDLE_MS)
@@ -212,6 +276,7 @@ class MainController(QObject):
         :param cluster_id: The ID of the cluster to sample.
 
         Args:
+            force:
         cluster_id: The ID of the cluster to fetch.
             force: Force fetch.
         """
@@ -321,7 +386,7 @@ class MainController(QObject):
         self._idle_timer.start(self.AUTOSAVE_IDLE_MS)
 
     @pyqtSlot()
-    def on_next_recommended_cluster(self):
+    def on_next_cluster(self):
         if not self._visible_crops_complete():
             QMessageBox.information(
                 self.view,
@@ -344,7 +409,6 @@ class MainController(QObject):
             self.on_select_cluster(next_cluster_id)
         else:
             logging.info("No next recommended cluster found.")
-        self._filmer.maybe_record_frame(self._get_all_annotations())
 
     @pyqtSlot()
     def on_backtrack_requested(self):
@@ -367,39 +431,9 @@ class MainController(QObject):
         clusters = self.clustering_controller.get_clusters()
         return [anno for cluster in clusters.values() for anno in cluster]  # Flatten
 
-    def _update_annotation_uncertainties(self, updated_uncertainties: np.ndarray):
-        """
-        Updates each annotation's adjusted_uncertainty attribute using updated_uncertainties.
-        The annotations are retrieved from the current clusters.
-        """
-        all_annos = self._get_all_annotations()
-        for anno, new_u in zip(all_annos, updated_uncertainties):
-            anno.adjusted_uncertainty = new_u
-
-    def set_feature_matrix(self, feature_matrix: np.ndarray):
-        """
-        Sets the feature matrix used for uncertainty propagation.
-        """
-        self.feature_matrix = feature_matrix
-        logging.info("Feature matrix has been updated in the Main Controller.")
-
     def propagate_labeling_changes(self) -> None:
         """Re-compute adjusted_uncertainty for every annotation."""
         propagate_for_annotations(self._get_all_annotations())
-
-    def debug_analyze_uncertainty_propagation(
-            self,
-            *,
-            show_plot: bool = True,
-            save_plot_to: Optional[str] = None,
-    ) -> None:
-        """Wrapper that plugs the detached utility into MainController."""
-        stats_out = analyze_uncertainty(
-            annotations=self._get_all_annotations(),
-            show=show_plot,
-            save_path=Path(save_plot_to) if save_plot_to else None,
-        )
-        logging.info("Uncertainty debug summary: %s", stats_out.to_log_string())
 
     # ---------- soft-lock helpers ------------------------------------
 
@@ -416,17 +450,17 @@ class MainController(QObject):
     # -------------------------------------------------------------------------
     #                           PROJECT STATE
     # -------------------------------------------------------------------------
-    def get_current_state(self) -> StatePersistance.ProjectState:
+    def get_current_state(self) -> ProjectState:
         """Return a fully‑validated ProjectState instance."""
         if self.image_data_model is None:
-            # an empty placeholder—won't be saved but keeps type consistent
-            return StatePersistance.ProjectState(
-                schema_version=2,
+            return ProjectState(
+                schema_version=4,
                 data_backend="",
                 data_path="",
                 clusters={},
                 cluster_order=[],
                 selected_cluster_id=None,
+                annotation_method=""
             )
 
         backend = getattr(
@@ -436,8 +470,8 @@ class MainController(QObject):
         )
 
         clusters = self.clustering_controller.get_clusters()
-        state = StatePersistance.ProjectState(
-            schema_version=2,
+        state = ProjectState(
+            schema_version=4,
             data_backend=backend,
             data_path=self.image_data_model.data_path,
             uncertainty="bald",
@@ -447,112 +481,13 @@ class MainController(QObject):
             },
             cluster_order=list(clusters),
             selected_cluster_id=self.view.get_selected_cluster_id(),
+            annotation_method=self._current_ann_method
         )
         return state
-
-    def autosave_project_state(self):
-        """
-        Initiates an autosave operation.
-        """
-        if self.image_data_model is None:
-            logging.debug("Autosave skipped: model is not initialized.")
-            return
-
-        logging.debug("Autosave timer triggered.")
-        project_state = self.get_current_state()
-        self.project_state_controller.autosave_project_state(project_state)
-
-    # -------------------------------------------------------------------------
-    #                               SAVING / LOADING
-    # -------------------------------------------------------------------------
-
-    @pyqtSlot()
-    def save_project(self):
-        path = self.project_state_controller.get_current_save_path()
-        if not path:
-            return self.save_project_as()
-        self.project_state_controller.save_project_state(self.get_current_state(), path)
-
-    # -------------------------------------------------------------------
-    @pyqtSlot()
-    def save_project_as(self) -> None:
-        """
-        Prompt for a filename and write the current project state.
-        Defaults to the modern *.slt* container (Zstandard‑compressed JSON).
-        """
-        file_path, chosen_filter = QFileDialog.getSaveFileName(
-            self.view,
-            "Save Project As",
-            "",
-            f"{MIME_FILTER};;{LEGACY_FILTER};;All Files (*)",
-        )
-        if not file_path:  # Cancel pressed
-            return
-
-        # ----------------------- normalise suffix -----------------------
-        suffix = Path(file_path).suffix.lower()
-
-        # user typed no suffix or an unknown one
-        if suffix not in {PROJECT_EXT, ".json.gz"}:
-            file_path += PROJECT_EXT
-        elif suffix == "" and chosen_filter.startswith("Legacy"):
-            file_path += ".json.gz"
-
-        # -------------------------- save --------------------------------
-        self.project_state_controller.set_current_save_path(file_path)
-        self.project_state_controller.save_project_state(
-            self.get_current_state(),
-            file_path,  # controller decides codec via suffix
-        )
-
-    @pyqtSlot()
-    def load_project(self) -> None:
-        """
-        Ask the user for a project file (.slt or legacy .json.gz) and hand it
-        to ProjectStateController for asynchronous loading.
-        """
-        file_path, _ = QFileDialog.getOpenFileName(
-            self.view,
-            "Load Project",
-            "",
-            f"{MIME_FILTER};;{LEGACY_FILTER};;All Files (*)",
-        )
-        if not file_path:  # user pressed Cancel
-            return
-
-        # remember this path so subsequent Ctrl‑S writes to the same file
-        self.project_state_controller.set_current_save_path(file_path)
-
-        # hand off to controller; on success it emits project_loaded, which
-        # we already connect to on_project_loaded
-        self.project_state_controller.load_project_state(file_path)
-
-    @pyqtSlot()
-    def restore_autosave(self):
-        """
-        Restores the project state from the latest autosave file.
-        """
-        latest_autosave = self.project_state_controller.get_latest_autosave_file()
-        if latest_autosave:
-            self.project_state_controller.load_project_state(latest_autosave)
-        else:
-            QMessageBox.information(self.view, "No Autosave Found", "There are no autosave files to restore.")
 
     # -------------------------------------------------------------------------
     #                       SAVE / LOAD SLOTS AND CALLBACKS
     # -------------------------------------------------------------------------
-
-    @pyqtSlot(bool)
-    def on_autosave_finished(self, success: bool):
-        """
-        Handles the completion of the autosave operation.
-
-        :param success: True if autosave was successful, False otherwise.
-        """
-        if success:
-            logging.info("Autosave completed successfully.")
-        else:
-            logging.error("Autosave failed.")
 
     @pyqtSlot(ProjectState)
     def on_project_loaded(self, project_state: ProjectState):
@@ -582,76 +517,33 @@ class MainController(QObject):
         stats = self.clustering_controller.compute_labeling_statistics()
         self.view.update_labeling_statistics(stats)
 
-    @pyqtSlot(str)
-    def on_project_saved(self, file_path: str):
-        """
-        Handles successful saving of the project.
-
-        :param file_path: The file path where the project was saved.
-        """
-        QMessageBox.information(self.view, "Project Saved", f"Project state saved to {file_path}")
-
-    @pyqtSlot(str)
-    def on_save_failed(self, error_message: str):
-        """
-        Handles failure during saving the project.
-
-        :param error_message: The error message describing the failure.
-        """
-        QMessageBox.critical(self.view, "Error", f"Failed to save project state: {error_message}")
-
-    @pyqtSlot(str)
-    def on_load_failed(self, error_message: str):
-        """
-        Handles failure during loading the project.
-
-        :param error_message: The error message describing the failure.
-        """
-        QMessageBox.critical(self.view, "Error", f"Failed to load project state: {error_message}")
-
     # -------------------------------------------------------------------------
     #                               EXPORT
     # -------------------------------------------------------------------------
 
-    def export_annotations(self):
-        """
-        Exports the labeled annotations in a final format for downstream use.
-        Offers an option to include or exclude artifacts in the export.
-        """
+    @pyqtSlot(str)
+    def export_annotations(self, export_file: str):
         clusters = self.clustering_controller.get_clusters()
-        all_annotations = []
-        annotations_without_class = False
-        artifacts_present = False
+        flat = [(cid, a) for cid, annos in clusters.items() for a in annos]
 
-        # Collect all annotations
-        for cluster_id, annotations in clusters.items():
-            for anno in annotations:
-                if anno.class_id in [None, -1, -2]:
-                    annotations_without_class = True
-                elif anno.class_id == -3:
-                    artifacts_present = True
-                all_annotations.append((cluster_id, anno))
-
-        # Check with user if unlabeled/unsure exist
-        if annotations_without_class and not self._confirm_missing_labels():
-            logging.info("User canceled exporting due to missing class labels.")
+        opts = self.view.ask_export_options(flat)  # returns None on cancel
+        if opts is None:
             return
 
-        # Check with user if artifacts exist
-        include_artifacts = self._confirm_include_artifacts() if artifacts_present else True
-
-        # Build grouped annotations based on user choices
-        grouped_annotations = self._build_grouped_annotations(all_annotations, include_artifacts)
-        if not grouped_annotations:
-            QMessageBox.warning(self.view, "No Annotations", "No annotations to export given your choices.")
-            return
-
-        # Prompt for export file
-        export_file = self._prompt_export_file()
-        if export_file:
-            self._write_annotations_to_file(export_file, grouped_annotations)
+        try:
+            count = self._export_usecase(
+                flat,
+                ExportOptions(include_artifacts=opts.include_artifacts),
+                Path(export_file),
+            )
+        except ValueError as e:
+            QMessageBox.warning(self.view, "Export Aborted", str(e))
         else:
-            logging.debug("Export annotations action was canceled.")
+            QMessageBox.information(
+                self.view,
+                "Export Successful",
+                f"Exported {count} annotations to\n{export_file}",
+            )
 
     # -------------------------------------------------------------------------
     #                               CLEANUP
@@ -664,23 +556,13 @@ class MainController(QObject):
         logging.info("Cleaning up before application exit.")
         self.image_processing_controller.cleanup()
         self.clustering_controller.cleanup()
-        self.project_state_controller.cleanup()
 
     # -------------------------------------------------------------------------
     #                       PRIVATE / HELPER METHODS
     # -------------------------------------------------------------------------
 
-    def _assign_model_to_controllers(self, model: BaseImageDataModel):
-        """
-        Helper method to reassign the model to all sub-controllers.
-        """
-        self.image_data_model = model
-        self.clustering_controller.model = model
-        self.image_processing_controller.model = model
-        self.project_state_controller.model = model
-
     def _initialize_model_if_needed(self, state: ProjectState):
-        data_path = state.data_path  # « was  state["data_path"]
+        data_path = state.data_path
         if self.image_data_model and self.image_data_model.data_path == data_path:
             return
         self.set_model(create_image_data_model(state))
@@ -718,134 +600,17 @@ class MainController(QObject):
                 ordered_clusters_data[cid] = clusters_data[cid]
         return ordered_clusters_data
 
-    def _prompt_save_file(self) -> str:
-        """
-        Prompts the user to choose a location to save a project file.
-        """
-        options = QFileDialog.Options()
-        file_path, _ = QFileDialog.getSaveFileName(
-            self.view,
-            "Save Project As",
-            "",
-            "Compressed JSON Files (*.json.gz);;All Files (*)",
-            options=options
-        )
-        if file_path and not file_path.endswith('.json.gz'):
-            file_path += '.json.gz'
-        return file_path
-
-    def _prompt_load_file(self) -> str:
-        """
-        Prompts the user to open a project file.
-        """
-        options = QFileDialog.Options()
-        project_file, _ = QFileDialog.getOpenFileName(
-            self.view,
-            "Open Project",
-            "",
-            "Compressed JSON Files (*.json.gz);;JSON Files (*.json);;All Files (*)",
-            options=options
-        )
-        return project_file
-
-    def _prompt_export_file(self) -> str:
-        """
-        Prompts the user to select a file location for exporting annotations.
-        """
-        options = QFileDialog.Options()
-        export_file, _ = QFileDialog.getSaveFileName(
-            self.view,
-            "Export Annotations",
-            "",
-            "JSON Files (*.json);;All Files (*)",
-            options=options
-        )
-        return export_file
-
-    @staticmethod
-    def _confirm_missing_labels() -> bool:
-        """
-        Asks the user if they want to proceed if some annotations are unlabeled.
-        """
-        reply = QMessageBox.question(
-            None,
-            "Annotations Without Class Labels",
-            ("Some annotations do not have class labels assigned. "
-             "Do you want to proceed with exporting?"),
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
-        )
-        return reply == QMessageBox.Yes
-
-    @staticmethod
-    def _confirm_include_artifacts() -> bool:
-        """
-        Asks the user if they want to include artifacts in the export.
-        """
-        reply = QMessageBox.question(
-            None,
-            "Include Artifacts?",
-            "Artifacts have been detected. Do you want to include them in the export?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.Yes
-        )
-        return (reply == QMessageBox.Yes)
-
-    @staticmethod
-    def _build_grouped_annotations(
-            all_annotations: List[tuple],
-            include_artifacts: bool
-    ) -> Dict[str, List[dict]]:
-        """
-        Builds the grouped annotations dictionary based on user choices.
-
-        :param all_annotations: List of (cluster_id, Annotation) pairs.
-        :param include_artifacts: Whether to include artifacts (class_id == -3).
-        :return: A dictionary of filename -> list of annotation dicts.
-        """
-        grouped = {}
-        for cluster_id, anno in all_annotations:
-            # Skip unlabeled/unsure
-            if anno.class_id is None or anno.class_id in [-1, -2]:
-                continue
-
-            # Skip artifacts if not included
-            if anno.class_id == -3 and not include_artifacts:
-                continue
-
-            annotation_data = {
-                'coord': [int(c) for c in anno.coord],
-                'class_id': int(anno.class_id),
-                'cluster_id': int(cluster_id)
-            }
-            grouped.setdefault(anno.filename, []).append(annotation_data)
-        return grouped
-
-    @staticmethod
-    def _write_annotations_to_file(export_file: str, grouped_annotations: dict):
-        """
-        Writes the grouped annotations to the specified file in JSON format.
-        """
-        try:
-            with open(export_file, 'w') as f:
-                json.dump(grouped_annotations, f, indent=4)
-            logging.info(f"Annotations exported to {export_file}")
-            QMessageBox.information(None, "Export Successful", f"Annotations exported to {export_file}")
-        except Exception as e:
-            logging.error(f"Error exporting annotations: {e}")
-            QMessageBox.critical(None, "Error", f"Failed to export annotations: {e}")
-
-    # ---------------------------------------------------------------------
-    #  AUTOSAVE — called by single‑shot timer when user is idle
-    # ---------------------------------------------------------------------
-    def _autosave_if_dirty(self):
-        """Write a project snapshot if anything changed since last save."""
-        if not self._dirty:
-            return
-        self._dirty = False
-        project_state = self.get_current_state()
-        self.project_state_controller.autosave_project_state(project_state)
-
     @pyqtSlot(str)
     def on_navigation_policy_changed(self, name: str):
         self.cluster_selector = make_selector(name, self.clustering_controller)
+
+    def set_model(self, model: BaseImageDataModel):
+        """Attach a new data model (HDF5 or SQLite) to every sub‑controller."""
+        if self.image_data_model is model:
+            return
+        self.image_data_model = model
+        self.clustering_controller.model = model
+        self.image_processing_controller.model = model
+        # update IO service so frames directory fingerprint is stable
+        self.io._tag = model.data_path  # _tag is only used for temp dir names
+        logging.info("Data model set → %s", model.data_path)
