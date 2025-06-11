@@ -1,6 +1,6 @@
 import os
 
-from Model.custom_layers import AttentionBlock
+from attention_unet.models.custom_layers import AttentionBlock
 import pandas as pd
 import matplotlib.pyplot as plt
 

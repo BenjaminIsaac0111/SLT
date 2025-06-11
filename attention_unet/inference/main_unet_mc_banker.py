@@ -15,8 +15,8 @@ from tensorflow.keras import mixed_precision
 from tensorflow.keras.models import load_model
 from tqdm import tqdm
 
-from Dataloader.dataloader import get_dataset_v2
-from Model.custom_layers import (
+from attention_unet.dataloader.dataloader import get_dataset_v2
+from attention_unet.models.custom_layers import (
     DropoutAttentionBlock,
     GroupNormalization,
     SpatialConcreteDropout,

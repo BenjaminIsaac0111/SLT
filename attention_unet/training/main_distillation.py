@@ -11,12 +11,12 @@ from tensorflow.keras.utils import Progbar
 from tensorflow.keras.regularizers import l2
 from tensorflow_addons.layers import GroupNormalization
 
-from Losses.losses import focal_loss, ce_loss, focal_distillation_loss, kl_distillation_loss
-from Processing.transforms import Transforms
-from Model.unets import build_unet
-from Model.custom_layers import PixelShuffle, AttentionBlock
-from cfg.config import load_config
-from Dataloader.dataloader import get_dataset
+from attention_unet.losses.losses import focal_loss, ce_loss, focal_distillation_loss, kl_distillation_loss
+from attention_unet.processing.transforms import Transforms
+from attention_unet.models.unets import build_unet
+from attention_unet.models.custom_layers import PixelShuffle, AttentionBlock
+from attention_unet.config.config import load_config
+from attention_unet.dataloader.dataloader import get_dataset
 
 gpus = tf.config.experimental.list_physical_devices('GPU')
 for gpu in gpus:
@@ -74,7 +74,7 @@ if __name__ == '__main__':
     parser.add_argument(
         "-c", "--config",
         type=Path,
-        help=r'Config file (YAML), see example in cfg/example_config.yaml.',
+        help=r'Config file (YAML), see example in attention_unet/config/example_config.yaml.',
         default=Path('configurations/configuration.yaml'))
     args = parser.parse_args()
     cfg = load_config(args.config)

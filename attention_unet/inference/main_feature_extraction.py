@@ -6,7 +6,7 @@ import numpy as np
 import h5py
 from tqdm import tqdm
 
-from Model.custom_layers import AttentionBlock, PixelShuffle
+from attention_unet.models.custom_layers import AttentionBlock, PixelShuffle
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Set before tf import else tf vomits logging INFO...
 
@@ -14,8 +14,8 @@ import tensorflow as tf
 from tensorflow.keras.models import load_model, Model
 from tensorflow_addons.layers import GroupNormalization
 
-from cfg.config import load_config
-from Dataloader.dataloader import get_dataset
+from attention_unet.config.config import load_config
+from attention_unet.dataloader.dataloader import get_dataset
 import tensorflow as tf
 
 if __name__ == '__main__':
