@@ -65,6 +65,7 @@ class AppMenuBar(QMenuBar):
     request_export_annotations = pyqtSignal(str)
     request_generate_annos = pyqtSignal()
     request_set_ann_method = pyqtSignal(str)
+    request_set_nav_policy = pyqtSignal(str)
 
     # ----------------------------------------------------------------
     def __init__(self, parent=None):
@@ -109,6 +110,23 @@ class AppMenuBar(QMenuBar):
             method_menu.addAction(act)
         grp.actions()[0].setChecked(True)
         grp.triggered.connect(lambda a: self.request_set_ann_method.emit(a.text()))
+
+        # -------- Navigation Policy sub-menu -------------------------
+        nav_menu = self.addMenu("Navigation Policy")
+        nav_grp = QActionGroup(self)
+        for label, name in [
+            ("Greedy", "greedy"),
+            ("Sequential", "sequential"),
+            ("Random", "random"),
+        ]:
+            act = QAction(label, self, checkable=True)
+            act.setData(name)
+            nav_grp.addAction(act)
+            nav_menu.addAction(act)
+        nav_grp.actions()[0].setChecked(True)
+        nav_grp.triggered.connect(
+            lambda a: self.request_set_nav_policy.emit(a.data())
+        )
 
     def set_checked_annotation_method(self, label: str) -> None:
         """
@@ -290,6 +308,7 @@ def _main_window(view, controller) -> QMainWindow:  # noqa: D401 – imperative
     mb.request_save_project_as.connect(controller.save_project_as)  # expects slot(path)
     mb.request_load_project.connect(controller.load_project)  # slot(path)
     mb.request_export_annotations.connect(controller.export_annotations)
+    mb.request_set_nav_policy.connect(controller.on_navigation_policy_changed)
 
 
     win.setWindowTitle("Smart Labelling Tool")
