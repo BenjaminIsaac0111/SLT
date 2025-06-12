@@ -102,3 +102,94 @@ def test_context_menu_event_triggers_actions(qapp, monkeypatch):
     assert ann.class_id == -3  # last triggered action
     assert item._view() is not None
 
+
+class DummyPainter:
+    """Minimal QPainter stub recording draw operations."""
+
+    def __init__(self):
+        self.calls = []
+
+    def setRenderHint(self, *args):
+        self.calls.append(("setRenderHint", args))
+
+    def save(self):
+        self.calls.append(("save",))
+
+    def scale(self, sx, sy):
+        self.calls.append(("scale", sx, sy))
+
+    def drawPixmap(self, x, y, pixmap):
+        self.calls.append(("drawPixmap", x, y, pixmap.size()))
+
+    def restore(self):
+        self.calls.append(("restore",))
+
+    def setPen(self, pen):
+        if hasattr(pen, "color"):
+            color = pen.color().name()
+            width = pen.width()
+        else:
+            color = int(pen)
+            width = None
+        self.calls.append(("setPen", color, width))
+
+    def drawEllipse(self, *args):
+        self.calls.append(("drawEllipse", args))
+
+    def drawLine(self, *args):
+        self.calls.append(("drawLine", args))
+
+    def drawRect(self, rect):
+        self.calls.append(("drawRect", rect.width(), rect.height()))
+
+    def setFont(self, font):
+        self.calls.append(("setFont", font.family(), font.pointSize()))
+
+    def drawText(self, *args):
+        text = args[-1]
+        self.calls.append(("drawText", text))
+
+
+def test_paint_draws_overlays_by_default(qapp):
+    item, _, scene, _ = make_item(qapp)
+    painter = DummyPainter()
+    item.paint(painter, None, None)
+    assert any(c[0] == "drawEllipse" for c in painter.calls)
+    assert sum(1 for c in painter.calls if c[0] == "drawLine") == 4
+
+
+def test_paint_skips_overlays_when_hidden(qapp):
+    item, _, scene, _ = make_item(qapp)
+    scene.overlays_visible = False
+    painter = DummyPainter()
+    item.paint(painter, None, None)
+    assert not any(c[0] == "drawEllipse" for c in painter.calls)
+    assert not any(c[0] == "drawLine" for c in painter.calls)
+
+
+def test_paint_border_width_selected(qapp):
+    item, _, _, _ = make_item(qapp)
+    item.selected = True
+    painter = DummyPainter()
+    item.paint(painter, None, None)
+    widths = [c[2] for c in painter.calls if c[0] == "setPen"]
+    assert 4 in widths
+
+
+def test_paint_prediction_glyphs(qapp):
+    item, _, _, _ = make_item(qapp)
+    cid = next(iter(CLASS_COMPONENTS.keys()))
+    item.set_crop_class(cid)
+    item.model_prediction = CLASS_COMPONENTS[cid]
+    painter = DummyPainter()
+    item.paint(painter, None, None)
+    texts = [c[1] for c in painter.calls if c[0] == "drawText"]
+    assert "✓" in texts
+
+    painter = DummyPainter()
+    other_cid = (cid + 1) % len(CLASS_COMPONENTS)
+    item.model_prediction = CLASS_COMPONENTS[other_cid]
+    item.paint(painter, None, None)
+    texts = [c[1] for c in painter.calls if c[0] == "drawText"]
+    assert "✗" in texts
+
