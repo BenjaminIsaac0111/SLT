@@ -42,3 +42,20 @@ def test_create_grouped_folds(tmp_path: Path):
         assert len(test_df) == 2
         # training set should contain remaining four samples
         assert len(train_df) == 4
+
+
+def test_create_folds_ignore_non_images(tmp_path: Path) -> None:
+    """Running generation twice in the same directory should succeed."""
+    data_dir = tmp_path
+    # first run will place outputs beside images
+    for name in [
+        "1_a_tumour.png",
+        "1_b_stroma.png",
+        "2_a_tumour.png",
+        "2_b_stroma.png",
+    ]:
+        (data_dir / name).write_text("x")
+
+    create_grouped_folds(data_dir, data_dir, n_splits=2)
+    # second run should skip the generated CSV/TXT files
+    create_grouped_folds(data_dir, data_dir, n_splits=2)

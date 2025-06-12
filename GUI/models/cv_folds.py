@@ -40,7 +40,7 @@ def create_grouped_folds(
     n_splits: int = 3,
     sample_size: Optional[int] = None,
 ) -> None:
-    """Generate grouped stratified folds from files in *data_dir*.
+    """Generate grouped stratified folds from image files in *data_dir*.
 
     Parameters
     ----------
@@ -52,12 +52,20 @@ def create_grouped_folds(
         Number of folds to generate.
     sample_size:
         Optional size to subsample each fold without replacement.
+        Only files with common image extensions (PNG, JPG, TIFF, BMP) are
+        considered; any other files are ignored.
     """
     data_dir = Path(data_dir)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    files = [f for f in data_dir.iterdir() if f.is_file()]
+    # Only consider common image types to avoid parsing any output files
+    image_exts = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"}
+    files = [
+        f
+        for f in data_dir.iterdir()
+        if f.is_file() and f.suffix.lower() in image_exts
+    ]
     if not files:
         raise ValueError(f"No files found in {data_dir}")
 
