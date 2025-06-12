@@ -603,6 +603,7 @@ class MainController(QObject):
     @pyqtSlot(str)
     def on_navigation_policy_changed(self, name: str):
         self.cluster_selector = make_selector(name, self.clustering_controller)
+        self.view.navigation_widget.set_navigation_policy(name)
 
     def set_model(self, model: BaseImageDataModel):
         """Attach a new data model (HDF5 or SQLite) to every sub‑controller."""

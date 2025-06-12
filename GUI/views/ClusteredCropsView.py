@@ -137,8 +137,20 @@ class NavigationControlsWidget(QGroupBox):
 
         self.setLayout(layout)
 
+        # Default navigation policy is greedy
+        self.set_navigation_policy("greedy")
+
     def on_next_recommended(self):
         self.next_recommended_cluster_requested.emit()
+
+    def set_navigation_policy(self, policy: str) -> None:
+        """Update the button text to reflect the selected navigation policy."""
+        mapping = {
+            "greedy": "Go to next recommended (⏎)",
+            "sequential": "Go to next sequential (⏎)",
+            "random": "Go to next random (⏎)",
+        }
+        self.next_recommended_button.setText(mapping.get(policy, "Go to next (⏎)"))
 
     def on_cluster_selected(self, index: int):
         cluster_id = self.cluster_combo.itemData(index)
