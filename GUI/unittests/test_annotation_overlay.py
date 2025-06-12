@@ -4,7 +4,7 @@ from GUI.models.Annotation import Annotation
 from GUI.models.ImageProcessor import ImageProcessor
 
 
-def test_create_annotation_overlay_draws_color():
+def test_create_annotation_overlay_draws_crosshair():
     proc = ImageProcessor()
     img = np.zeros((20, 20, 3), dtype=np.uint8)
     ann = Annotation(
@@ -15,7 +15,11 @@ def test_create_annotation_overlay_draws_color():
         uncertainty=0.5,
         class_id=1,
     )
-    out = proc.create_annotation_overlay(img, [ann])
+    out = proc.create_annotation_overlay(img, [ann], radius=2)
     arr = np.array(out)
     expected = proc.class_color_map[1]
     assert tuple(arr[10, 10]) == expected
+    assert tuple(arr[10, 8]) == expected
+    assert tuple(arr[10, 12]) == expected
+    assert tuple(arr[8, 10]) == expected
+    assert tuple(arr[12, 10]) == expected

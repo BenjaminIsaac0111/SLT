@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import Dict, List, Tuple
+
+import numpy as np
 
 from PyQt5.QtCore import Qt, QThreadPool
 from PyQt5.QtGui import QPixmap
@@ -9,6 +11,7 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QSlider,
     QVBoxLayout,
 )
 
@@ -37,7 +40,7 @@ class AnnotationPreviewDialog(QDialog):
             self._by_image.setdefault(ann.image_index, []).append(ann)
         self._indices = sorted(self._by_image.keys())
         self._current_idx = 0
-        self._pixmap_cache: Dict[int, QPixmap] = {}
+        self._image_cache: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
 
         layout = QVBoxLayout(self)
         self.image_label = QLabel()
@@ -45,6 +48,12 @@ class AnnotationPreviewDialog(QDialog):
         layout.addWidget(self.image_label)
 
         layout.addLayout(self._create_legend())
+
+        self.opacity_slider = QSlider(Qt.Horizontal)
+        self.opacity_slider.setRange(0, 100)
+        self.opacity_slider.setValue(100)
+        self.opacity_slider.valueChanged.connect(self._update_opacity)
+        layout.addWidget(self.opacity_slider)
 
         btn_layout = QHBoxLayout()
         self.prev_btn = QPushButton("Previous")
@@ -80,8 +89,8 @@ class AnnotationPreviewDialog(QDialog):
             self.next_btn.setEnabled(False)
             return
         idx = self._indices[self._current_idx]
-        if idx in self._pixmap_cache:
-            self.image_label.setPixmap(self._pixmap_cache[idx])
+        if idx in self._image_cache:
+            self._display_cached(idx)
         else:
             anns = self._by_image[idx]
             worker = OverlayPreviewWorker(idx, anns, self.model, self.processor)
@@ -89,11 +98,27 @@ class AnnotationPreviewDialog(QDialog):
             self.threadpool.start(worker)
             self.image_label.setText("Loading…")
 
-    def _on_overlay_ready(self, image_index: int, arr):
-        pix = self.processor.numpy_to_qpixmap(arr)
-        self._pixmap_cache[image_index] = pix
+    def _on_overlay_ready(self, image_index: int, base: np.ndarray, overlay: np.ndarray):
+        self._image_cache[image_index] = (base, overlay)
         if self._indices[self._current_idx] == image_index:
-            self.image_label.setPixmap(pix)
+            self._display_cached(image_index)
+
+    def _display_cached(self, index: int) -> None:
+        base, overlay = self._image_cache[index]
+        pix = self._blend_images(base, overlay)
+        self.image_label.setPixmap(pix)
+
+    def _blend_images(self, base: np.ndarray, overlay: np.ndarray) -> QPixmap:
+        alpha = self.opacity_slider.value() / 100.0
+        arr = (base * (1 - alpha) + overlay * alpha).astype(np.uint8)
+        return self.processor.numpy_to_qpixmap(arr)
+
+    def _update_opacity(self, value: int) -> None:  # noqa: ARG002 - slot
+        if not self._indices:
+            return
+        idx = self._indices[self._current_idx]
+        if idx in self._image_cache:
+            self._display_cached(idx)
 
     # ------------------------------------------------------------------
     def show_next(self) -> None:

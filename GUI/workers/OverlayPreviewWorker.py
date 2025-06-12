@@ -15,7 +15,7 @@ from GUI.models.ImageProcessor import ImageProcessor
 class OverlayPreviewSignals(QObject):
     """Signals for :class:`OverlayPreviewWorker`."""
 
-    finished = pyqtSignal(int, np.ndarray)
+    finished = pyqtSignal(int, np.ndarray, np.ndarray)
 
 
 class OverlayPreviewWorker(QRunnable):
@@ -42,8 +42,8 @@ class OverlayPreviewWorker(QRunnable):
             self.image_index,
             tuple((tuple(ann.coord), ann.class_id) for ann in self.annotations),
         )
-        overlay = self.cache.get(key)
-        if overlay is None:
+        cached = self.cache.get(key)
+        if cached is None:
             try:
                 data = self.model.get_image_data(self.image_index)
             except Exception as exc:  # pragma: no cover - defensive
@@ -53,6 +53,9 @@ class OverlayPreviewWorker(QRunnable):
             overlay_img = self.processor.create_annotation_overlay(
                 image, self.annotations
             )
+            base = np.array(image)
             overlay = np.array(overlay_img.convert("RGB"))
-            self.cache.set(key, overlay)
-        self.signals.finished.emit(self.image_index, overlay)
+            cached = (base, overlay)
+            self.cache.set(key, cached)
+        base, overlay = cached
+        self.signals.finished.emit(self.image_index, base, overlay)

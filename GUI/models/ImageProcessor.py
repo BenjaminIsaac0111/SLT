@@ -121,8 +121,9 @@ class ImageProcessor:
             image: np.ndarray,
             annotations: List['Annotation'],
             radius: int = 6,
+            crosshair: bool = True,
     ) -> Image.Image:
-        """Draw coloured circles for annotations on the image.
+        """Draw coloured markers for annotations on the image.
 
         Parameters
         ----------
@@ -133,6 +134,8 @@ class ImageProcessor:
             annotations (``class_id == -1``) are ignored.
         radius:
             Circle radius in pixels.
+        crosshair:
+            Whether to draw a crosshair inside each circle.
 
         Returns
         -------
@@ -148,6 +151,9 @@ class ImageProcessor:
             y, x = map(int, ann.coord)
             bbox = [x - radius, y - radius, x + radius, y + radius]
             draw.ellipse(bbox, fill=colour, outline=colour)
+            if crosshair:
+                draw.line([(x - radius, y), (x + radius, y)], fill=colour, width=1)
+                draw.line([(x, y - radius), (x, y + radius)], fill=colour, width=1)
         return pil
 
     @staticmethod
