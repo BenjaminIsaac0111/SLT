@@ -152,6 +152,8 @@ class ImageProcessor:
             bbox = [x - radius, y - radius, x + radius, y + radius]
             draw.ellipse(bbox, fill=colour, outline=colour)
             if crosshair:
+                draw.line([(x - radius, y), (x + radius, y)], fill="black", width=3)
+                draw.line([(x, y - radius), (x, y + radius)], fill="black", width=3)
                 draw.line([(x - radius, y), (x + radius, y)], fill=colour, width=1)
                 draw.line([(x, y - radius), (x, y + radius)], fill=colour, width=1)
         return pil
