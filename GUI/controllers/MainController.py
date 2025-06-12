@@ -565,6 +565,35 @@ class MainController(QObject):
         QThreadPool.globalInstance().start(worker)
 
     # -----------------------------------------------------------------
+    #                  TRAINING HDF5 GENERATION
+    # -----------------------------------------------------------------
+    @pyqtSlot(str, str, str, str, int)
+    def build_training_hdf5(
+        self,
+        data_dir: str,
+        csv_file: str,
+        model_path: str,
+        out_file: str,
+        sample_size: int,
+    ) -> None:
+        """Create an HDF5 file for the training set asynchronously."""
+        from GUI.workers.HDF5BuildWorker import HDF5BuildWorker
+
+        size = sample_size if sample_size > 0 else None
+        worker = HDF5BuildWorker(
+            data_dir, csv_file, model_path, out_file, sample_size=size
+        )
+        worker.signals.finished.connect(
+            lambda: QMessageBox.information(
+                self.view, "HDF5", "HDF5 creation completed."
+            )
+        )
+        worker.signals.error.connect(
+            lambda err: QMessageBox.critical(self.view, "HDF5 Error", err)
+        )
+        QThreadPool.globalInstance().start(worker)
+
+    # -----------------------------------------------------------------
     #                    ANNOTATION PREVIEW DIALOG
     # -----------------------------------------------------------------
     @pyqtSlot()

@@ -69,6 +69,7 @@ class AppMenuBar(QMenuBar):
     request_set_nav_policy = pyqtSignal(str)
     request_annotation_preview = pyqtSignal()
     request_create_folds = pyqtSignal(str, str, int)
+    request_build_hdf5 = pyqtSignal(str, str, str, str, int)
 
     # ----------------------------------------------------------------
     def __init__(self, parent=None):
@@ -106,6 +107,8 @@ class AppMenuBar(QMenuBar):
         actions_menu = self.addMenu("&Actions")
         act_cv = actions_menu.addAction("Create CV Folds…")
         act_cv.triggered.connect(self._pick_folds_dirs)
+        act_h5 = actions_menu.addAction("Build Training HDF5…")
+        act_h5.triggered.connect(self._pick_hdf5_args)
 
         # -------- Annotation Method sub‑menu -------------------------
         method_menu = self.addMenu("Annotation Method")
@@ -197,6 +200,43 @@ class AppMenuBar(QMenuBar):
         )
         if ok:
             self.request_create_folds.emit(data_dir, out_dir, splits)
+
+    def _pick_hdf5_args(self):
+        data_dir = QFileDialog.getExistingDirectory(
+            self, "Select Image Directory", ""
+        )
+        if not data_dir:
+            return
+        csv_file, _ = QFileDialog.getOpenFileName(
+            self, "Select Training CSV", "", "CSV files (*.csv);;All files (*)"
+        )
+        if not csv_file:
+            return
+        model_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Segmentation Model",
+            "",
+            "HDF5 files (*.h5 *.hdf5);;All files (*)",
+        )
+        if not model_path:
+            return
+        out_file, _ = QFileDialog.getSaveFileName(
+            self, "Output HDF5 File", "", "HDF5 files (*.h5 *.hdf5);;All files (*)"
+        )
+        if not out_file:
+            return
+        size, ok = QInputDialog.getInt(
+            self,
+            "Subsample",
+            "Number of samples (0 = all):",
+            0,
+            0,
+            10_000_000,
+        )
+        if ok:
+            self.request_build_hdf5.emit(
+                data_dir, csv_file, model_path, out_file, size
+            )
 
 
 # -------------------------------------------------------------------- dialog
@@ -337,6 +377,7 @@ def _main_window(view, controller) -> QMainWindow:  # noqa: D401 – imperative
     mb.request_export_annotations.connect(view.export_annotations_requested)
     mb.request_annotation_preview.connect(controller.show_annotation_preview)
     mb.request_create_folds.connect(controller.create_cv_folds)
+    mb.request_build_hdf5.connect(controller.build_training_hdf5)
 
     # controller connections
     mb.request_save_project.connect(controller.save_project)
