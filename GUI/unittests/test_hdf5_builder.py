@@ -31,7 +31,13 @@ def test_build_training_hdf5_invokes_mc(tmp_path: Path) -> None:
     tf_mod = types.ModuleType("tensorflow")
     keras_mod = types.ModuleType("tensorflow.keras")
     models_mod = types.ModuleType("tensorflow.keras.models")
-    models_mod.load_model = lambda *a, **k: fake_model
+    captured_kwargs = {}
+
+    def fake_load_model(*args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return fake_model
+
+    models_mod.load_model = fake_load_model
     keras_mod.models = models_mod
     tf_mod.keras = keras_mod
 
@@ -40,6 +46,11 @@ def test_build_training_hdf5_invokes_mc(tmp_path: Path) -> None:
         "tensorflow": tf_mod,
         "tensorflow.keras": keras_mod,
         "tensorflow.keras.models": models_mod,
+        "DeepLearning.models.custom_layers": types.SimpleNamespace(
+            DropoutAttentionBlock=object,
+            GroupNormalization=object,
+            SpatialConcreteDropout=object,
+        ),
     }):
         build_training_hdf5(
             tmp_path,
@@ -58,3 +69,8 @@ def test_build_training_hdf5_invokes_mc(tmp_path: Path) -> None:
     assert cfg["MC_N_ITER"] == 7
     assert cfg["INPUT_SIZE"] == [256, 256, 3]
     assert cfg["OUT_CHANNELS"] == 2
+    assert {
+        "DropoutAttentionBlock",
+        "GroupNormalization",
+        "SpatialConcreteDropout",
+    } <= set(captured_kwargs["custom_objects"].keys())

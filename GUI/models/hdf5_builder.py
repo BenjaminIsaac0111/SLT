@@ -46,8 +46,21 @@ def build_training_hdf5(
 
     from tensorflow.keras.models import load_model
     from DeepLearning.inference import main_unet_mc_banker
+    from DeepLearning.models.custom_layers import (
+        DropoutAttentionBlock,
+        GroupNormalization,
+        SpatialConcreteDropout,
+    )
 
-    model = load_model(model_path, compile=False)
+    model = load_model(
+        model_path,
+        custom_objects={
+            "DropoutAttentionBlock": DropoutAttentionBlock,
+            "GroupNormalization": GroupNormalization,
+            "SpatialConcreteDropout": SpatialConcreteDropout,
+        },
+        compile=False,
+    )
     input_shape = list(model.input_shape[1:])
     out_channels = int(model.output_shape[-1])
 
