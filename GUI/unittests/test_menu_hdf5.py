@@ -19,6 +19,7 @@ def test_action_menu_emits_build_hdf5_signal(qapp, monkeypatch):
     files = iter(["train.csv", "model.h5", "out.h5"])
     monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *a, **k: (next(files), ""))
     monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: ("out.h5", ""))
-    monkeypatch.setattr(QInputDialog, "getInt", lambda *a, **k: (10, True))
+    ints = iter([(10, True), (4, True)])
+    monkeypatch.setattr(QInputDialog, "getInt", lambda *a, **k: next(ints))
     mb._pick_hdf5_args()
-    assert emitted == [("/data", "train.csv", "model.h5", "out.h5", 10)]
+    assert emitted == [("/data", "train.csv", "model.h5", "out.h5", 10, 4)]

@@ -24,13 +24,30 @@ def test_build_training_hdf5_invokes_mc(tmp_path: Path) -> None:
     fake_module.main = fake_main
     fake_module.setup_logging = lambda *a, **k: logging.getLogger("test")
 
-    with patch.dict(sys.modules, {"DeepLearning.inference.main_unet_mc_banker": fake_module}):
+    fake_model = types.SimpleNamespace(
+        input_shape=(None, 256, 256, 3), output_shape=(None, 256, 256, 2)
+    )
+
+    tf_mod = types.ModuleType("tensorflow")
+    keras_mod = types.ModuleType("tensorflow.keras")
+    models_mod = types.ModuleType("tensorflow.keras.models")
+    models_mod.load_model = lambda *a, **k: fake_model
+    keras_mod.models = models_mod
+    tf_mod.keras = keras_mod
+
+    with patch.dict(sys.modules, {
+        "DeepLearning.inference.main_unet_mc_banker": fake_module,
+        "tensorflow": tf_mod,
+        "tensorflow.keras": keras_mod,
+        "tensorflow.keras.models": models_mod,
+    }):
         build_training_hdf5(
             tmp_path,
             csv_file,
             "/models/best_model.h5",
             tmp_path / "out.h5",
             sample_size=5,
+            mc_iter=7,
         )
 
     cfg = captured["cfg"]
@@ -38,3 +55,6 @@ def test_build_training_hdf5_invokes_mc(tmp_path: Path) -> None:
     assert cfg["MODEL_NAME"] == "best_model.h5"
     assert cfg["OUTPUT_DIR"] == str(tmp_path)
     assert cfg["N_SAMPLES"] == 5
+    assert cfg["MC_N_ITER"] == 7
+    assert cfg["INPUT_SIZE"] == [256, 256, 3]
+    assert cfg["OUT_CHANNELS"] == 2

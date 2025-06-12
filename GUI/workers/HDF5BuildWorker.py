@@ -31,6 +31,7 @@ class HDF5BuildWorker(QRunnable):
         output_file: Union[str, Path],
         *,
         sample_size: Optional[int] = None,
+        mc_iter: int = 1,
     ) -> None:
         super().__init__()
         self.signals = HDF5BuildWorkerSignals()
@@ -39,6 +40,7 @@ class HDF5BuildWorker(QRunnable):
         self.model_path = Path(model_path)
         self.output_file = Path(output_file)
         self.sample_size = sample_size
+        self.mc_iter = mc_iter
 
     def run(self) -> None:
         try:
@@ -48,6 +50,7 @@ class HDF5BuildWorker(QRunnable):
                 self.model_path,
                 self.output_file,
                 sample_size=self.sample_size,
+                mc_iter=self.mc_iter,
             )
             self.signals.finished.emit()
         except Exception as err:  # pragma: no cover - rarely triggered

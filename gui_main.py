@@ -69,7 +69,7 @@ class AppMenuBar(QMenuBar):
     request_set_nav_policy = pyqtSignal(str)
     request_annotation_preview = pyqtSignal()
     request_create_folds = pyqtSignal(str, str, int)
-    request_build_hdf5 = pyqtSignal(str, str, str, str, int)
+    request_build_hdf5 = pyqtSignal(str, str, str, str, int, int)
 
     # ----------------------------------------------------------------
     def __init__(self, parent=None):
@@ -233,9 +233,20 @@ class AppMenuBar(QMenuBar):
             0,
             10_000_000,
         )
+        if not ok:
+            return
+
+        mc_iter, ok = QInputDialog.getInt(
+            self,
+            "MC Iterations",
+            "Number of stochastic passes:",
+            1,
+            1,
+            512,
+        )
         if ok:
             self.request_build_hdf5.emit(
-                data_dir, csv_file, model_path, out_file, size
+                data_dir, csv_file, model_path, out_file, size, mc_iter
             )
 
 

@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 from typing import Optional, Union
 
-import yaml
+
 
 __all__ = ["build_training_hdf5"]
 
@@ -18,6 +18,7 @@ def build_training_hdf5(
     output_file: Union[str, Path],
     *,
     sample_size: Optional[int] = None,
+    mc_iter: int = 1,
     resume: bool = False,
 ) -> None:
     """Run the MC banker inference pipeline to build a training HDF5.
@@ -37,11 +38,18 @@ def build_training_hdf5(
         Destination HDF5 file.
     sample_size:
         Optional subsample size used to limit ``N_SAMPLES`` in the config.
+    mc_iter:
+        Number of stochastic forward passes for MC dropout.
     resume:
         Append to an existing file instead of overwriting.
     """
 
+    from tensorflow.keras.models import load_model
     from DeepLearning.inference import main_unet_mc_banker
+
+    model = load_model(model_path, compile=False)
+    input_shape = list(model.input_shape[1:])
+    out_channels = int(model.output_shape[-1])
 
     cfg = {
         "MODEL_DIR": str(Path(model_path).parent),
@@ -50,9 +58,9 @@ def build_training_hdf5(
         "TRAINING_LIST": str(training_csv),
         "BATCH_SIZE": 1,
         "SHUFFLE_BUFFER_SIZE": 1,
-        "OUT_CHANNELS": 2,
-        "INPUT_SIZE": [256, 256, 3],
-        "MC_N_ITER": 1,
+        "OUT_CHANNELS": out_channels,
+        "INPUT_SIZE": input_shape,
+        "MC_N_ITER": mc_iter,
         "OUTPUT_DIR": str(Path(output_file).parent),
     }
 

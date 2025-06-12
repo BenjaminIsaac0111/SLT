@@ -567,7 +567,7 @@ class MainController(QObject):
     # -----------------------------------------------------------------
     #                  TRAINING HDF5 GENERATION
     # -----------------------------------------------------------------
-    @pyqtSlot(str, str, str, str, int)
+    @pyqtSlot(str, str, str, str, int, int)
     def build_training_hdf5(
         self,
         data_dir: str,
@@ -575,13 +575,19 @@ class MainController(QObject):
         model_path: str,
         out_file: str,
         sample_size: int,
+        mc_iter: int,
     ) -> None:
         """Create an HDF5 file for the training set asynchronously."""
         from GUI.workers.HDF5BuildWorker import HDF5BuildWorker
 
         size = sample_size if sample_size > 0 else None
         worker = HDF5BuildWorker(
-            data_dir, csv_file, model_path, out_file, sample_size=size
+            data_dir,
+            csv_file,
+            model_path,
+            out_file,
+            sample_size=size,
+            mc_iter=max(1, mc_iter),
         )
         worker.signals.finished.connect(
             lambda: QMessageBox.information(
