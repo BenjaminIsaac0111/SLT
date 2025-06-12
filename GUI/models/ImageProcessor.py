@@ -1,10 +1,10 @@
 # models/ImageProcessor.py
 import hashlib
 import logging
-from typing import Tuple, Dict
+from typing import Tuple, Dict, List
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
 from PyQt5.QtCore import QThread
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtWidgets import QApplication
@@ -12,6 +12,7 @@ from matplotlib import pyplot as plt
 from matplotlib.colors import Colormap
 
 from GUI.models.CacheManager import CacheManager
+from GUI.models.Annotation import Annotation
 
 
 class ImageProcessor:
@@ -114,6 +115,40 @@ class ImageProcessor:
         heatmap_image = Image.fromarray(heatmap_rgb).convert('RGBA')
         logging.debug("Heatmap image created.")
         return heatmap_image
+
+    def create_annotation_overlay(
+            self,
+            image: np.ndarray,
+            annotations: List['Annotation'],
+            radius: int = 6,
+    ) -> Image.Image:
+        """Draw coloured circles for annotations on the image.
+
+        Parameters
+        ----------
+        image:
+            RGB image array ``H×W×3``.
+        annotations:
+            Annotation objects associated with this image. Unlabelled
+            annotations (``class_id == -1``) are ignored.
+        radius:
+            Circle radius in pixels.
+
+        Returns
+        -------
+        PIL.Image.Image
+            Image with drawn annotation markers.
+        """
+        pil = self.numpy_to_pil_image(image)
+        draw = ImageDraw.Draw(pil)
+        for ann in annotations:
+            if ann.class_id == -1:
+                continue
+            colour = self.class_color_map.get(ann.class_id, (255, 255, 255))
+            y, x = map(int, ann.coord)
+            bbox = [x - radius, y - radius, x + radius, y + radius]
+            draw.ellipse(bbox, fill=colour, outline=colour)
+        return pil
 
     @staticmethod
     def _softmax(logits: np.ndarray) -> np.ndarray:
@@ -300,6 +335,14 @@ class ImageProcessor:
 
         pil_image = self.numpy_to_pil_image(image)
         return self.pil_image_to_qimage(pil_image)
+
+    def numpy_to_qpixmap(self, image: np.ndarray) -> QPixmap:
+        """Convert a NumPy ``H×W×3`` array to QPixmap.
+
+        This must run on the main GUI thread.
+        """
+        qimage = self.numpy_to_qimage(image)
+        return QPixmap.fromImage(qimage)
 
     def pil_image_to_qimage(self, pil_image: Image.Image) -> QImage:
         """
