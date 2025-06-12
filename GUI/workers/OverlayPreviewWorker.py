@@ -51,7 +51,7 @@ class OverlayPreviewWorker(QRunnable):
                 return
             image = data.get("image")
             overlay_img = self.processor.create_annotation_overlay(
-                image, self.annotations
+                image, self.annotations, show_labels=True
             )
             base = np.array(image)
             overlay = np.array(overlay_img.convert("RGB"))
