@@ -20,6 +20,7 @@ from PyQt5.QtWidgets import (
     QLabel,
     QPushButton,
     QFileDialog,
+    QInputDialog,
     QMessageBox,
     QMenuBar,
     QAction,
@@ -67,7 +68,7 @@ class AppMenuBar(QMenuBar):
     request_set_ann_method = pyqtSignal(str)
     request_set_nav_policy = pyqtSignal(str)
     request_annotation_preview = pyqtSignal()
-    request_create_folds = pyqtSignal(str, str)
+    request_create_folds = pyqtSignal(str, str, int)
 
     # ----------------------------------------------------------------
     def __init__(self, parent=None):
@@ -183,8 +184,19 @@ class AppMenuBar(QMenuBar):
         out_dir = QFileDialog.getExistingDirectory(
             self, "Select Output Directory", ""
         )
-        if out_dir:
-            self.request_create_folds.emit(data_dir, out_dir)
+        if not out_dir:
+            return
+
+        splits, ok = QInputDialog.getInt(
+            self,
+            "Cross Validation",
+            "Number of folds:",
+            3,
+            2,
+            20,
+        )
+        if ok:
+            self.request_create_folds.emit(data_dir, out_dir, splits)
 
 
 # -------------------------------------------------------------------- dialog

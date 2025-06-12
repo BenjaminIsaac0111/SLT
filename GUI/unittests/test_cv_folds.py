@@ -27,16 +27,18 @@ def test_create_grouped_folds(tmp_path: Path):
     assert (out_dir / "weights.txt").exists()
 
     for i in range(1, 4):
-        tfile = out_dir / f"Fold_{i}_TrainingData.txt"
-        vfile = out_dir / f"Fold_{i}_TestData.txt"
+        tfile = out_dir / f"Fold_{i}_TrainingData.csv"
+        vfile = out_dir / f"Fold_{i}_TestData.csv"
         wfile = out_dir / f"Fold_{i}_weights.txt"
         assert tfile.exists()
         assert vfile.exists()
         assert wfile.exists()
 
-        train_df = pd.read_csv(tfile, sep="\t", header=None, names=["fname", "cls"])
-        test_df = pd.read_csv(vfile, sep="\t", header=None, names=["fname", "cls"])
+        train_df = pd.read_csv(tfile, header=None, names=["fname", "cls"])
+        test_df = pd.read_csv(vfile, header=None, names=["fname", "cls"])
         assert set(train_df["cls"]) <= {"tumour", "stroma"}
         assert set(test_df["cls"]) <= {"tumour", "stroma"}
         # each fold should have one group in test set -> two samples
         assert len(test_df) == 2
+        # training set should contain remaining four samples
+        assert len(train_df) == 4

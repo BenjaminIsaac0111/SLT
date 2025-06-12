@@ -9,7 +9,7 @@ from typing import Optional, Union
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import StratifiedGroupKFold
-from sklearn.utils import resample, compute_class_weight
+from sklearn.utils import compute_class_weight
 
 __all__ = ["create_grouped_folds"]
 
@@ -28,18 +28,9 @@ def _parse_filename(name: str) -> tuple[str, str]:
     return group_id, class_label
 
 
-def _balance_train_fold(train_df: pd.DataFrame) -> pd.DataFrame:
-    """Return a balanced version of *train_df* via random resampling."""
-    class_counts = train_df["class"].value_counts()
-    max_count = class_counts.max()
-    balanced = []
-    for cls, count in class_counts.items():
-        cls_df = train_df[train_df["class"] == cls]
-        replace = len(cls_df) < max_count
-        balanced.append(
-            resample(cls_df, n_samples=max_count, replace=replace, random_state=42)
-        )
-    return pd.concat(balanced).sample(frac=1.0, random_state=42).reset_index(drop=True)
+def _shuffle_train_fold(train_df: pd.DataFrame) -> pd.DataFrame:
+    """Return *train_df* shuffled without changing its size."""
+    return train_df.sample(frac=1.0, random_state=42).reset_index(drop=True)
 
 
 def create_grouped_folds(
@@ -86,7 +77,7 @@ def create_grouped_folds(
     for i, (train_idx, test_idx) in enumerate(
         cv.split(dataset["filename"], dataset["class"], dataset["id"])
     ):
-        train_df = _balance_train_fold(dataset.iloc[train_idx].copy())
+        train_df = _shuffle_train_fold(dataset.iloc[train_idx].copy())
         if sample_size is not None and len(train_df) > sample_size:
             train_df = train_df.sample(n=sample_size, replace=False, random_state=42)
 
@@ -99,14 +90,12 @@ def create_grouped_folds(
         )
 
         train_df[["filename", "class"]].to_csv(
-            output_dir / f"Fold_{i + 1}_TrainingData.txt",
-            sep="\t",
+            output_dir / f"Fold_{i + 1}_TrainingData.csv",
             index=False,
             header=False,
         )
         test_df.to_csv(
-            output_dir / f"Fold_{i + 1}_TestData.txt",
-            sep="\t",
+            output_dir / f"Fold_{i + 1}_TestData.csv",
             index=False,
             header=False,
         )

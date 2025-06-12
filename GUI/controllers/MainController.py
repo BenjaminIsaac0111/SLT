@@ -550,10 +550,10 @@ class MainController(QObject):
     # -----------------------------------------------------------------
     #               CROSS VALIDATION FOLD GENERATION
     # -----------------------------------------------------------------
-    @pyqtSlot(str, str)
-    def create_cv_folds(self, data_dir: str, out_dir: str) -> None:
+    @pyqtSlot(str, str, int)
+    def create_cv_folds(self, data_dir: str, out_dir: str, splits: int) -> None:
         """Generate grouped cross-validation folds asynchronously."""
-        worker = CrossValidationWorker(data_dir, out_dir)
+        worker = CrossValidationWorker(data_dir, out_dir, n_splits=splits)
         worker.signals.finished.connect(
             lambda: QMessageBox.information(
                 self.view, "CV Folds", "Fold generation completed."
