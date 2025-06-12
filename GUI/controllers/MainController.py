@@ -26,6 +26,7 @@ from GUI.models.io.Persistence import ProjectState
 from GUI.models.navigation.ClusterSelection import make_selector
 from GUI.views.ClusteredCropsView import ClusteredCropsView
 from GUI.views.ClusteringProgressDialog import ClusteringProgressDialog
+from GUI.views.AnnotationPreviewDialog import AnnotationPreviewDialog
 
 
 class MainController(QObject):
@@ -544,6 +545,19 @@ class MainController(QObject):
                 "Export Successful",
                 f"Exported {count} annotations to\n{export_file}",
             )
+
+    # -----------------------------------------------------------------
+    #                    ANNOTATION PREVIEW DIALOG
+    # -----------------------------------------------------------------
+    @pyqtSlot()
+    def show_annotation_preview(self) -> None:
+        """Open a dialog showing full images with annotation overlays."""
+        clusters = self.clustering_controller.get_clusters()
+        annotations = [
+            a for annos in clusters.values() for a in annos if a.class_id != -1
+        ]
+        dlg = AnnotationPreviewDialog(self.image_data_model, annotations, self.view)
+        dlg.exec_()
 
     # -------------------------------------------------------------------------
     #                               CLEANUP

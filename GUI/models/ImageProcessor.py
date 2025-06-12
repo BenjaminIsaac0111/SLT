@@ -1,10 +1,10 @@
 # models/ImageProcessor.py
 import hashlib
 import logging
-from typing import Tuple, Dict
+from typing import Tuple, Dict, List
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 from PyQt5.QtCore import QThread
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtWidgets import QApplication
@@ -12,6 +12,8 @@ from matplotlib import pyplot as plt
 from matplotlib.colors import Colormap
 
 from GUI.models.CacheManager import CacheManager
+from GUI.models.Annotation import Annotation
+from GUI.configuration.configuration import CLASS_COMPONENTS
 
 
 class ImageProcessor:
@@ -114,6 +116,62 @@ class ImageProcessor:
         heatmap_image = Image.fromarray(heatmap_rgb).convert('RGBA')
         logging.debug("Heatmap image created.")
         return heatmap_image
+
+    def create_annotation_overlay(
+            self,
+            image: np.ndarray,
+            annotations: List['Annotation'],
+            radius: int = 6,
+            crosshair: bool = True,
+            show_labels: bool = False,
+    ) -> Image.Image:
+        """Draw coloured markers for annotations on the image.
+
+        Parameters
+        ----------
+        image:
+            RGB image array ``H×W×3``.
+        annotations:
+            Annotation objects associated with this image. Unlabelled
+            annotations (``class_id == -1``) are ignored.
+        radius:
+            Circle radius in pixels.
+        crosshair:
+            Whether to draw a crosshair inside each circle.
+        show_labels:
+            Whether to draw class labels next to each annotation.
+
+        Returns
+        -------
+        PIL.Image.Image
+            Image with drawn annotation markers.
+        """
+        pil = self.numpy_to_pil_image(image).convert("RGBA")
+        draw = ImageDraw.Draw(pil)
+        font = ImageFont.load_default()
+        offset = radius + 2
+        for ann in annotations:
+            if ann.class_id == -1:
+                continue
+            colour = self.class_color_map.get(ann.class_id, (255, 255, 255))
+            y, x = map(int, ann.coord)
+            bbox = [x - radius, y - radius, x + radius, y + radius]
+            draw.ellipse(bbox, fill=colour, outline=colour)
+            if crosshair:
+                draw.line([(x - offset, y), (x + offset, y)], fill="black", width=3)
+                draw.line([(x, y - offset), (x, y + offset)], fill="black", width=3)
+                draw.line([(x - offset, y), (x + offset, y)], fill=colour, width=1)
+                draw.line([(x, y - offset), (x, y + offset)], fill=colour, width=1)
+            if show_labels:
+                label = CLASS_COMPONENTS.get(ann.class_id, str(ann.class_id))
+                tb = draw.textbbox((0, 0), label, font=font)
+                tw, th = tb[2] - tb[0], tb[3] - tb[1]
+                lx = x + radius + 4
+                ly = y - th // 2
+                box = [lx - 2, ly - 1, lx + tw + 2, ly + th + 1]
+                draw.rectangle(box, fill=(0, 0, 0, 160))
+                draw.text((lx, ly), label, fill=(255, 255, 255, 255), font=font)
+        return pil
 
     @staticmethod
     def _softmax(logits: np.ndarray) -> np.ndarray:
@@ -300,6 +358,14 @@ class ImageProcessor:
 
         pil_image = self.numpy_to_pil_image(image)
         return self.pil_image_to_qimage(pil_image)
+
+    def numpy_to_qpixmap(self, image: np.ndarray) -> QPixmap:
+        """Convert a NumPy ``H×W×3`` array to QPixmap.
+
+        This must run on the main GUI thread.
+        """
+        qimage = self.numpy_to_qimage(image)
+        return QPixmap.fromImage(qimage)
 
     def pil_image_to_qimage(self, pil_image: Image.Image) -> QImage:
         """

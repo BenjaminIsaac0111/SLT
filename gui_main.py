@@ -66,6 +66,7 @@ class AppMenuBar(QMenuBar):
     request_generate_annos = pyqtSignal()
     request_set_ann_method = pyqtSignal(str)
     request_set_nav_policy = pyqtSignal(str)
+    request_annotation_preview = pyqtSignal()
 
     # ----------------------------------------------------------------
     def __init__(self, parent=None):
@@ -95,6 +96,8 @@ class AppMenuBar(QMenuBar):
         act_gen.setShortcut("Ctrl+G")
         act_gen.triggered.connect(self.request_generate_annos)
         ann_menu.addSeparator()
+        act_preview = ann_menu.addAction("Preview Annotation Overlays…")
+        act_preview.triggered.connect(self.request_annotation_preview)
         ann_menu.addAction(act_export)  # reuse QAction instance
 
         # -------- Annotation Method sub‑menu -------------------------
@@ -302,6 +305,7 @@ def _main_window(view, controller) -> QMainWindow:  # noqa: D401 – imperative
     mb.request_generate_annos.connect(view.request_clustering.emit)
     mb.request_set_ann_method.connect(view.annotation_method_changed.emit)
     mb.request_export_annotations.connect(view.export_annotations_requested)
+    mb.request_annotation_preview.connect(controller.show_annotation_preview)
 
     # controller connections
     mb.request_save_project.connect(controller.save_project)
