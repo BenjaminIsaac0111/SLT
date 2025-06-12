@@ -1,30 +1,40 @@
 from pathlib import Path
-import h5py
+from unittest.mock import patch
+import logging
 import pandas as pd
-from PIL import Image
+import sys
+import types
 
 from GUI.models.hdf5_builder import build_training_hdf5
 
 
-def test_build_training_hdf5(tmp_path: Path) -> None:
-    data_dir = tmp_path / "imgs"
-    data_dir.mkdir()
-    # create tiny images
-    names = []
-    for i in range(3):
-        name = f"{i}_tumour.png"
-        img = Image.new("RGB", (2, 2))
-        img.save(data_dir / name)
-        names.append(name)
-
+def test_build_training_hdf5_invokes_mc(tmp_path: Path) -> None:
     csv_file = tmp_path / "train.csv"
-    pd.DataFrame({"filename": names, "class": ["tumour"] * 3}).to_csv(
+    pd.DataFrame({"filename": ["a.png"], "class": ["x"]}).to_csv(
         csv_file, index=False, header=False
     )
 
-    out_file = tmp_path / "out.h5"
-    build_training_hdf5(data_dir, csv_file, "model.h5", out_file, sample_size=2)
+    captured = {}
 
-    with h5py.File(out_file, "r") as h5f:
-        assert len(h5f["filenames"]) == 2
-        assert list(h5f["class"].asstr()) == ["tumour", "tumour"]
+    fake_module = types.ModuleType("banker")
+
+    def fake_main(cfg, *, logger, resume=False):
+        captured["cfg"] = cfg
+
+    fake_module.main = fake_main
+    fake_module.setup_logging = lambda *a, **k: logging.getLogger("test")
+
+    with patch.dict(sys.modules, {"DeepLearning.inference.main_unet_mc_banker": fake_module}):
+        build_training_hdf5(
+            tmp_path,
+            csv_file,
+            "/models/best_model.h5",
+            tmp_path / "out.h5",
+            sample_size=5,
+        )
+
+    cfg = captured["cfg"]
+    assert cfg["MODEL_DIR"] == "/models"
+    assert cfg["MODEL_NAME"] == "best_model.h5"
+    assert cfg["OUTPUT_DIR"] == str(tmp_path)
+    assert cfg["N_SAMPLES"] == 5

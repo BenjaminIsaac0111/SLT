@@ -1,4 +1,4 @@
-"""Utilities for creating small HDF5 datasets from training CSV files."""
+"""Utilities for building training HDF5 datasets."""
 
 from __future__ import annotations
 
@@ -6,9 +6,7 @@ import logging
 from pathlib import Path
 from typing import Optional, Union
 
-import h5py
-import numpy as np
-import pandas as pd
+import yaml
 
 __all__ = ["build_training_hdf5"]
 
@@ -20,43 +18,48 @@ def build_training_hdf5(
     output_file: Union[str, Path],
     *,
     sample_size: Optional[int] = None,
+    resume: bool = False,
 ) -> None:
-    """Create a lightweight HDF5 file listing training samples.
+    """Run the MC banker inference pipeline to build a training HDF5.
+
+    This is a thin wrapper around :func:`main_unet_mc_banker.main` that builds
+    the required configuration from the provided arguments.
 
     Parameters
     ----------
     data_dir:
-        Directory containing the image files referenced in ``training_csv``.
+        Directory containing the training images.
     training_csv:
-        CSV listing image filenames and class labels.
+        CSV file listing the training images and labels.
     model_path:
-        Path to the segmentation model (currently unused but logged).
+        Path to the segmentation model weights.
     output_file:
-        Destination HDF5 file to create.
+        Destination HDF5 file.
     sample_size:
-        Optional number of samples to keep.  If provided and smaller than the
-        CSV length, a random subset without replacement is written.
+        Optional subsample size used to limit ``N_SAMPLES`` in the config.
+    resume:
+        Append to an existing file instead of overwriting.
     """
-    data_dir = Path(data_dir)
-    training_csv = Path(training_csv)
-    output_file = Path(output_file)
 
-    df = pd.read_csv(training_csv, header=None, names=["filename", "class"])
-    if sample_size is not None and len(df) > sample_size:
-        df = df.sample(n=sample_size, random_state=42).reset_index(drop=True)
+    from DeepLearning.inference import main_unet_mc_banker
 
-    filenames = [str(data_dir / f) for f in df["filename"]]
-    classes = df["class"].astype(str).to_numpy()
+    cfg = {
+        "MODEL_DIR": str(Path(model_path).parent),
+        "MODEL_NAME": Path(model_path).name,
+        "DATA_DIR": str(data_dir),
+        "TRAINING_LIST": str(training_csv),
+        "BATCH_SIZE": 1,
+        "SHUFFLE_BUFFER_SIZE": 1,
+        "OUT_CHANNELS": 2,
+        "INPUT_SIZE": [256, 256, 3],
+        "MC_N_ITER": 1,
+        "OUTPUT_DIR": str(Path(output_file).parent),
+    }
 
-    logging.info("Creating HDF5 at %s using model %s", output_file, model_path)
+    if sample_size is not None:
+        cfg["N_SAMPLES"] = int(sample_size)
 
-    with h5py.File(output_file, "w") as h5f:
-        h5f.create_dataset(
-            "filenames", data=np.array(filenames, dtype=h5py.string_dtype())
-        )
-        h5f.create_dataset(
-            "class", data=np.array(classes, dtype=h5py.string_dtype())
-        )
-        # Placeholder dataset for model features (zeroes for now)
-        h5f.create_dataset("features", shape=(len(df), 1), dtype="float32")
-    logging.info("Wrote %d entries to %s", len(df), output_file)
+    logger = main_unet_mc_banker.setup_logging(logging.INFO)
+    main_unet_mc_banker.main(cfg, logger=logger, resume=resume)
+
+    logging.info("HDF5 written to %s", output_file)
