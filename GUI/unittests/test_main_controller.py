@@ -11,6 +11,12 @@ for name in [
     "matplotlib.pyplot",
     "matplotlib.colors",
     "cachetools",
+    "sklearn",
+    "sklearn.utils",
+    "sklearn.utils.class_weight",
+    "sklearn.cluster",
+    "sklearn.mixture",
+    "numba",
 ]:
     if name not in sys.modules:
         sys.modules[name] = types.ModuleType(name)
@@ -21,6 +27,15 @@ for name in [
             sys.modules[name].LRUCache = DummyCache
         if name == "matplotlib.colors":
             sys.modules[name].Colormap = object
+        if name == "sklearn.utils.class_weight":
+            sys.modules[name].compute_class_weight = lambda *a, **k: []
+        if name == "sklearn.cluster":
+            sys.modules[name].AgglomerativeClustering = object
+            sys.modules[name].MiniBatchKMeans = object
+        if name == "sklearn.mixture":
+            sys.modules[name].GaussianMixture = object
+        if name == "numba":
+            sys.modules[name].njit = lambda *a, **k: (lambda f: f)
 
 from GUI.controllers.MainController import MainController
 from GUI.unittests.test_persistence import example_state
@@ -105,3 +120,76 @@ def test_on_project_loaded_sets_state(example_state: 'ProjectState'):
     assert ("hide",) in view.calls
     assert ("stats", ctrl.clustering_controller.compute_labeling_statistics()) in view.calls
     assert getattr(ctrl, "method") == example_state.annotation_method
+
+
+def test_reorder_clusters_preserves_order():
+    clusters = {1: [1], 2: [2], 3: [3]}
+    ordered = MainController._reorder_clusters([2, 1], clusters)
+    assert list(ordered.keys()) == [2, 1, 3]
+
+
+def test_clusters_from_state_honours_order(example_state: 'ProjectState'):
+    state = example_state.copy()
+    state.clusters = {"1": state.clusters["1"], "2": state.clusters["1"]}
+    state.cluster_order = [2, 1]
+    view = DummyView()
+    ctrl = build_controller(view)
+    clusters = ctrl._clusters_from_state(state)
+    assert list(clusters.keys()) == [2, 1]
+
+
+def test_label_generator_switches(monkeypatch):
+    class Timer:
+        def __init__(self):
+            self.started = False
+            self.ms = None
+
+        def start(self, ms):
+            self.started = True
+            self.ms = ms
+
+    view = DummyView()
+    ctrl = MainController.__new__(MainController)
+    ctrl.view = view
+    ctrl.clustering_controller = types.SimpleNamespace(annotation_generator=None)
+    ctrl._idle_timer = Timer()
+    ctrl._dirty = False
+
+    ctrl.on_label_generator_method_changed("Image Centre")
+    from GUI.models.PointAnnotationGenerator import CenterPointAnnotationGenerator
+    assert isinstance(ctrl.annotation_generator, CenterPointAnnotationGenerator)
+    assert ctrl._dirty is True
+    assert ctrl._idle_timer.started
+
+
+def test_visible_crops_complete():
+    from GUI.models.Annotation import Annotation
+
+    view = DummyView()
+    anno1 = Annotation(0, "a", (0, 0), [], 0.5, class_id=1)
+    anno2 = Annotation(0, "b", (1, 1), [], 0.5, class_id=-1)
+    view.selected_crops = [{"annotation": anno1}]
+    ctrl = build_controller(view)
+    assert ctrl._visible_crops_complete()
+    view.selected_crops.append({"annotation": anno2})
+    assert not ctrl._visible_crops_complete()
+
+
+def test_propagate_labeling_changes(monkeypatch):
+    from GUI.models.Annotation import Annotation
+
+    view = DummyView()
+    ctrl = build_controller(view)
+    ann = Annotation(0, "a", (0, 0), [], 0.5)
+    ctrl.clustering_controller.get_clusters = lambda: {1: [ann]}
+    called = {}
+
+    def fake_prop(arg):
+        called["annos"] = arg
+
+    monkeypatch.setattr(
+        "GUI.controllers.MainController.propagate_for_annotations", fake_prop
+    )
+
+    ctrl.propagate_labeling_changes()
+    assert called["annos"] == [ann]
