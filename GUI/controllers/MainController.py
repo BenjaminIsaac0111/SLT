@@ -6,7 +6,7 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Optional, Dict, List
 
-from PyQt5.QtCore import QObject, pyqtSlot, QTimer, QCoreApplication
+from PyQt5.QtCore import QObject, pyqtSlot, QTimer, QCoreApplication, QThreadPool
 from PyQt5.QtWidgets import QMessageBox
 
 from GUI.controllers.AnnotationClusteringController import AnnotationClusteringController
@@ -27,6 +27,7 @@ from GUI.models.navigation.ClusterSelection import make_selector
 from GUI.views.ClusteredCropsView import ClusteredCropsView
 from GUI.views.ClusteringProgressDialog import ClusteringProgressDialog
 from GUI.views.AnnotationPreviewDialog import AnnotationPreviewDialog
+from GUI.workers.CrossValidationWorker import CrossValidationWorker
 
 
 class MainController(QObject):
@@ -545,6 +546,23 @@ class MainController(QObject):
                 "Export Successful",
                 f"Exported {count} annotations to\n{export_file}",
             )
+
+    # -----------------------------------------------------------------
+    #               CROSS VALIDATION FOLD GENERATION
+    # -----------------------------------------------------------------
+    @pyqtSlot(str, str)
+    def create_cv_folds(self, data_dir: str, out_dir: str) -> None:
+        """Generate grouped cross-validation folds asynchronously."""
+        worker = CrossValidationWorker(data_dir, out_dir)
+        worker.signals.finished.connect(
+            lambda: QMessageBox.information(
+                self.view, "CV Folds", "Fold generation completed."
+            )
+        )
+        worker.signals.error.connect(
+            lambda err: QMessageBox.critical(self.view, "CV Fold Error", err)
+        )
+        QThreadPool.globalInstance().start(worker)
 
     # -----------------------------------------------------------------
     #                    ANNOTATION PREVIEW DIALOG

@@ -67,6 +67,7 @@ class AppMenuBar(QMenuBar):
     request_set_ann_method = pyqtSignal(str)
     request_set_nav_policy = pyqtSignal(str)
     request_annotation_preview = pyqtSignal()
+    request_create_folds = pyqtSignal(str, str)
 
     # ----------------------------------------------------------------
     def __init__(self, parent=None):
@@ -99,6 +100,11 @@ class AppMenuBar(QMenuBar):
         act_preview = ann_menu.addAction("Preview Annotation Overlays…")
         act_preview.triggered.connect(self.request_annotation_preview)
         ann_menu.addAction(act_export)  # reuse QAction instance
+
+        # -------- Actions menu ------------------------------------
+        actions_menu = self.addMenu("&Actions")
+        act_cv = actions_menu.addAction("Create CV Folds…")
+        act_cv.triggered.connect(self._pick_folds_dirs)
 
         # -------- Annotation Method sub‑menu -------------------------
         method_menu = self.addMenu("Annotation Method")
@@ -167,6 +173,18 @@ class AppMenuBar(QMenuBar):
         )
         if path:
             self.request_export_annotations.emit(path)
+
+    def _pick_folds_dirs(self):
+        data_dir = QFileDialog.getExistingDirectory(
+            self, "Select Image Directory", ""
+        )
+        if not data_dir:
+            return
+        out_dir = QFileDialog.getExistingDirectory(
+            self, "Select Output Directory", ""
+        )
+        if out_dir:
+            self.request_create_folds.emit(data_dir, out_dir)
 
 
 # -------------------------------------------------------------------- dialog
@@ -306,6 +324,7 @@ def _main_window(view, controller) -> QMainWindow:  # noqa: D401 – imperative
     mb.request_set_ann_method.connect(view.annotation_method_changed.emit)
     mb.request_export_annotations.connect(view.export_annotations_requested)
     mb.request_annotation_preview.connect(controller.show_annotation_preview)
+    mb.request_create_folds.connect(controller.create_cv_folds)
 
     # controller connections
     mb.request_save_project.connect(controller.save_project)
