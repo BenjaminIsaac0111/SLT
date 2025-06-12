@@ -1,10 +1,16 @@
 import os
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
 import numpy as np
 import pytest
-
-os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
-
-from PyQt5.QtWidgets import QApplication, QGraphicsScene, QGraphicsView, QWidget, QMenu
+from PyQt5.QtWidgets import (
+    QApplication,
+    QGraphicsScene,
+    QGraphicsView,
+    QWidget,
+    QMenu,
+)
 from PyQt5.QtGui import QPixmap, QMouseEvent
 from PyQt5.QtCore import Qt, QPoint, QPointF
 
@@ -24,7 +30,7 @@ def qapp():
 def make_item(qapp):
     scene = QGraphicsScene()
     parent = QWidget()
-    view = QGraphicsView(scene, parent)
+    QGraphicsView(scene, parent)
     ann = Annotation(
         image_index=0,
         filename="img",
@@ -67,7 +73,13 @@ def test_hover_and_selection_states(qapp):
     item.hoverLeaveEvent(None)
     assert item.hovered is False
 
-    evt = QMouseEvent(QMouseEvent.MouseButtonPress, QPoint(1, 1), Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
+    evt = QMouseEvent(
+        QMouseEvent.MouseButtonPress,
+        QPoint(1, 1),
+        Qt.LeftButton,
+        Qt.LeftButton,
+        Qt.NoModifier,
+    )
     item.mousePressEvent(evt)
     assert item.selected is True
     item.mousePressEvent(evt)
@@ -77,7 +89,11 @@ def test_hover_and_selection_states(qapp):
 def test_set_crop_class_emits_signal(qapp):
     item, ann, scene, parent = make_item(qapp)
     received = []
-    item.class_label_changed.connect(lambda data, cid: received.append((data, cid)))
+
+    def handler(data, cid):
+        received.append((data, cid))
+
+    item.class_label_changed.connect(handler)
     item.set_crop_class(2)
     assert ann.class_id == 2
     assert item.class_id == 2
@@ -192,4 +208,3 @@ def test_paint_prediction_glyphs(qapp):
     item.paint(painter, None, None)
     texts = [c[1] for c in painter.calls if c[0] == "drawText"]
     assert "✗" in texts
-
