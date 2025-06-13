@@ -53,7 +53,9 @@ def create_grouped_folds(
     sample_size:
         Optional size to subsample each fold without replacement.
         Only files with common image extensions (PNG, JPG, TIFF, BMP) are
-        considered; any other files are ignored.
+        considered; any other files are ignored.  The generated ``TrainingData``
+        and ``TestData`` files contain one filename per line with no class
+        labels.
     """
     data_dir = Path(data_dir)
     output_dir = Path(output_dir)
@@ -97,15 +99,11 @@ def create_grouped_folds(
             "balanced", classes=np.unique(train_df["class"]), y=train_df["class"]
         )
 
-        train_df[["filename", "class"]].to_csv(
-            output_dir / f"Fold_{i + 1}_TrainingData.csv",
-            index=False,
-            header=False,
+        (output_dir / f"Fold_{i + 1}_TrainingData.txt").write_text(
+            "\n".join(train_df["filename"]) + "\n"
         )
-        test_df.to_csv(
-            output_dir / f"Fold_{i + 1}_TestData.csv",
-            index=False,
-            header=False,
+        (output_dir / f"Fold_{i + 1}_TestData.txt").write_text(
+            "\n".join(test_df["filename"]) + "\n"
         )
         with (output_dir / f"Fold_{i + 1}_weights.txt").open("w") as wf:
             wf.write(" ".join(map(str, weights)))
