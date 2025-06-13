@@ -90,8 +90,11 @@ class AppMenuBar(QMenuBar):
         act_export = file_menu.addAction("Export Annotations…")
         act_export.triggered.connect(self._pick_path_to_export)
 
-        # -------- Annotations menu ----------------------------------
-        ann_menu = self.addMenu("&Annotations")
+        # -------- Actions menu --------------------------------------
+        actions_menu = self.addMenu("&Actions")
+
+        # ----- Annotations ------------------------------------------
+        ann_menu = actions_menu.addMenu("Annotations")
         act_gen = ann_menu.addAction("Generate Annotations…")
         act_gen.setShortcut("Ctrl+G")
         act_gen.triggered.connect(self.request_generate_annos)
@@ -101,7 +104,7 @@ class AppMenuBar(QMenuBar):
         ann_menu.addAction(act_export)  # reuse QAction instance
 
         # -------- Annotation Method sub‑menu -------------------------
-        method_menu = self.addMenu("Annotation Method")
+        method_menu = actions_menu.addMenu("Annotation Method")
         grp = QActionGroup(self)
         for label in [
             "Local Uncertainty Maxima",
@@ -115,7 +118,7 @@ class AppMenuBar(QMenuBar):
         grp.triggered.connect(lambda a: self.request_set_ann_method.emit(a.text()))
 
         # -------- Navigation Policy sub-menu -------------------------
-        nav_menu = self.addMenu("Navigation Policy")
+        nav_menu = actions_menu.addMenu("Navigation Policy")
         nav_grp = QActionGroup(self)
         for label, name in [
             ("Greedy", "greedy"),
