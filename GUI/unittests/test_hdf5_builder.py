@@ -23,6 +23,7 @@ def test_build_training_hdf5_invokes_mc(tmp_path: Path) -> None:
 
     fake_module.main = fake_main
     fake_module.setup_logging = lambda *a, **k: logging.getLogger("test")
+    fake_module.set_global_seed = lambda *a, **k: None
 
     fake_model = types.SimpleNamespace(
         input_shape=(None, 256, 256, 3), output_shape=(None, 256, 256, 2)

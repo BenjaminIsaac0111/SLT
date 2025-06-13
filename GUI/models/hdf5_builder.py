@@ -52,6 +52,8 @@ def build_training_hdf5(
         SpatialConcreteDropout,
     )
 
+    main_unet_mc_banker.set_global_seed(42)
+
     model = load_model(
         model_path,
         custom_objects={
