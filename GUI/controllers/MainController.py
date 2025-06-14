@@ -596,9 +596,9 @@ class MainController(QObject):
     # -----------------------------------------------------------------
     #                 MONTE CARLO BANKER HDF5 BUILDER
     # -----------------------------------------------------------------
-    @pyqtSlot(str)
-    def run_mc_banker(self, config_path: str) -> None:
-        worker = MCBankerWorker(config_path)
+    @pyqtSlot(dict)
+    def run_mc_banker(self, config: dict) -> None:
+        worker = MCBankerWorker(config)
         worker.signals.finished.connect(self._on_mc_banker_finished)
         self.threadpool.start(worker)
 

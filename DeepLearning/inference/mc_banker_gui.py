@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import logging
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict, Any
 
 import yaml
 
@@ -43,21 +43,8 @@ def _infer_model_spec(path: str) -> Tuple[list[int], int]:
     return input_size, out_channels
 
 
-def run_from_file(
-    config_path: str,
-    *,
-    output_dir: Optional[str] = None,
-    output_file: Optional[str] = None,
-    resume: bool = False,
-    log_level: str = "INFO",
-) -> None:
-    """Run MC banker inference using a YAML configuration file."""
-    from DeepLearning.inference.main_unet_mc_banker import main, setup_logging
-
-    logger = setup_logging(getattr(logging, log_level.upper(), logging.INFO))
-    with open(config_path, "r") as fh:
-        cfg = yaml.safe_load(fh)
-
+def _prepare_config(cfg: Dict[str, Any], *, output_dir: Optional[str] = None, output_file: Optional[str] = None) -> Dict[str, Any]:
+    """Sanitise configuration dictionary."""
     if output_dir:
         cfg["OUTPUT_DIR"] = output_dir
     if output_file:
@@ -78,6 +65,41 @@ def run_from_file(
         model_path = Path(cfg["MODEL_DIR"]) / cfg["MODEL_NAME"]
         cfg["INPUT_SIZE"], cfg["OUT_CHANNELS"] = _infer_model_spec(str(model_path))
 
+    return cfg
+
+
+def run_config(
+    cfg: Dict[str, Any],
+    *,
+    output_dir: Optional[str] = None,
+    output_file: Optional[str] = None,
+    resume: bool = False,
+    log_level: str = "INFO",
+) -> None:
+    """Run MC banker inference using a configuration dict."""
+    from DeepLearning.inference.main_unet_mc_banker import main, setup_logging
+
+    logger = setup_logging(getattr(logging, log_level.upper(), logging.INFO))
+    cfg = _prepare_config(cfg, output_dir=output_dir, output_file=output_file)
+    main(cfg, logger=logger, resume=resume)
+
+
+def run_from_file(
+    config_path: str,
+    *,
+    output_dir: Optional[str] = None,
+    output_file: Optional[str] = None,
+    resume: bool = False,
+    log_level: str = "INFO",
+) -> None:
+    """Run MC banker inference using a YAML configuration file."""
+    from DeepLearning.inference.main_unet_mc_banker import main, setup_logging
+
+    logger = setup_logging(getattr(logging, log_level.upper(), logging.INFO))
+    with open(config_path, "r") as fh:
+        cfg = yaml.safe_load(fh)
+
+    cfg = _prepare_config(cfg, output_dir=output_dir, output_file=output_file)
     main(cfg, logger=logger, resume=resume)
 
 

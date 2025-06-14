@@ -2,11 +2,9 @@ from __future__ import annotations
 
 """Wizard dialog for configuring MC banker inference."""
 
-import tempfile
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict, Any
 
-import yaml
 from PyQt5.QtWidgets import (
     QFileDialog,
     QFormLayout,
@@ -15,7 +13,6 @@ from PyQt5.QtWidgets import (
     QComboBox,
     QLabel,
     QPushButton,
-    QRadioButton,
     QSpinBox,
     QDoubleSpinBox,
     QVBoxLayout,
@@ -24,38 +21,6 @@ from PyQt5.QtWidgets import (
 )
 
 
-class _SelectPage(QWizardPage):
-    """Choose between loading or creating a configuration."""
-
-    def __init__(self, wizard: "MCBankerWizard") -> None:
-        super().__init__(wizard)
-        self.setTitle("Configuration Source")
-        layout = QVBoxLayout(self)
-        self.rb_load = QRadioButton("Load existing YAML configuration")
-        self.rb_create = QRadioButton("Create new configuration")
-        self.rb_load.setChecked(True)
-        layout.addWidget(self.rb_load)
-        layout.addWidget(self.rb_create)
-
-    def nextId(self) -> int:  # pragma: no cover - wizard navigation
-        if self.rb_load.isChecked():
-            return MCBankerWizard.PAGE_LOAD
-        return MCBankerWizard.PAGE_CREATE
-
-
-class _LoadPage(QWizardPage):
-    """Page for selecting a YAML configuration file."""
-
-    def __init__(self, wizard: "MCBankerWizard") -> None:
-        super().__init__(wizard)
-        self.setTitle("Load Configuration")
-        layout = QVBoxLayout(self)
-        row = QHBoxLayout()
-        self.edit = QLineEdit()
-        row.addWidget(self.edit, 1)
-        btn = wizard._make_browse_button(self.edit, select_dir=False)
-        row.addWidget(btn)
-        layout.addLayout(row)
 
 
 class _CreatePage(QWizardPage):
@@ -143,22 +108,16 @@ class _CreatePage(QWizardPage):
 class MCBankerWizard(QWizard):
     """Wizard guiding the user to run MC banker inference."""
 
-    PAGE_SELECT = 0
-    PAGE_LOAD = 1
-    PAGE_CREATE = 2
+    PAGE_CREATE = 0
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Build MC Inference HDF5")
 
-        self.select_page = _SelectPage(self)
-        self.load_page = _LoadPage(self)
         self.create_page = _CreatePage(self)
 
-        self.setPage(self.PAGE_SELECT, self.select_page)
-        self.setPage(self.PAGE_LOAD, self.load_page)
         self.setPage(self.PAGE_CREATE, self.create_page)
-        self.setStartId(self.PAGE_SELECT)
+        self.setStartId(self.PAGE_CREATE)
 
     # ------------------------------------------------------------------ helpers
     def _make_browse_row(
@@ -261,13 +220,10 @@ class MCBankerWizard(QWizard):
         return input_shape, out_channels
 
     # ------------------------------------------------------------------ API
-    def get_config_path(self) -> Optional[str]:
-        """Return path to configuration YAML or ``None`` if cancelled."""
+    def get_config(self) -> Optional[Dict[str, Any]]:
+        """Return configuration dict or ``None`` if cancelled."""
         if self.exec_() != QWizard.Accepted:
             return None
-        if self.select_page.rb_load.isChecked():
-            path = self.load_page.edit.text()
-            return path if path else None
 
         model_path = self.create_page.model_path.currentText()
         if not model_path:
@@ -301,13 +257,10 @@ class MCBankerWizard(QWizard):
             ),
             "TEMPERATURE": float(self.create_page.temperature.value()),
         }
-        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".yaml")
-        with open(tmp.name, "w") as fh:
-            yaml.safe_dump(cfg, fh)
         from GUI.models.MCConfigDB import save_config
 
         save_config(cfg)
-        return tmp.name
+        return cfg
 
 
 class _BrowseButton(QPushButton):

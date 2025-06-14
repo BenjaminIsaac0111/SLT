@@ -23,7 +23,7 @@ class AppMenuBar(QMenuBar):
     request_set_nav_policy = pyqtSignal(str)
     request_annotation_preview = pyqtSignal()
     request_build_cv_folds = pyqtSignal(str, str, int)
-    request_run_mc_banker = pyqtSignal(str)
+    request_run_mc_banker = pyqtSignal(dict)
 
     # ----------------------------------------------------------------
     def __init__(self, parent=None) -> None:
@@ -148,6 +148,6 @@ class AppMenuBar(QMenuBar):
         from .MCBankerWizard import MCBankerWizard
 
         wiz = MCBankerWizard(self)
-        path = wiz.get_config_path()
-        if path:
-            self.request_run_mc_banker.emit(path)
+        cfg = wiz.get_config()
+        if cfg is not None:
+            self.request_run_mc_banker.emit(cfg)

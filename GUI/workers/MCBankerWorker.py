@@ -3,11 +3,11 @@ from __future__ import annotations
 """Worker to run MC banker inference in the background."""
 
 import logging
-from typing import Optional
+from typing import Optional, Dict, Any
 
 from PyQt5.QtCore import QObject, QRunnable, pyqtSignal
 
-from DeepLearning.inference.mc_banker_gui import run_from_file
+from DeepLearning.inference.mc_banker_gui import run_config
 
 
 class MCBankerSignals(QObject):
@@ -19,16 +19,16 @@ class MCBankerSignals(QObject):
 class MCBankerWorker(QRunnable):
     """Background task executing MC banker inference."""
 
-    def __init__(self, config_path: str, *, output_dir: Optional[str] = None, resume: bool = False) -> None:
+    def __init__(self, config: Dict[str, Any], *, output_dir: Optional[str] = None, resume: bool = False) -> None:
         super().__init__()
-        self.config_path = config_path
+        self.config = config
         self.output_dir = output_dir
         self.resume = resume
         self.signals = MCBankerSignals()
 
     def run(self) -> None:  # pragma: no cover - background execution
         try:
-            run_from_file(self.config_path, output_dir=self.output_dir, resume=self.resume)
+            run_config(self.config, output_dir=self.output_dir, resume=self.resume)
             self.signals.finished.emit(True)
         except Exception as exc:  # pragma: no cover - defensive
             logging.error("MC banker worker failed: %s", exc)

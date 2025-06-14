@@ -1,7 +1,6 @@
 import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-import yaml
 import pytest
 from PyQt5.QtWidgets import QApplication
 
@@ -18,7 +17,6 @@ def qapp():
 
 def test_wizard_creates_config(tmp_path, qapp, monkeypatch):
     wiz = MCBankerWizard()
-    wiz.select_page.rb_create.setChecked(True)
 
     model_file = tmp_path / "model.h5"
     model_file.touch()
@@ -38,10 +36,8 @@ def test_wizard_creates_config(tmp_path, qapp, monkeypatch):
     wiz.create_page.unc_type.setCurrentText("variance")
 
     wiz.exec_ = lambda: MCBankerWizard.Accepted
-    path = wiz.get_config_path()
-    assert path
-    with open(path) as fh:
-        cfg = yaml.safe_load(fh)
+    cfg = wiz.get_config()
+    assert cfg
     assert cfg["BATCH_SIZE"] == 1
     assert cfg["SHUFFLE_BUFFER_SIZE"] == 256
     assert cfg["INPUT_SIZE"] == [16, 16, 1]
