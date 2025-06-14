@@ -14,6 +14,7 @@ class CrossValidationSignals(QObject):
     """Signals for :class:`CrossValidationWorker`."""
 
     finished = pyqtSignal(str)
+    progress = pyqtSignal(int)
 
 
 class CrossValidationWorker(QRunnable):
@@ -42,6 +43,7 @@ class CrossValidationWorker(QRunnable):
                 self.output_dir,
                 n_splits=self.n_splits,
                 shuffle=self.shuffle,
+                progress=self.signals.progress.emit,
             )
             self.signals.finished.emit(str(self.output_dir))
         except Exception as exc:  # pragma: no cover - defensive

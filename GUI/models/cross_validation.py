@@ -58,8 +58,20 @@ def write_cv_folds(
     *,
     n_splits: int = 3,
     shuffle: bool = True,
+    progress: callable[[int], None] | None = None,
 ) -> None:
-    """Write cross-validation folds to ``output_dir``."""
+    """Write cross-validation folds to ``output_dir``.
+
+    Parameters
+    ----------
+    image_dir:
+        Directory containing images to split into folds.
+    output_dir:
+        Destination directory for generated files.
+    progress:
+        Optional callback receiving the 1-based index of the fold that has just
+        been written.
+    """
     out = Path(output_dir).expanduser()
     out.mkdir(parents=True, exist_ok=True)
 
@@ -73,5 +85,7 @@ def write_cv_folds(
             out / f"Fold_{i}_TestData.txt", index=False, header=False, sep="\t"
         )
         np.savetxt(out / f"Fold_{i}_weights.txt", weights, fmt="%.6f")
+        if progress:
+            progress(i)
 
 

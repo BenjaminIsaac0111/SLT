@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Optional, Dict, List
 
 from PyQt5.QtCore import QObject, pyqtSlot, QTimer, QCoreApplication, QThreadPool
-from PyQt5.QtWidgets import QMessageBox
+from PyQt5.QtWidgets import QMessageBox, QProgressDialog
 
 from GUI.controllers.AnnotationClusteringController import AnnotationClusteringController
 from GUI.controllers.ImageProcessingController import ImageProcessingController
@@ -53,6 +53,7 @@ class MainController(QObject):
 
         # ---------- GUI state -------------------------------------------
         self._progress_dlg: Optional[ClusteringProgressDialog] = None
+        self._cv_progress: Optional[QProgressDialog] = None
         self._nav_history: list[int] = []
         self._current_cluster_id: Optional[int] = None
         self._current_ann_method = "Local Uncertainty Maxima"
@@ -557,22 +558,40 @@ class MainController(QObject):
     ) -> None:
         worker = CrossValidationWorker(image_dir, output_dir, n_splits=n_folds)
         worker.signals.finished.connect(self._on_cv_folds_finished)
+        worker.signals.progress.connect(self._on_cv_progress)
+
+        self._cv_progress = QProgressDialog(
+            "Creating cross-validation folds…",
+            None,
+            0,
+            n_folds,
+            self.view,
+        )
+        self._cv_progress.setWindowTitle("Building Folds")
+        self._cv_progress.setModal(True)
+        self._cv_progress.setAutoClose(False)
+        self._cv_progress.setValue(0)
+        self._cv_progress.show()
+
         self.threadpool.start(worker)
 
     @pyqtSlot(str)
     def _on_cv_folds_finished(self, out_dir: str) -> None:
+        if self._cv_progress:
+            self._cv_progress.close()
+            self._cv_progress.deleteLater()
+            self._cv_progress = None
         if out_dir:
             QMessageBox.information(
                 self.view,
                 "Cross-Validation Complete",
                 f"Folds written to\n{out_dir}",
             )
-        else:
-            QMessageBox.critical(
-                self.view,
-                "Cross-Validation Failed",
-                "Failed to create cross-validation folds.",
-            )
+
+    @pyqtSlot(int)
+    def _on_cv_progress(self, value: int) -> None:
+        if self._cv_progress:
+            self._cv_progress.setValue(value)
 
     # -----------------------------------------------------------------
     #                    ANNOTATION PREVIEW DIALOG

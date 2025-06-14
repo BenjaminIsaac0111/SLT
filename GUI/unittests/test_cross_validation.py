@@ -1,6 +1,6 @@
 import numpy as np
 from pathlib import Path
-from GUI.models.cross_validation import build_cv_folds
+from GUI.models.cross_validation import build_cv_folds, write_cv_folds
 
 
 def create_files(tmp_path: Path) -> None:
@@ -25,4 +25,18 @@ def test_build_cv_folds_group_preservation(tmp_path: Path):
         train_groups = {name.split("_")[0] for name in train_df["filename"]}
         assert test_groups.isdisjoint(train_groups)
     assert len(seen_groups) == 3
+
+
+def test_write_cv_folds_progress(tmp_path: Path):
+    create_files(tmp_path)
+    out_dir = tmp_path / "out"
+    calls = []
+
+    def _progress(i: int) -> None:
+        calls.append(i)
+
+    write_cv_folds(tmp_path, out_dir, n_splits=3, shuffle=False, progress=_progress)
+    assert calls == [1, 2, 3]
+    for i in range(1, 4):
+        assert (out_dir / f"Fold_{i}_TrainingData.txt").exists()
 
