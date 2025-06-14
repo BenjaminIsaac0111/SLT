@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Menu bar for the Smart Annotation GUI."""
+
+from __future__ import annotations
 
 from PyQt5.QtCore import pyqtSignal
 from PyQt5.QtWidgets import (
