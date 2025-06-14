@@ -72,7 +72,12 @@ class AppMenuBar(QMenuBar):
     def __init__(self, parent=None):
         super().__init__(parent)
 
-        # -------- File menu -----------------------------------------
+        self._build_file_menu()
+        self._build_actions_menu()
+
+    # ----------------------------------------------------------------
+    def _build_file_menu(self) -> None:
+        """Create the File menu."""
         file_menu = self.addMenu("&File")
 
         act_load = file_menu.addAction("Load Project…")
@@ -85,15 +90,11 @@ class AppMenuBar(QMenuBar):
         act_save_as = file_menu.addAction("Save As…")
         act_save_as.triggered.connect(self._pick_path_to_save_as)
 
-        file_menu.addSeparator()
-
-        act_export = file_menu.addAction("Export Annotations…")
-        act_export.triggered.connect(self._pick_path_to_export)
-
-        # -------- Actions menu --------------------------------------
+    # ----------------------------------------------------------------
+    def _build_actions_menu(self) -> None:
+        """Create the Actions menu and its submenus."""
         actions_menu = self.addMenu("&Actions")
 
-        # ----- Annotations ------------------------------------------
         ann_menu = actions_menu.addMenu("Annotations")
         act_gen = ann_menu.addAction("Generate Annotations…")
         act_gen.setShortcut("Ctrl+G")
@@ -101,9 +102,10 @@ class AppMenuBar(QMenuBar):
         ann_menu.addSeparator()
         act_preview = ann_menu.addAction("Preview Annotation Overlays…")
         act_preview.triggered.connect(self.request_annotation_preview)
-        ann_menu.addAction(act_export)  # reuse QAction instance
+        act_export = ann_menu.addAction("Export Annotations…")
+        act_export.triggered.connect(self._pick_path_to_export)
 
-        # -------- Annotation Method sub‑menu -------------------------
+        # ----- Annotation Method ------------------------------------
         method_menu = actions_menu.addMenu("Annotation Method")
         grp = QActionGroup(self)
         for label in [
