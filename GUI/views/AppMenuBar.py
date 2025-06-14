@@ -3,7 +3,13 @@ from __future__ import annotations
 """Menu bar for the Smart Annotation GUI."""
 
 from PyQt5.QtCore import pyqtSignal
-from PyQt5.QtWidgets import QAction, QActionGroup, QMenuBar, QFileDialog
+from PyQt5.QtWidgets import (
+    QAction,
+    QActionGroup,
+    QMenuBar,
+    QFileDialog,
+    QInputDialog,
+)
 
 from GUI.configuration.configuration import PROJECT_EXT
 
@@ -20,6 +26,8 @@ class AppMenuBar(QMenuBar):
     request_set_ann_method = pyqtSignal(str)
     request_set_nav_policy = pyqtSignal(str)
     request_annotation_preview = pyqtSignal()
+    request_create_folds = pyqtSignal(str, str, int)
+    request_build_hdf5 = pyqtSignal(str, str, str, str, int, int)
 
     # ----------------------------------------------------------------
     def __init__(self, parent=None) -> None:
@@ -55,6 +63,11 @@ class AppMenuBar(QMenuBar):
         act_preview.triggered.connect(self.request_annotation_preview)
         act_export = ann_menu.addAction("Export Annotations…")
         act_export.triggered.connect(self._pick_path_to_export)
+
+        act_cv = actions_menu.addAction("Create CV Folds…")
+        act_cv.triggered.connect(self._pick_folds_dirs)
+        act_h5 = actions_menu.addAction("Build Training HDF5…")
+        act_h5.triggered.connect(self._pick_hdf5_args)
 
         # ----- Annotation Method ------------------------------------
         method_menu = actions_menu.addMenu("Annotation Method")
@@ -121,3 +134,74 @@ class AppMenuBar(QMenuBar):
         )
         if path:
             self.request_export_annotations.emit(path)
+
+    def _pick_folds_dirs(self) -> None:
+        data_dir = QFileDialog.getExistingDirectory(
+            self, "Select Image Directory", ""
+        )
+        if not data_dir:
+            return
+        out_dir = QFileDialog.getExistingDirectory(
+            self, "Select Output Directory", ""
+        )
+        if not out_dir:
+            return
+
+        splits, ok = QInputDialog.getInt(
+            self,
+            "Cross Validation",
+            "Number of folds:",
+            3,
+            2,
+            20,
+        )
+        if ok:
+            self.request_create_folds.emit(data_dir, out_dir, splits)
+
+    def _pick_hdf5_args(self) -> None:
+        data_dir = QFileDialog.getExistingDirectory(
+            self, "Select Image Directory", ""
+        )
+        if not data_dir:
+            return
+        csv_file, _ = QFileDialog.getOpenFileName(
+            self, "Select Training CSV", "", "CSV files (*.csv);;All files (*)"
+        )
+        if not csv_file:
+            return
+        model_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Segmentation Model",
+            "",
+            "HDF5 files (*.h5 *.hdf5);;All files (*)",
+        )
+        if not model_path:
+            return
+        out_file, _ = QFileDialog.getSaveFileName(
+            self, "Output HDF5 File", "", "HDF5 files (*.h5 *.hdf5);;All files (*)"
+        )
+        if not out_file:
+            return
+        size, ok = QInputDialog.getInt(
+            self,
+            "Subsample",
+            "Number of samples (0 = all):",
+            0,
+            0,
+            10_000_000,
+        )
+        if not ok:
+            return
+
+        mc_iter, ok = QInputDialog.getInt(
+            self,
+            "MC Iterations",
+            "Number of stochastic passes:",
+            1,
+            1,
+            512,
+        )
+        if ok:
+            self.request_build_hdf5.emit(
+                data_dir, csv_file, model_path, out_file, size, mc_iter
+            )

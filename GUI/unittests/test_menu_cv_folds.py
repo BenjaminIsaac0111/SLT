@@ -1,6 +1,6 @@
 from PyQt5.QtWidgets import QFileDialog, QApplication, QInputDialog
 import pytest
-from gui_main import AppMenuBar
+from GUI.views.AppMenuBar import AppMenuBar
 
 
 @pytest.fixture(scope="session")
