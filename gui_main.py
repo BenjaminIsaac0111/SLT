@@ -194,6 +194,7 @@ def _main_window(view, controller) -> QMainWindow:  # noqa: D401 – imperative
     mb.request_save_project_as.connect(controller.save_project_as)  # expects slot(path)
     mb.request_load_project.connect(controller.load_project)  # slot(path)
     mb.request_export_annotations.connect(controller.export_annotations)
+    mb.request_build_cv_folds.connect(controller.build_cross_validation_folds)
     mb.request_set_nav_policy.connect(controller.on_navigation_policy_changed)
 
 

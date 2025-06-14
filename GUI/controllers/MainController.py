@@ -6,7 +6,7 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Optional, Dict, List
 
-from PyQt5.QtCore import QObject, pyqtSlot, QTimer, QCoreApplication
+from PyQt5.QtCore import QObject, pyqtSlot, QTimer, QCoreApplication, QThreadPool
 from PyQt5.QtWidgets import QMessageBox
 
 from GUI.controllers.AnnotationClusteringController import AnnotationClusteringController
@@ -27,6 +27,7 @@ from GUI.models.navigation.ClusterSelection import make_selector
 from GUI.views.ClusteredCropsView import ClusteredCropsView
 from GUI.views.ClusteringProgressDialog import ClusteringProgressDialog
 from GUI.views.AnnotationPreviewDialog import AnnotationPreviewDialog
+from GUI.workers import CrossValidationWorker
 
 
 class MainController(QObject):
@@ -46,6 +47,7 @@ class MainController(QObject):
         self.image_processing_controller = ImageProcessingController(model)
         self.io = ProjectIOService(data_anchor=Path(model.data_path) if model else None)
         self._export_usecase = ExportAnnotationsUseCase()
+        self.threadpool = QThreadPool.globalInstance()
 
         self.cluster_selector = make_selector("greedy", self.clustering_controller)
 
@@ -544,6 +546,32 @@ class MainController(QObject):
                 self.view,
                 "Export Successful",
                 f"Exported {count} annotations to\n{export_file}",
+            )
+
+    # -----------------------------------------------------------------
+    #                      CROSS-VALIDATION FOLDS
+    # -----------------------------------------------------------------
+    @pyqtSlot(str, str, int)
+    def build_cross_validation_folds(
+        self, image_dir: str, output_dir: str, n_folds: int
+    ) -> None:
+        worker = CrossValidationWorker(image_dir, output_dir, n_splits=n_folds)
+        worker.signals.finished.connect(self._on_cv_folds_finished)
+        self.threadpool.start(worker)
+
+    @pyqtSlot(str)
+    def _on_cv_folds_finished(self, out_dir: str) -> None:
+        if out_dir:
+            QMessageBox.information(
+                self.view,
+                "Cross-Validation Complete",
+                f"Folds written to\n{out_dir}",
+            )
+        else:
+            QMessageBox.critical(
+                self.view,
+                "Cross-Validation Failed",
+                "Failed to create cross-validation folds.",
             )
 
     # -----------------------------------------------------------------
