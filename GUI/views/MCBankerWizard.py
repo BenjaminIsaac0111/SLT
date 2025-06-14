@@ -183,6 +183,17 @@ class MCBankerWizard(QWizard):
         model_path = self.create_page.model_path.text()
         if not model_path:
             return None
+        outc_txt = self.create_page.out_channels.text()
+        in_size_txt = self.create_page.in_size.text()
+        if "?" in outc_txt or "?" in in_size_txt:
+            try:
+                in_size, outc = self._infer_model_spec(model_path)
+            except Exception:
+                return None
+        else:
+            outc = int(outc_txt)
+            in_size = [int(v) for v in in_size_txt.split("x")]
+
         cfg = {
             "MODEL_DIR": str(Path(model_path).parent),
             "MODEL_NAME": Path(model_path).name,
@@ -190,8 +201,8 @@ class MCBankerWizard(QWizard):
             "FILE_LIST": self.create_page.file_list.text(),
             "BATCH_SIZE": 1,
             "SHUFFLE_BUFFER_SIZE": 256,
-            "OUT_CHANNELS": int(self.create_page.out_channels.text()),
-            "INPUT_SIZE": [int(v) for v in self.create_page.in_size.text().split("x")],
+            "OUT_CHANNELS": outc,
+            "INPUT_SIZE": in_size,
             "MC_N_ITER": self.create_page.mc_iter.value(),
         }
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".yaml")
