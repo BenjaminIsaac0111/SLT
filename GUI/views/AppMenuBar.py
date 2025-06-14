@@ -28,7 +28,8 @@ class AppMenuBar(QMenuBar):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._build_file_menu()
-        self._build_actions_menu()
+        self._build_annotations_menu()
+        self._build_tools_menu()
 
     # ----------------------------------------------------------------
     def _build_file_menu(self) -> None:
@@ -46,11 +47,10 @@ class AppMenuBar(QMenuBar):
         act_save_as.triggered.connect(self._pick_path_to_save_as)
 
     # ----------------------------------------------------------------
-    def _build_actions_menu(self) -> None:
-        """Create the Actions menu and its submenus."""
-        actions_menu = self.addMenu("&Actions")
+    def _build_annotations_menu(self) -> None:
+        """Create the Annotations menu and related submenus."""
+        ann_menu = self.addMenu("&Annotations")
 
-        ann_menu = actions_menu.addMenu("Annotations")
         act_gen = ann_menu.addAction("Generate Annotations…")
         act_gen.triggered.connect(self.request_generate_annos)
         ann_menu.addSeparator()
@@ -60,7 +60,7 @@ class AppMenuBar(QMenuBar):
         act_export.triggered.connect(self._pick_path_to_export)
 
         # ----- Annotation Method ------------------------------------
-        method_menu = actions_menu.addMenu("Annotation Method")
+        method_menu = ann_menu.addMenu("Annotation Method")
         grp = QActionGroup(self)
         for label in [
             "Local Uncertainty Maxima",
@@ -74,7 +74,7 @@ class AppMenuBar(QMenuBar):
         grp.triggered.connect(lambda a: self.request_set_ann_method.emit(a.text()))
 
         # -------- Navigation Policy sub-menu -------------------------
-        nav_menu = actions_menu.addMenu("Navigation Policy")
+        nav_menu = ann_menu.addMenu("Navigation Policy")
         nav_grp = QActionGroup(self)
         for label, name in [
             ("Greedy", "greedy"),
@@ -90,8 +90,14 @@ class AppMenuBar(QMenuBar):
             lambda a: self.request_set_nav_policy.emit(a.data())
         )
 
-        act_cv = actions_menu.addAction("Build Cross-Validation Folds…")
+
+    # ----------------------------------------------------------------
+    def _build_tools_menu(self) -> None:
+        """Create the Tools menu for ancillary actions."""
+        tools_menu = self.addMenu("&Tools")
+        act_cv = tools_menu.addAction("Build Cross-Validation Folds…")
         act_cv.triggered.connect(self._pick_cv_folders)
+
 
     # ----------------------------------------------------------------
     def set_checked_annotation_method(self, label: str) -> None:
