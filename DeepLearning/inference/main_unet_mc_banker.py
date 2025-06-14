@@ -82,10 +82,10 @@ def set_global_seed(seed: int) -> None:
 mixed_precision.set_global_policy("mixed_float16")
 
 
-def _predict_logits(x: tf.Tensor, model: tf.keras.Model) -> tf.Tensor:
-    """Raw logits from the model *in float32* with dropout active."""
+def _predict_logits(x: tf.Tensor, model: tf.keras.Model, *, training: bool = True) -> tf.Tensor:
+    """Return logits in float32 with optional dropout."""
 
-    logits_fp16 = model(x, training=True)  # honours dropout layers
+    logits_fp16 = model(x, training=training)
     return tf.cast(logits_fp16, tf.float32)
 
 
@@ -119,7 +119,7 @@ def mc_infer(
     # ---------------------------------------------------------------------
     batch_size = tf.shape(x)[0]
     x_tiled = tf.repeat(x, repeats=n_iter, axis=0)  # [n_iter⋅B, ...]
-    logits = _predict_logits(x_tiled, model)  # float32
+    logits = _predict_logits(x_tiled, model, training=True)  # float32
 
     h, w = tf.shape(logits)[1], tf.shape(logits)[2]
     logits = tf.reshape(logits, (n_iter, batch_size, h, w, num_classes))  # [T, B, H, W, K]
@@ -144,12 +144,36 @@ def mc_infer(
 
     # BALD (mutual information) -------------------------------------------
     bald = entropy - expected_entropy
+    variance = tf.reduce_sum(tf.math.reduce_variance(probs, axis=0), axis=-1)
 
     return {
         "entropy": entropy_norm,
+        "variance": variance,
         "bald": bald,
         "mean_probs": mean_probs,
         "mean_logits": mean_logits,
+    }
+
+
+def entropy_only(
+        x: tf.Tensor,
+        *,
+        model: tf.keras.Model,
+        num_classes: int,
+        temperature: float = 1.0,
+) -> Dict[str, tf.Tensor]:
+    """Return entropy without MC sampling."""
+
+    logits = _predict_logits(x, model, training=False)
+    logits_scaled = logits / tf.cast(temperature, tf.float32)
+    probs = tf.nn.softmax(logits_scaled, axis=-1)
+    entropy = -tf.reduce_sum(probs * tf.math.log(probs + 1e-6), axis=-1)
+    max_entropy = tf.math.log(tf.cast(num_classes, tf.float32))
+    entropy_norm = entropy / max_entropy
+    return {
+        "entropy": entropy_norm,
+        "mean_probs": probs,
+        "mean_logits": logits_scaled,
     }
 
 
@@ -227,7 +251,12 @@ def main(config: Dict[str, Any], *, logger: logging.Logger, resume: bool = False
     # ---------------------------------------------------------------------
     # Uncertainty selection ----------------------------------------------
     # ---------------------------------------------------------------------
-    uncertainty_types = [ut.lower() for ut in config.get("UNCERTAINTY_TYPES", ["variance", "bald", "entropy"])]
+    if "UNCERTAINTY_TYPE" in config:
+        uncertainty_types = [config["UNCERTAINTY_TYPE"].lower()]
+    else:
+        uncertainty_types = [
+            ut.lower() for ut in config.get("UNCERTAINTY_TYPES", ["variance", "bald", "entropy"])
+        ]
 
     # ---------------------------------------------------------------------
     # Optional cap on #samples --------------------------------------------
@@ -331,13 +360,21 @@ def main(config: Dict[str, Any], *, logger: logging.Logger, resume: bool = False
             bsz_actual = x_batch.shape[0]
 
             # ----------------------------------- Uncertainties ----------
-            uncs = mc_infer(
-                x_batch,
-                n_iter=int(config["MC_N_ITER"]),
-                model=model,
-                num_classes=num_classes,
-                temperature=float(config.get("TEMPERATURE", 1.0)),
-            )
+            if uncertainty_types == ["entropy"]:
+                uncs = entropy_only(
+                    x_batch,
+                    model=model,
+                    num_classes=num_classes,
+                    temperature=float(config.get("TEMPERATURE", 1.0)),
+                )
+            else:
+                uncs = mc_infer(
+                    x_batch,
+                    n_iter=int(config["MC_N_ITER"]),
+                    model=model,
+                    num_classes=num_classes,
+                    temperature=float(config.get("TEMPERATURE", 1.0)),
+                )
 
             # Cast to numpy early (1 cpu copy) --------------------------
             x_uint8 = (x_batch.numpy() * 255).astype("uint8")
@@ -359,7 +396,8 @@ def main(config: Dict[str, Any], *, logger: logging.Logger, resume: bool = False
             fname_ds[idx:new_size] = filenames_str
 
             for ut in uncertainty_types:
-                data_np = uncs[ut if ut != "total" else "entropy"].numpy().astype("float16")
+                key = ut if ut != "total" else "entropy"
+                data_np = uncs[key].numpy().astype("float16")
                 unc_ds[ut][idx:new_size] = data_np
 
             idx += bsz_actual
@@ -401,8 +439,9 @@ if __name__ == "__main__":
             "MODEL_NAME",
             "DATA_DIR",
             "FILE_LIST",
-            "MC_N_ITER",
         ]
+        if cfg.get("UNCERTAINTY_TYPE", "entropy").lower() != "entropy":
+            required.append("MC_N_ITER")
         missing = [k for k in required if k not in cfg]
         if missing:
             logger.error("Missing required config keys: %s", missing)

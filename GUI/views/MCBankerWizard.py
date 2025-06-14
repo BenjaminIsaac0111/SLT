@@ -119,10 +119,18 @@ class _CreatePage(QWizardPage):
         self.out_channels = QLabel("?")
         form.addRow("Output channels:", self.out_channels)
 
+        self.unc_type = QComboBox()
+        self.unc_type.addItems(["BALD", "variance", "entropy"])
+        form.addRow("Uncertainty:", self.unc_type)
+
         self.mc_iter = QSpinBox()
         self.mc_iter.setRange(1, 100)
         self.mc_iter.setValue(8)
         form.addRow("MC iterations:", self.mc_iter)
+
+        self.unc_type.currentTextChanged.connect(
+            lambda text: self.mc_iter.setEnabled(text.lower() != "entropy")
+        )
 
 
 class MCBankerWizard(QWizard):
@@ -278,7 +286,12 @@ class MCBankerWizard(QWizard):
             "SHUFFLE_BUFFER_SIZE": 256,
             "OUT_CHANNELS": outc,
             "INPUT_SIZE": in_size,
-            "MC_N_ITER": self.create_page.mc_iter.value(),
+            "UNCERTAINTY_TYPE": self.create_page.unc_type.currentText().lower(),
+            "MC_N_ITER": (
+                1
+                if self.create_page.unc_type.currentText().lower() == "entropy"
+                else self.create_page.mc_iter.value()
+            ),
         }
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".yaml")
         with open(tmp.name, "w") as fh:

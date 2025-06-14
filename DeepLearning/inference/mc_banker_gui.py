@@ -15,7 +15,6 @@ REQUIRED_KEYS = [
     "MODEL_NAME",
     "DATA_DIR",
     "FILE_LIST",
-    "MC_N_ITER",
 ]
 
 
@@ -67,6 +66,9 @@ def run_from_file(
     missing = [k for k in REQUIRED_KEYS if k not in cfg]
     if missing:
         raise KeyError(f"Missing required config keys: {missing}")
+
+    if cfg.get("UNCERTAINTY_TYPE", "entropy").lower() == "entropy":
+        cfg.setdefault("MC_N_ITER", 1)
 
     cfg.setdefault("BATCH_SIZE", 1)
     cfg.setdefault("SHUFFLE_BUFFER_SIZE", 256)
