@@ -22,12 +22,14 @@ REQUIRED_KEYS = [
 def _infer_model_spec(path: str) -> Tuple[list[int], int]:
     """Return ``(input_size, out_channels)`` for a saved model path."""
     from tensorflow.keras.models import load_model
+    from tensorflow.keras import mixed_precision
     from DeepLearning.models.custom_layers import (
         DropoutAttentionBlock,
         GroupNormalization,
         SpatialConcreteDropout,
     )
 
+    mixed_precision.set_global_policy("mixed_float16")
     model = load_model(
         path,
         custom_objects={

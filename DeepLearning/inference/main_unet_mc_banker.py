@@ -176,6 +176,8 @@ def main(config: Dict[str, Any], *, logger: logging.Logger, resume: bool = False
     model_path = Path(config["MODEL_DIR"]) / f"{config['MODEL_NAME']}"
     logger.info("Loading model from %s", model_path)
 
+    mixed_precision.set_global_policy("mixed_float16")
+
     model = load_model(
         model_path,
         custom_objects={

@@ -223,11 +223,14 @@ class MCBankerWizard(QWizard):
     @staticmethod
     def _infer_model_spec(path: str) -> Tuple[list[int], int]:
         from tensorflow.keras.models import load_model
+        from tensorflow.keras import mixed_precision
         from DeepLearning.models.custom_layers import (
             DropoutAttentionBlock,
             GroupNormalization,
             SpatialConcreteDropout,
         )
+
+        mixed_precision.set_global_policy("mixed_float16")
 
         model = load_model(
             path,
