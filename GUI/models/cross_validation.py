@@ -3,12 +3,11 @@ from __future__ import annotations
 """Utilities for building stratified group cross-validation folds."""
 
 from pathlib import Path
-from typing import List, Tuple
+from typing import Dict, Iterable, List, Tuple
 
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import StratifiedGroupKFold
-from sklearn.utils.class_weight import compute_class_weight
 
 __all__ = ["build_cv_folds", "write_cv_folds"]
 
@@ -20,14 +19,32 @@ def _parse_filename(name: str) -> Tuple[str, str]:
     return parts[0], parts[-1]
 
 
+def _compute_weights(y: Iterable[str], classes: Iterable[str]) -> Dict[str, float]:
+    """Return class weights for ``y`` labelled by ``classes``.
+
+    Missing classes receive a weight of ``0.0`` so the mapping size remains
+    constant regardless of class presence in the fold.
+    """
+    counts = pd.Series(list(y)).value_counts()
+    total = counts.sum()
+    n_classes = len(list(classes))
+    weights = {}
+    for cls in classes:
+        if cls in counts and counts[cls] > 0:
+            weights[cls] = total / (n_classes * counts[cls])
+        else:
+            weights[cls] = 0.0
+    return weights
+
+
 def build_cv_folds(
     image_dir: str | Path, *, n_splits: int = 3, shuffle: bool = True
-) -> List[Tuple[pd.DataFrame, pd.DataFrame, np.ndarray]]:
+) -> List[Tuple[pd.DataFrame, pd.DataFrame, Dict[str, float]]]:
     """Return cross-validation folds for *image_dir*.
 
     Each returned tuple is ``(train_df, test_df, weights)`` where ``train_df`` and
-    ``test_df`` contain a ``filename`` column.  ``weights`` are class weights for
-    the training set computed with ``compute_class_weight``.
+    ``test_df`` contain a ``filename`` column. ``weights`` is a mapping from class
+    label to computed weight for the training set.
     """
     path = Path(image_dir).expanduser()
     files = [f for f in path.iterdir() if f.is_file()]
@@ -41,13 +58,13 @@ def build_cv_folds(
     rng = 42 if shuffle else None
     cv = StratifiedGroupKFold(n_splits=n_splits, shuffle=shuffle, random_state=rng)
 
+    all_classes = sorted(df["class"].unique())
+
     folds = []
     for train_idx, test_idx in cv.split(df["filename"], df["class"], df["group"]):
         train_df = df.iloc[train_idx]
         test_df = df.iloc[test_idx]
-        weights = compute_class_weight(
-            "balanced", classes=np.unique(train_df["class"]), y=train_df["class"]
-        )
+        weights = _compute_weights(train_df["class"], all_classes)
         folds.append((train_df, test_df, weights))
     return folds
 
@@ -74,6 +91,8 @@ def write_cv_folds(
     """
     out = Path(output_dir).expanduser()
     out.mkdir(parents=True, exist_ok=True)
+    for old in out.glob("Fold_*_*.txt"):
+        old.unlink()
 
     for i, (train_df, test_df, weights) in enumerate(
         build_cv_folds(image_dir, n_splits=n_splits, shuffle=shuffle), start=1
@@ -84,7 +103,9 @@ def write_cv_folds(
         test_df[["filename"]].to_csv(
             out / f"Fold_{i}_TestData.txt", index=False, header=False, sep="\t"
         )
-        np.savetxt(out / f"Fold_{i}_weights.txt", weights, fmt="%.6f")
+        pd.DataFrame({"class": list(weights.keys()), "weight": list(weights.values())}).to_csv(
+            out / f"Fold_{i}_weights.txt", index=False, sep="\t"
+        )
         if progress:
             progress(i)
 
