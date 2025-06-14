@@ -5,6 +5,8 @@ from __future__ import annotations
 from PyQt5.QtCore import pyqtSignal
 from PyQt5.QtWidgets import QAction, QActionGroup, QMenuBar, QFileDialog
 
+from .CrossValidationDialog import CrossValidationDialog
+
 from GUI.configuration.configuration import PROJECT_EXT
 
 
@@ -20,6 +22,7 @@ class AppMenuBar(QMenuBar):
     request_set_ann_method = pyqtSignal(str)
     request_set_nav_policy = pyqtSignal(str)
     request_annotation_preview = pyqtSignal()
+    request_build_cv_folds = pyqtSignal(str, str, int)
 
     # ----------------------------------------------------------------
     def __init__(self, parent=None) -> None:
@@ -87,6 +90,9 @@ class AppMenuBar(QMenuBar):
             lambda a: self.request_set_nav_policy.emit(a.data())
         )
 
+        act_cv = actions_menu.addAction("Build Cross-Validation Folds…")
+        act_cv.triggered.connect(self._pick_cv_folders)
+
     # ----------------------------------------------------------------
     def set_checked_annotation_method(self, label: str) -> None:
         """Tick QAction matching *label* and untick others."""
@@ -121,3 +127,10 @@ class AppMenuBar(QMenuBar):
         )
         if path:
             self.request_export_annotations.emit(path)
+
+    def _pick_cv_folders(self) -> None:
+        dlg = CrossValidationDialog(self)
+        cfg = dlg.get_config()
+        if cfg is not None:
+            img_dir, out_dir, folds = cfg
+            self.request_build_cv_folds.emit(img_dir, out_dir, folds)

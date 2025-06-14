@@ -6,8 +6,8 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Optional, Dict, List
 
-from PyQt5.QtCore import QObject, pyqtSlot, QTimer, QCoreApplication
-from PyQt5.QtWidgets import QMessageBox
+from PyQt5.QtCore import QObject, pyqtSlot, QTimer, QCoreApplication, QThreadPool
+from PyQt5.QtWidgets import QMessageBox, QProgressDialog
 
 from GUI.controllers.AnnotationClusteringController import AnnotationClusteringController
 from GUI.controllers.ImageProcessingController import ImageProcessingController
@@ -27,6 +27,7 @@ from GUI.models.navigation.ClusterSelection import make_selector
 from GUI.views.ClusteredCropsView import ClusteredCropsView
 from GUI.views.ClusteringProgressDialog import ClusteringProgressDialog
 from GUI.views.AnnotationPreviewDialog import AnnotationPreviewDialog
+from GUI.workers import CrossValidationWorker
 
 
 class MainController(QObject):
@@ -46,11 +47,13 @@ class MainController(QObject):
         self.image_processing_controller = ImageProcessingController(model)
         self.io = ProjectIOService(data_anchor=Path(model.data_path) if model else None)
         self._export_usecase = ExportAnnotationsUseCase()
+        self.threadpool = QThreadPool.globalInstance()
 
         self.cluster_selector = make_selector("greedy", self.clustering_controller)
 
         # ---------- GUI state -------------------------------------------
         self._progress_dlg: Optional[ClusteringProgressDialog] = None
+        self._cv_progress: Optional[QProgressDialog] = None
         self._nav_history: list[int] = []
         self._current_cluster_id: Optional[int] = None
         self._current_ann_method = "Local Uncertainty Maxima"
@@ -545,6 +548,50 @@ class MainController(QObject):
                 "Export Successful",
                 f"Exported {count} annotations to\n{export_file}",
             )
+
+    # -----------------------------------------------------------------
+    #                      CROSS-VALIDATION FOLDS
+    # -----------------------------------------------------------------
+    @pyqtSlot(str, str, int)
+    def build_cross_validation_folds(
+        self, image_dir: str, output_dir: str, n_folds: int
+    ) -> None:
+        worker = CrossValidationWorker(image_dir, output_dir, n_splits=n_folds)
+        worker.signals.finished.connect(self._on_cv_folds_finished)
+        worker.signals.progress.connect(self._on_cv_progress)
+
+        self._cv_progress = QProgressDialog(
+            "Creating cross-validation folds…",
+            None,
+            0,
+            n_folds,
+            self.view,
+        )
+        self._cv_progress.setWindowTitle("Building Folds")
+        self._cv_progress.setModal(True)
+        self._cv_progress.setAutoClose(False)
+        self._cv_progress.setValue(0)
+        self._cv_progress.show()
+
+        self.threadpool.start(worker)
+
+    @pyqtSlot(str)
+    def _on_cv_folds_finished(self, out_dir: str) -> None:
+        if self._cv_progress:
+            self._cv_progress.close()
+            self._cv_progress.deleteLater()
+            self._cv_progress = None
+        if out_dir:
+            QMessageBox.information(
+                self.view,
+                "Cross-Validation Complete",
+                f"Folds written to\n{out_dir}",
+            )
+
+    @pyqtSlot(int)
+    def _on_cv_progress(self, value: int) -> None:
+        if self._cv_progress:
+            self._cv_progress.setValue(value)
 
     # -----------------------------------------------------------------
     #                    ANNOTATION PREVIEW DIALOG
