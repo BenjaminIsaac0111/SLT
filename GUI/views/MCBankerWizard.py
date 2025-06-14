@@ -140,10 +140,24 @@ class MCBankerWizard(QWizard):
             self.create_page.in_size.setText("?")
             self.create_page.out_channels.setText("?")
             return
+
+        from PyQt5.QtWidgets import QApplication, QProgressDialog
+        from PyQt5.QtCore import Qt
+
+        dlg = QProgressDialog("Loading model…", None, 0, 0, self)
+        dlg.setWindowTitle("Please Wait")
+        dlg.setWindowModality(Qt.ApplicationModal)
+        dlg.setMinimumDuration(0)
+        dlg.show()
+        QApplication.processEvents()
+
         try:
             input_size, outc = self._infer_model_spec(path)
         except Exception:
             input_size, outc = ("?", "?")
+        finally:
+            dlg.close()
+
         if input_size == "?":
             self.create_page.in_size.setText("?")
             self.create_page.out_channels.setText("?")
