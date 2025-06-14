@@ -39,6 +39,9 @@ def test_create_grouped_folds(tmp_path: Path):
         assert len(test_lines) == 2
         # training set should contain remaining four samples
         assert len(train_lines) == 4
+        # each line should just contain the filename with no extra columns
+        assert all("\t" not in l and "," not in l for l in train_lines)
+        assert all("\t" not in l and "," not in l for l in test_lines)
 
 
 def test_create_folds_ignore_non_images(tmp_path: Path) -> None:
