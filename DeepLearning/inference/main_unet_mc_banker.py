@@ -204,11 +204,15 @@ def main(config: Dict[str, Any], *, logger: logging.Logger, resume: bool = False
     # ---------------------------------------------------------------------
     # Output file ---------------------------------------------------------
     # ---------------------------------------------------------------------
-    output_dir = Path(config.get("OUTPUT_DIR", config["MODEL_DIR"]))
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_file = output_dir / (
-        f"mc_{Path(config['MODEL_NAME']).stem}_inference_output.h5"
-    )
+    if "OUTPUT_FILE" in config:
+        output_file = Path(config["OUTPUT_FILE"])
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        output_dir = Path(config.get("OUTPUT_DIR", config["MODEL_DIR"]))
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_file = output_dir / (
+            f"mc_{Path(config['MODEL_NAME']).stem}_inference_output.h5"
+        )
 
     logger.info("Writing to %s", output_file)
 
@@ -375,6 +379,7 @@ if __name__ == "__main__":
     parser.add_argument("--log_level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])
     parser.add_argument("--log_file", help="Path to log file")
     parser.add_argument("--output_dir", help="Override OUTPUT_DIR from YAML")
+    parser.add_argument("--output_file", help="Override OUTPUT_FILE from YAML")
     parser.add_argument("--resume", action="store_true", help="Append to existing HDF5 instead of overwrite")
 
     args = parser.parse_args()
@@ -386,6 +391,8 @@ if __name__ == "__main__":
             cfg = yaml.safe_load(fh)
         if args.output_dir:
             cfg["OUTPUT_DIR"] = args.output_dir
+        if args.output_file:
+            cfg["OUTPUT_FILE"] = args.output_file
 
         required = [
             "MODEL_DIR",

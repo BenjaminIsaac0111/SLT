@@ -32,7 +32,7 @@ def test_wizard_creates_config(tmp_path, qapp, monkeypatch):
     wiz.create_page.model_path.setEditText(str(model_file))
     wiz.create_page.data_dir.setText(str(tmp_path))
     wiz.create_page.file_list.setText(str(tmp_path / "files.txt"))
-    wiz.create_page.output_dir.setText(str(tmp_path / "out"))
+    wiz.create_page.output_file.setText(str(tmp_path / "out.h5"))
     wiz.create_page.mc_iter.setValue(5)
 
     wiz.exec_ = lambda: MCBankerWizard.Accepted
@@ -44,5 +44,5 @@ def test_wizard_creates_config(tmp_path, qapp, monkeypatch):
     assert cfg["SHUFFLE_BUFFER_SIZE"] == 256
     assert cfg["INPUT_SIZE"] == [16, 16, 1]
     assert cfg["OUT_CHANNELS"] == 3
-    assert cfg["OUTPUT_DIR"].endswith("out")
+    assert cfg["OUTPUT_FILE"].endswith("out.h5")
 

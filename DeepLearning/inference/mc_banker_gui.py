@@ -46,6 +46,7 @@ def run_from_file(
     config_path: str,
     *,
     output_dir: Optional[str] = None,
+    output_file: Optional[str] = None,
     resume: bool = False,
     log_level: str = "INFO",
 ) -> None:
@@ -58,6 +59,8 @@ def run_from_file(
 
     if output_dir:
         cfg["OUTPUT_DIR"] = output_dir
+    if output_file:
+        cfg["OUTPUT_FILE"] = output_file
 
     missing = [k for k in REQUIRED_KEYS if k not in cfg]
     if missing:
@@ -79,10 +82,17 @@ def cli() -> None:
     parser.add_argument("-c", "--config_path", required=True, help="YAML configuration file")
     parser.add_argument("--log_level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])
     parser.add_argument("--output_dir", help="Override OUTPUT_DIR from YAML")
+    parser.add_argument("--output_file", help="Override OUTPUT_FILE from YAML")
     parser.add_argument("--resume", action="store_true", help="Append to existing HDF5 instead of overwrite")
     args = parser.parse_args()
 
-    run_from_file(args.config_path, output_dir=args.output_dir, resume=args.resume, log_level=args.log_level)
+    run_from_file(
+        args.config_path,
+        output_dir=args.output_dir,
+        output_file=args.output_file,
+        resume=args.resume,
+        log_level=args.log_level,
+    )
 
 
 if __name__ == "__main__":

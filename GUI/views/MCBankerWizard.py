@@ -69,19 +69,49 @@ class _CreatePage(QWizardPage):
         self.model_path.setEditable(True)
         row = QHBoxLayout()
         row.addWidget(self.model_path, 1)
-        row.addWidget(wizard._make_browse_button(self.model_path, False))
+        row.addWidget(
+            wizard._make_browse_button(
+                self.model_path,
+                select_dir=False,
+                file_filter=
+                "TensorFlow models (*.h5 *.hdf5 *.keras *.pb *.ckpt *.index);;All files (*)",
+            )
+        )
         form.addRow("Model file:", row)
         self.model_path.currentTextChanged.connect(wizard._update_model_info)
         self.model_path.editTextChanged.connect(wizard._update_model_info)
 
         self.data_dir = QLineEdit()
-        form.addRow("Data directory:", wizard._make_browse_row(self.data_dir, True))
+        form.addRow(
+            "Data directory:",
+            wizard._make_browse_row(
+                self.data_dir,
+                True,
+                file_filter="Image files (*.png *.jpg *.jpeg *.bmp *.tif *.tiff)"
+            ),
+        )
 
         self.file_list = QLineEdit()
-        form.addRow("Data list:", wizard._make_browse_row(self.file_list, False))
+        form.addRow(
+            "Data list:",
+            wizard._make_browse_row(
+                self.file_list,
+                False,
+                file_filter=
+                "List files (*.txt *.csv);;Image files (*.png *.jpg *.jpeg *.bmp *.tif *.tiff);;All files (*)",
+            ),
+        )
 
-        self.output_dir = QLineEdit()
-        form.addRow("Output directory:", wizard._make_browse_row(self.output_dir, True))
+        self.output_file = QLineEdit()
+        form.addRow(
+            "Output file:",
+            wizard._make_browse_row(
+                self.output_file,
+                False,
+                file_filter="HDF5 files (*.h5 *.hdf5);;All files (*)",
+                save_file=True,
+            ),
+        )
 
         self.in_size = QLabel("?")
         form.addRow("Input size:", self.in_size)
@@ -116,10 +146,24 @@ class MCBankerWizard(QWizard):
         self.setStartId(self.PAGE_SELECT)
 
     # ------------------------------------------------------------------ helpers
-    def _make_browse_row(self, widget, select_dir: bool) -> QHBoxLayout:
+    def _make_browse_row(
+        self,
+        widget,
+        select_dir: bool,
+        *,
+        file_filter: str = "",
+        save_file: bool = False,
+    ) -> QHBoxLayout:
         row = QHBoxLayout()
         row.addWidget(widget, 1)
-        row.addWidget(self._make_browse_button(widget, select_dir))
+        row.addWidget(
+            self._make_browse_button(
+                widget,
+                select_dir=select_dir,
+                file_filter=file_filter,
+                save_file=save_file,
+            )
+        )
         return row
 
     def _make_model_combo(self) -> QComboBox:
@@ -131,9 +175,20 @@ class MCBankerWizard(QWizard):
         combo.addItems(get_recent_model_paths())
         return combo
 
-    def _make_browse_button(self, widget, select_dir: bool):
-        btn = _BrowseButton(widget, None, select_dir)
-        return btn
+    def _make_browse_button(
+        self,
+        widget,
+        *,
+        select_dir: bool = False,
+        file_filter: str = "",
+        save_file: bool = False,
+    ):
+        return _BrowseButton(
+            widget,
+            select_dir=select_dir,
+            file_filter=file_filter,
+            save_file=save_file,
+        )
 
     def _update_model_info(self, path: str) -> None:  # pragma: no cover - UI
         if not path:
@@ -215,7 +270,7 @@ class MCBankerWizard(QWizard):
             "MODEL_NAME": Path(model_path).name,
             "DATA_DIR": self.create_page.data_dir.text(),
             "FILE_LIST": self.create_page.file_list.text(),
-            "OUTPUT_DIR": self.create_page.output_dir.text(),
+            "OUTPUT_FILE": self.create_page.output_file.text(),
             "BATCH_SIZE": 1,
             "SHUFFLE_BUFFER_SIZE": 256,
             "OUT_CHANNELS": outc,
@@ -234,17 +289,39 @@ class MCBankerWizard(QWizard):
 class _BrowseButton(QPushButton):
     """Button helper for file/directory selection."""
 
-    def __init__(self, widget, _chooser, select_dir: bool) -> None:
+    def __init__(
+        self,
+        widget,
+        *,
+        select_dir: bool = False,
+        file_filter: str = "",
+        save_file: bool = False,
+    ) -> None:
         super().__init__("Browse…")
         self.widget = widget
         self._dir = select_dir
+        self._filter = file_filter
+        self._save = save_file
         self.clicked.connect(self._choose)
 
     def _choose(self) -> None:  # pragma: no cover - UI
         if self._dir:
-            path = QFileDialog.getExistingDirectory(None, "Select Directory")
+            dlg = QFileDialog()
+            dlg.setFileMode(QFileDialog.Directory)
+            dlg.setOption(QFileDialog.ShowDirsOnly, False)
+            if self._filter:
+                dlg.setNameFilter(self._filter)
+            if not dlg.exec_():
+                return
+            path = dlg.selectedFiles()[0]
+        elif self._save:
+            path, _ = QFileDialog.getSaveFileName(
+                None, "Select File", "", self._filter
+            )
         else:
-            path, _ = QFileDialog.getOpenFileName(None, "Select File")
+            path, _ = QFileDialog.getOpenFileName(
+                None, "Select File", "", self._filter
+            )
         if path:
             if hasattr(self.widget, "setText"):
                 self.widget.setText(path)
