@@ -6,7 +6,7 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Optional, Dict, List
 
-from PyQt5.QtCore import QObject, pyqtSlot, QTimer, QCoreApplication
+from PyQt5.QtCore import QObject, pyqtSlot, QTimer, QCoreApplication, QThreadPool
 from PyQt5.QtWidgets import QMessageBox
 
 from GUI.controllers.AnnotationClusteringController import AnnotationClusteringController
@@ -27,6 +27,7 @@ from GUI.models.navigation.ClusterSelection import make_selector
 from GUI.views.ClusteredCropsView import ClusteredCropsView
 from GUI.views.ClusteringProgressDialog import ClusteringProgressDialog
 from GUI.views.AnnotationPreviewDialog import AnnotationPreviewDialog
+from GUI.workers.CrossValidationWorker import CrossValidationWorker
 
 
 class MainController(QObject):
@@ -545,6 +546,58 @@ class MainController(QObject):
                 "Export Successful",
                 f"Exported {count} annotations to\n{export_file}",
             )
+
+    # -----------------------------------------------------------------
+    #               CROSS VALIDATION FOLD GENERATION
+    # -----------------------------------------------------------------
+    @pyqtSlot(str, str, int)
+    def create_cv_folds(self, data_dir: str, out_dir: str, splits: int) -> None:
+        """Generate grouped cross-validation folds asynchronously."""
+        worker = CrossValidationWorker(data_dir, out_dir, n_splits=splits)
+        worker.signals.finished.connect(
+            lambda: QMessageBox.information(
+                self.view, "CV Folds", "Fold generation completed."
+            )
+        )
+        worker.signals.error.connect(
+            lambda err: QMessageBox.critical(self.view, "CV Fold Error", err)
+        )
+        QThreadPool.globalInstance().start(worker)
+
+    # -----------------------------------------------------------------
+    #                  TRAINING HDF5 GENERATION
+    # -----------------------------------------------------------------
+    @pyqtSlot(str, str, str, str, int, int)
+    def build_training_hdf5(
+        self,
+        data_dir: str,
+        csv_file: str,
+        model_path: str,
+        out_file: str,
+        sample_size: int,
+        mc_iter: int,
+    ) -> None:
+        """Create an HDF5 file for the training set asynchronously."""
+        from GUI.workers.HDF5BuildWorker import HDF5BuildWorker
+
+        size = sample_size if sample_size > 0 else None
+        worker = HDF5BuildWorker(
+            data_dir,
+            csv_file,
+            model_path,
+            out_file,
+            sample_size=size,
+            mc_iter=max(1, mc_iter),
+        )
+        worker.signals.finished.connect(
+            lambda: QMessageBox.information(
+                self.view, "HDF5", "HDF5 creation completed."
+            )
+        )
+        worker.signals.error.connect(
+            lambda err: QMessageBox.critical(self.view, "HDF5 Error", err)
+        )
+        QThreadPool.globalInstance().start(worker)
 
     # -----------------------------------------------------------------
     #                    ANNOTATION PREVIEW DIALOG
