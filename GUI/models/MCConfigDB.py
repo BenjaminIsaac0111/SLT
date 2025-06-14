@@ -21,6 +21,7 @@ def _ensure_db() -> None:
                 file_list TEXT,
                 mc_iter INTEGER,
                 temperature REAL,
+                n_samples INTEGER,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
             """
@@ -29,6 +30,8 @@ def _ensure_db() -> None:
         cols = [row[1] for row in cur.fetchall()]
         if "temperature" not in cols:
             conn.execute("ALTER TABLE configs ADD COLUMN temperature REAL")
+        if "n_samples" not in cols:
+            conn.execute("ALTER TABLE configs ADD COLUMN n_samples INTEGER")
 
 
 def save_config(cfg: Dict[str, Any]) -> None:
@@ -36,13 +39,14 @@ def save_config(cfg: Dict[str, Any]) -> None:
     _ensure_db()
     with sqlite3.connect(_DB_PATH) as conn:
         conn.execute(
-            "INSERT INTO configs (model_path, data_dir, file_list, mc_iter, temperature) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO configs (model_path, data_dir, file_list, mc_iter, temperature, n_samples) VALUES (?, ?, ?, ?, ?, ?)",
             (
                 str(Path(cfg["MODEL_DIR"]) / cfg["MODEL_NAME"]),
                 cfg["DATA_DIR"],
                 cfg["FILE_LIST"],
                 int(cfg["MC_N_ITER"]),
                 float(cfg.get("TEMPERATURE", 1.0)),
+                int(cfg.get("N_SAMPLES", -1)),
             ),
         )
         conn.commit()

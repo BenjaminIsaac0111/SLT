@@ -100,6 +100,11 @@ class _CreatePage(QWizardPage):
         self.temperature.setValue(1.0)
         form.addRow("Temperature:", self.temperature)
 
+        self.subset = QSpinBox()
+        self.subset.setRange(0, 1000000)
+        self.subset.setValue(0)
+        form.addRow("Subset size:", self.subset)
+
         self.unc_type.currentTextChanged.connect(
             lambda text: self.mc_iter.setEnabled(text.lower() != "entropy")
         )
@@ -256,6 +261,11 @@ class MCBankerWizard(QWizard):
                 else self.create_page.mc_iter.value()
             ),
             "TEMPERATURE": float(self.create_page.temperature.value()),
+            "N_SAMPLES": (
+                int(self.create_page.subset.value())
+                if self.create_page.subset.value() > 0
+                else -1
+            ),
         }
         from GUI.models.MCConfigDB import save_config
 

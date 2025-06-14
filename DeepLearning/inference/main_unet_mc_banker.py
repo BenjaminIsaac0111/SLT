@@ -5,6 +5,7 @@ import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+import tempfile
 
 import h5py
 import numpy as np
@@ -217,9 +218,28 @@ def main(config: Dict[str, Any], *, logger: logging.Logger, resume: bool = False
     # ---------------------------------------------------------------------
     # Dataset -------------------------------------------------------------
     # ---------------------------------------------------------------------
+    file_list_path = config.get("FILE_LIST") or config.get("TRAINING_LIST")
+    with open(file_list_path, "r") as f:
+        rel_paths = [line.strip().split("\t")[0] for line in f if line.strip()]
+
+    n_samples_cfg = int(config.get("N_SAMPLES", -1))
+    rng = np.random.default_rng(int(config.get("SEED", 42)))
+    subset_file = None
+    if 0 < n_samples_cfg < len(rel_paths):
+        rel_paths = rng.choice(rel_paths, size=n_samples_cfg, replace=False).tolist()
+        subset_file = tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".txt")
+        subset_file.write("\n".join(rel_paths))
+        subset_file.close()
+        file_list_used = subset_file.name
+    else:
+        file_list_used = file_list_path
+
+    total_samples = len(rel_paths)
+    logger.info("Total samples to process: %s", total_samples)
+
     ds = get_dataset_v2(
         data_dir=config["DATA_DIR"],
-        filelists=config.get("FILE_LIST") or config.get("TRAINING_LIST"),
+        filelists=file_list_used,
         repeat=False,
         shuffle=False,
         batch_size=batch_size,
@@ -261,14 +281,6 @@ def main(config: Dict[str, Any], *, logger: logging.Logger, resume: bool = False
     # ---------------------------------------------------------------------
     # Optional cap on #samples --------------------------------------------
     # ---------------------------------------------------------------------
-    n_samples_cfg = int(config.get("N_SAMPLES", -1))
-    file_list_path = config.get("FILE_LIST") or config.get("TRAINING_LIST")
-    if n_samples_cfg == -1:
-        with open(file_list_path, "r") as f:
-            total_samples = sum(1 for _ in f if _.strip())
-    else:
-        total_samples = n_samples_cfg
-
     logger.info("Total samples to process: %s", total_samples)
 
     # ---------------------------------------------------------------------
@@ -407,6 +419,9 @@ def main(config: Dict[str, Any], *, logger: logging.Logger, resume: bool = False
         pbar.close()
         logger.info("Finished writing %d samples.", idx - start_idx)
 
+    if subset_file is not None:
+        os.unlink(subset_file.name)
+
 
 # ----------------------------------------------------------------------------
 # CLI ------------------------------------------------------------------------
@@ -420,6 +435,11 @@ if __name__ == "__main__":
     parser.add_argument("--log_file", help="Path to log file")
     parser.add_argument("--output_dir", help="Override OUTPUT_DIR from YAML")
     parser.add_argument("--output_file", help="Override OUTPUT_FILE from YAML")
+    parser.add_argument(
+        "--n_samples",
+        type=int,
+        help="Number of random samples to process (0 or negative for all)",
+    )
     parser.add_argument("--resume", action="store_true", help="Append to existing HDF5 instead of overwrite")
 
     args = parser.parse_args()
@@ -433,6 +453,8 @@ if __name__ == "__main__":
             cfg["OUTPUT_DIR"] = args.output_dir
         if args.output_file:
             cfg["OUTPUT_FILE"] = args.output_file
+        if args.n_samples is not None:
+            cfg["N_SAMPLES"] = args.n_samples
 
         required = [
             "MODEL_DIR",

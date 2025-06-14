@@ -60,6 +60,7 @@ def _prepare_config(cfg: Dict[str, Any], *, output_dir: Optional[str] = None, ou
     cfg.setdefault("BATCH_SIZE", 1)
     cfg.setdefault("SHUFFLE_BUFFER_SIZE", 256)
     cfg.setdefault("TEMPERATURE", 1.0)
+    cfg.setdefault("N_SAMPLES", -1)
 
     if "INPUT_SIZE" not in cfg or "OUT_CHANNELS" not in cfg:
         model_path = Path(cfg["MODEL_DIR"]) / cfg["MODEL_NAME"]
@@ -75,12 +76,15 @@ def run_config(
     output_file: Optional[str] = None,
     resume: bool = False,
     log_level: str = "INFO",
+    n_samples: Optional[int] = None,
 ) -> None:
     """Run MC banker inference using a configuration dict."""
     from DeepLearning.inference.main_unet_mc_banker import main, setup_logging
 
     logger = setup_logging(getattr(logging, log_level.upper(), logging.INFO))
     cfg = _prepare_config(cfg, output_dir=output_dir, output_file=output_file)
+    if n_samples is not None:
+        cfg["N_SAMPLES"] = n_samples
     main(cfg, logger=logger, resume=resume)
 
 
@@ -91,6 +95,7 @@ def run_from_file(
     output_file: Optional[str] = None,
     resume: bool = False,
     log_level: str = "INFO",
+    n_samples: Optional[int] = None,
 ) -> None:
     """Run MC banker inference using a YAML configuration file."""
     from DeepLearning.inference.main_unet_mc_banker import main, setup_logging
@@ -100,6 +105,8 @@ def run_from_file(
         cfg = yaml.safe_load(fh)
 
     cfg = _prepare_config(cfg, output_dir=output_dir, output_file=output_file)
+    if n_samples is not None:
+        cfg["N_SAMPLES"] = n_samples
     main(cfg, logger=logger, resume=resume)
 
 
@@ -110,6 +117,11 @@ def cli() -> None:
     parser.add_argument("--log_level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])
     parser.add_argument("--output_dir", help="Override OUTPUT_DIR from YAML")
     parser.add_argument("--output_file", help="Override OUTPUT_FILE from YAML")
+    parser.add_argument(
+        "--n_samples",
+        type=int,
+        help="Number of random samples to process (0 or negative for all)",
+    )
     parser.add_argument("--resume", action="store_true", help="Append to existing HDF5 instead of overwrite")
     args = parser.parse_args()
 
@@ -119,6 +131,7 @@ def cli() -> None:
         output_file=args.output_file,
         resume=args.resume,
         log_level=args.log_level,
+        n_samples=args.n_samples,
     )
 
 

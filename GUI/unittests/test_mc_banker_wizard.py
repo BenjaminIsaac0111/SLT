@@ -34,6 +34,7 @@ def test_wizard_creates_config(tmp_path, qapp, monkeypatch):
     wiz.create_page.mc_iter.setValue(5)
     wiz.create_page.temperature.setValue(1.5)
     wiz.create_page.unc_type.setCurrentText("variance")
+    wiz.create_page.subset.setValue(10)
 
     wiz.exec_ = lambda: MCBankerWizard.Accepted
     cfg = wiz.get_config()
@@ -46,5 +47,6 @@ def test_wizard_creates_config(tmp_path, qapp, monkeypatch):
     assert cfg["UNCERTAINTY_TYPE"] == "variance"
     assert cfg["MC_N_ITER"] == 5
     assert cfg["TEMPERATURE"] == 1.5
+    assert cfg["N_SAMPLES"] == 10
 
 
