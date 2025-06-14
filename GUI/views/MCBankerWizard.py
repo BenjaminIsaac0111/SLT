@@ -3,7 +3,8 @@ from __future__ import annotations
 """Wizard dialog for configuring MC banker inference."""
 
 import tempfile
-from typing import Optional
+from pathlib import Path
+from typing import Optional, Tuple
 
 import yaml
 from PyQt5.QtWidgets import (
@@ -11,6 +12,8 @@ from PyQt5.QtWidgets import (
     QFormLayout,
     QHBoxLayout,
     QLineEdit,
+    QComboBox,
+    QLabel,
     QPushButton,
     QRadioButton,
     QSpinBox,
@@ -55,48 +58,33 @@ class _LoadPage(QWizardPage):
 
 
 class _CreatePage(QWizardPage):
-    """Gather required parameters for MC banker inference."""
+    """Gather parameters for MC banker inference."""
 
     def __init__(self, wizard: "MCBankerWizard") -> None:
         super().__init__(wizard)
         self.setTitle("Create Configuration")
         form = QFormLayout(self)
 
-        self.model_dir = QLineEdit()
-        form.addRow("Model directory:", wizard._make_browse_row(self.model_dir, True))
-
-        self.model_name = QLineEdit()
-        form.addRow("Model name:", self.model_name)
+        self.model_path = QLineEdit()
+        self.model_select = wizard._make_model_combo(self.model_path)
+        row = QHBoxLayout()
+        row.addWidget(self.model_path, 1)
+        row.addWidget(self.model_select)
+        row.addWidget(wizard._make_browse_button(self.model_path, False))
+        form.addRow("Model file:", row)
+        self.model_path.textChanged.connect(wizard._update_model_info)
 
         self.data_dir = QLineEdit()
         form.addRow("Data directory:", wizard._make_browse_row(self.data_dir, True))
 
-        self.train_list = QLineEdit()
-        form.addRow("Training list:", wizard._make_browse_row(self.train_list, False))
+        self.file_list = QLineEdit()
+        form.addRow("Data list:", wizard._make_browse_row(self.file_list, False))
 
-        self.batch_size = QSpinBox()
-        self.batch_size.setRange(1, 512)
-        self.batch_size.setValue(1)
-        form.addRow("Batch size:", self.batch_size)
+        self.in_size = QLabel("?")
+        form.addRow("Input size:", self.in_size)
 
-        self.shuffle_buf = QSpinBox()
-        self.shuffle_buf.setRange(1, 8192)
-        self.shuffle_buf.setValue(256)
-        form.addRow("Shuffle buffer:", self.shuffle_buf)
-
-        self.out_channels = QSpinBox()
-        self.out_channels.setRange(1, 20)
-        self.out_channels.setValue(2)
+        self.out_channels = QLabel("?")
         form.addRow("Output channels:", self.out_channels)
-
-        self.in_h = QSpinBox(); self.in_h.setRange(1, 4096)
-        self.in_w = QSpinBox(); self.in_w.setRange(1, 4096)
-        self.in_c = QSpinBox(); self.in_c.setRange(1, 4)
-        row = QHBoxLayout()
-        row.addWidget(self.in_h)
-        row.addWidget(self.in_w)
-        row.addWidget(self.in_c)
-        form.addRow("Input size (H W C):", row)
 
         self.mc_iter = QSpinBox()
         self.mc_iter.setRange(1, 100)
@@ -131,10 +119,57 @@ class MCBankerWizard(QWizard):
         row.addWidget(self._make_browse_button(edit, select_dir))
         return row
 
+    def _make_model_combo(self, edit: QLineEdit):
+        from GUI.models.MCConfigDB import get_recent_model_paths
+
+        combo = QComboBox()
+        combo.setEditable(False)
+        combo.addItems(get_recent_model_paths())
+        combo.currentTextChanged.connect(edit.setText)
+        return combo
+
     def _make_browse_button(self, edit: QLineEdit, select_dir: bool):
         button = QFileDialog.getExistingDirectory if select_dir else QFileDialog.getOpenFileName
         btn = _BrowseButton(edit, button, select_dir)
         return btn
+
+    def _update_model_info(self, path: str) -> None:  # pragma: no cover - UI
+        if not path:
+            self.create_page.in_size.setText("?")
+            self.create_page.out_channels.setText("?")
+            return
+        try:
+            input_size, outc = self._infer_model_spec(path)
+        except Exception:
+            input_size, outc = ("?", "?")
+        if input_size == "?":
+            self.create_page.in_size.setText("?")
+            self.create_page.out_channels.setText("?")
+        else:
+            self.create_page.in_size.setText("x".join(str(x) for x in input_size))
+            self.create_page.out_channels.setText(str(outc))
+
+    @staticmethod
+    def _infer_model_spec(path: str) -> Tuple[list[int], int]:
+        from tensorflow.keras.models import load_model
+        from DeepLearning.models.custom_layers import (
+            DropoutAttentionBlock,
+            GroupNormalization,
+            SpatialConcreteDropout,
+        )
+
+        model = load_model(
+            path,
+            custom_objects={
+                "DropoutAttentionBlock": DropoutAttentionBlock,
+                "GroupNormalization": GroupNormalization,
+                "SpatialConcreteDropout": SpatialConcreteDropout,
+            },
+            compile=False,
+        )
+        input_shape = list(model.input_shape[1:])
+        out_channels = int(model.layers[-1].output_shape[-1])
+        return input_shape, out_channels
 
     # ------------------------------------------------------------------ API
     def get_config_path(self) -> Optional[str]:
@@ -145,24 +180,26 @@ class MCBankerWizard(QWizard):
             path = self.load_page.edit.text()
             return path if path else None
 
+        model_path = self.create_page.model_path.text()
+        if not model_path:
+            return None
         cfg = {
-            "MODEL_DIR": self.create_page.model_dir.text(),
-            "MODEL_NAME": self.create_page.model_name.text(),
+            "MODEL_DIR": str(Path(model_path).parent),
+            "MODEL_NAME": Path(model_path).name,
             "DATA_DIR": self.create_page.data_dir.text(),
-            "TRAINING_LIST": self.create_page.train_list.text(),
-            "BATCH_SIZE": self.create_page.batch_size.value(),
-            "SHUFFLE_BUFFER_SIZE": self.create_page.shuffle_buf.value(),
-            "OUT_CHANNELS": self.create_page.out_channels.value(),
-            "INPUT_SIZE": [
-                self.create_page.in_h.value(),
-                self.create_page.in_w.value(),
-                self.create_page.in_c.value(),
-            ],
+            "FILE_LIST": self.create_page.file_list.text(),
+            "BATCH_SIZE": 1,
+            "SHUFFLE_BUFFER_SIZE": 256,
+            "OUT_CHANNELS": int(self.create_page.out_channels.text()),
+            "INPUT_SIZE": [int(v) for v in self.create_page.in_size.text().split("x")],
             "MC_N_ITER": self.create_page.mc_iter.value(),
         }
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".yaml")
         with open(tmp.name, "w") as fh:
             yaml.safe_dump(cfg, fh)
+        from GUI.models.MCConfigDB import save_config
+
+        save_config(cfg)
         return tmp.name
 
 

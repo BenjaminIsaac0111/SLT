@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import argparse
 import logging
-from typing import Optional
+from pathlib import Path
+from typing import Optional, Tuple
 
 import yaml
 
@@ -13,13 +14,32 @@ REQUIRED_KEYS = [
     "MODEL_DIR",
     "MODEL_NAME",
     "DATA_DIR",
-    "TRAINING_LIST",
-    "BATCH_SIZE",
-    "SHUFFLE_BUFFER_SIZE",
-    "OUT_CHANNELS",
-    "INPUT_SIZE",
+    "FILE_LIST",
     "MC_N_ITER",
 ]
+
+
+def _infer_model_spec(path: str) -> Tuple[list[int], int]:
+    """Return ``(input_size, out_channels)`` for a saved model path."""
+    from tensorflow.keras.models import load_model
+    from DeepLearning.models.custom_layers import (
+        DropoutAttentionBlock,
+        GroupNormalization,
+        SpatialConcreteDropout,
+    )
+
+    model = load_model(
+        path,
+        custom_objects={
+            "DropoutAttentionBlock": DropoutAttentionBlock,
+            "GroupNormalization": GroupNormalization,
+            "SpatialConcreteDropout": SpatialConcreteDropout,
+        },
+        compile=False,
+    )
+    input_size = list(model.input_shape[1:])
+    out_channels = int(model.layers[-1].output_shape[-1])
+    return input_size, out_channels
 
 
 def run_from_file(
@@ -42,6 +62,13 @@ def run_from_file(
     missing = [k for k in REQUIRED_KEYS if k not in cfg]
     if missing:
         raise KeyError(f"Missing required config keys: {missing}")
+
+    cfg.setdefault("BATCH_SIZE", 1)
+    cfg.setdefault("SHUFFLE_BUFFER_SIZE", 256)
+
+    if "INPUT_SIZE" not in cfg or "OUT_CHANNELS" not in cfg:
+        model_path = Path(cfg["MODEL_DIR"]) / cfg["MODEL_NAME"]
+        cfg["INPUT_SIZE"], cfg["OUT_CHANNELS"] = _infer_model_spec(str(model_path))
 
     main(cfg, logger=logger, resume=resume)
 

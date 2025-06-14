@@ -16,20 +16,22 @@ def qapp():
     return app
 
 
-def test_wizard_creates_config(tmp_path, qapp):
+def test_wizard_creates_config(tmp_path, qapp, monkeypatch):
     wiz = MCBankerWizard()
     wiz.select_page.rb_create.setChecked(True)
 
-    wiz.create_page.model_dir.setText(str(tmp_path))
-    wiz.create_page.model_name.setText("model.h5")
+    model_file = tmp_path / "model.h5"
+    model_file.touch()
+    monkeypatch.setattr(
+        MCBankerWizard,
+        "_infer_model_spec",
+        staticmethod(lambda path: ([16, 16, 1], 3)),
+    )
+    monkeypatch.setattr("GUI.models.MCConfigDB.save_config", lambda cfg: None)
+
+    wiz.create_page.model_path.setText(str(model_file))
     wiz.create_page.data_dir.setText(str(tmp_path))
-    wiz.create_page.train_list.setText(str(tmp_path / "train.txt"))
-    wiz.create_page.batch_size.setValue(2)
-    wiz.create_page.shuffle_buf.setValue(4)
-    wiz.create_page.out_channels.setValue(3)
-    wiz.create_page.in_h.setValue(16)
-    wiz.create_page.in_w.setValue(16)
-    wiz.create_page.in_c.setValue(1)
+    wiz.create_page.file_list.setText(str(tmp_path / "files.txt"))
     wiz.create_page.mc_iter.setValue(5)
 
     wiz.exec_ = lambda: MCBankerWizard.Accepted
@@ -37,7 +39,8 @@ def test_wizard_creates_config(tmp_path, qapp):
     assert path
     with open(path) as fh:
         cfg = yaml.safe_load(fh)
-    assert cfg["MODEL_DIR"] == str(tmp_path)
-    assert cfg["BATCH_SIZE"] == 2
+    assert cfg["BATCH_SIZE"] == 1
+    assert cfg["SHUFFLE_BUFFER_SIZE"] == 256
     assert cfg["INPUT_SIZE"] == [16, 16, 1]
+    assert cfg["OUT_CHANNELS"] == 3
 

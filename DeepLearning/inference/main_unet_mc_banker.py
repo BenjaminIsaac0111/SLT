@@ -171,7 +171,7 @@ def main(config: Dict[str, Any], *, logger: logging.Logger, resume: bool = False
     h_in, w_in, c_in = input_size
 
     num_classes: int = config["OUT_CHANNELS"]
-    batch_size: int = config["BATCH_SIZE"]
+    batch_size: int = config.get("BATCH_SIZE", 1)
 
     model_path = Path(config["MODEL_DIR"]) / f"{config['MODEL_NAME']}"
     logger.info("Loading model from %s", model_path)
@@ -193,11 +193,11 @@ def main(config: Dict[str, Any], *, logger: logging.Logger, resume: bool = False
     # ---------------------------------------------------------------------
     ds = get_dataset_v2(
         data_dir=config["DATA_DIR"],
-        filelists=config["TRAINING_LIST"],
+        filelists=config.get("FILE_LIST") or config.get("TRAINING_LIST"),
         repeat=False,
         shuffle=False,
         batch_size=batch_size,
-        shuffle_buffer_size=config["SHUFFLE_BUFFER_SIZE"],
+        shuffle_buffer_size=config.get("SHUFFLE_BUFFER_SIZE", 256),
         out_channels=num_classes,
     )
 
@@ -227,8 +227,9 @@ def main(config: Dict[str, Any], *, logger: logging.Logger, resume: bool = False
     # Optional cap on #samples --------------------------------------------
     # ---------------------------------------------------------------------
     n_samples_cfg = int(config.get("N_SAMPLES", -1))
+    file_list_path = config.get("FILE_LIST") or config.get("TRAINING_LIST")
     if n_samples_cfg == -1:
-        with open(config["TRAINING_LIST"], "r") as f:
+        with open(file_list_path, "r") as f:
             total_samples = sum(1 for _ in f if _.strip())
     else:
         total_samples = n_samples_cfg
@@ -390,11 +391,7 @@ if __name__ == "__main__":
             "MODEL_DIR",
             "MODEL_NAME",
             "DATA_DIR",
-            "TRAINING_LIST",
-            "BATCH_SIZE",
-            "SHUFFLE_BUFFER_SIZE",
-            "OUT_CHANNELS",
-            "INPUT_SIZE",
+            "FILE_LIST",
             "MC_N_ITER",
         ]
         missing = [k for k in required if k not in cfg]
