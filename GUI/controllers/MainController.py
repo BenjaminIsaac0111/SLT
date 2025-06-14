@@ -27,7 +27,7 @@ from GUI.models.navigation.ClusterSelection import make_selector
 from GUI.views.ClusteredCropsView import ClusteredCropsView
 from GUI.views.ClusteringProgressDialog import ClusteringProgressDialog
 from GUI.views.AnnotationPreviewDialog import AnnotationPreviewDialog
-from GUI.workers import CrossValidationWorker
+from GUI.workers import CrossValidationWorker, MCBankerWorker
 
 
 class MainController(QObject):
@@ -592,6 +592,20 @@ class MainController(QObject):
     def _on_cv_progress(self, value: int) -> None:
         if self._cv_progress:
             self._cv_progress.setValue(value)
+
+    # -----------------------------------------------------------------
+    #                 MONTE CARLO BANKER HDF5 BUILDER
+    # -----------------------------------------------------------------
+    @pyqtSlot(str)
+    def run_mc_banker(self, config_path: str) -> None:
+        worker = MCBankerWorker(config_path)
+        worker.signals.finished.connect(self._on_mc_banker_finished)
+        self.threadpool.start(worker)
+
+    @pyqtSlot(bool)
+    def _on_mc_banker_finished(self, success: bool) -> None:
+        msg = "HDF5 file generated." if success else "HDF5 generation failed."
+        QMessageBox.information(self.view, "MC Inference", msg)
 
     # -----------------------------------------------------------------
     #                    ANNOTATION PREVIEW DIALOG
