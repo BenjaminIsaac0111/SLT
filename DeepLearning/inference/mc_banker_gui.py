@@ -72,6 +72,7 @@ def run_from_file(
 
     cfg.setdefault("BATCH_SIZE", 1)
     cfg.setdefault("SHUFFLE_BUFFER_SIZE", 256)
+    cfg.setdefault("TEMPERATURE", 1.0)
 
     if "INPUT_SIZE" not in cfg or "OUT_CHANNELS" not in cfg:
         model_path = Path(cfg["MODEL_DIR"]) / cfg["MODEL_NAME"]

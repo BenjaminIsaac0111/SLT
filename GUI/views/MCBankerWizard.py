@@ -17,6 +17,7 @@ from PyQt5.QtWidgets import (
     QPushButton,
     QRadioButton,
     QSpinBox,
+    QDoubleSpinBox,
     QVBoxLayout,
     QWizard,
     QWizardPage,
@@ -127,6 +128,12 @@ class _CreatePage(QWizardPage):
         self.mc_iter.setRange(1, 100)
         self.mc_iter.setValue(8)
         form.addRow("MC iterations:", self.mc_iter)
+
+        self.temperature = QDoubleSpinBox()
+        self.temperature.setRange(0.1, 10.0)
+        self.temperature.setSingleStep(0.1)
+        self.temperature.setValue(1.0)
+        form.addRow("Temperature:", self.temperature)
 
         self.unc_type.currentTextChanged.connect(
             lambda text: self.mc_iter.setEnabled(text.lower() != "entropy")
@@ -292,6 +299,7 @@ class MCBankerWizard(QWizard):
                 if self.create_page.unc_type.currentText().lower() == "entropy"
                 else self.create_page.mc_iter.value()
             ),
+            "TEMPERATURE": float(self.create_page.temperature.value()),
         }
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".yaml")
         with open(tmp.name, "w") as fh:
