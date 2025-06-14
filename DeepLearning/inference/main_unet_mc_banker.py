@@ -173,7 +173,7 @@ def main(config: Dict[str, Any], *, logger: logging.Logger, resume: bool = False
     num_classes: int = config["OUT_CHANNELS"]
     batch_size: int = config["BATCH_SIZE"]
 
-    model_path = Path(config["MODEL_DIR"]) / f"best_{config['MODEL_NAME']}"
+    model_path = Path(config["MODEL_DIR"]) / f"{config['MODEL_NAME']}"
     logger.info("Loading model from %s", model_path)
 
     model = load_model(
