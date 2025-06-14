@@ -65,20 +65,23 @@ class _CreatePage(QWizardPage):
         self.setTitle("Create Configuration")
         form = QFormLayout(self)
 
-        self.model_path = QLineEdit()
-        self.model_select = wizard._make_model_combo(self.model_path)
+        self.model_path = wizard._make_model_combo()
+        self.model_path.setEditable(True)
         row = QHBoxLayout()
         row.addWidget(self.model_path, 1)
-        row.addWidget(self.model_select)
         row.addWidget(wizard._make_browse_button(self.model_path, False))
         form.addRow("Model file:", row)
-        self.model_path.textChanged.connect(wizard._update_model_info)
+        self.model_path.currentTextChanged.connect(wizard._update_model_info)
+        self.model_path.editTextChanged.connect(wizard._update_model_info)
 
         self.data_dir = QLineEdit()
         form.addRow("Data directory:", wizard._make_browse_row(self.data_dir, True))
 
         self.file_list = QLineEdit()
         form.addRow("Data list:", wizard._make_browse_row(self.file_list, False))
+
+        self.output_dir = QLineEdit()
+        form.addRow("Output directory:", wizard._make_browse_row(self.output_dir, True))
 
         self.in_size = QLabel("?")
         form.addRow("Input size:", self.in_size)
@@ -113,24 +116,23 @@ class MCBankerWizard(QWizard):
         self.setStartId(self.PAGE_SELECT)
 
     # ------------------------------------------------------------------ helpers
-    def _make_browse_row(self, edit: QLineEdit, select_dir: bool) -> QHBoxLayout:
+    def _make_browse_row(self, widget, select_dir: bool) -> QHBoxLayout:
         row = QHBoxLayout()
-        row.addWidget(edit, 1)
-        row.addWidget(self._make_browse_button(edit, select_dir))
+        row.addWidget(widget, 1)
+        row.addWidget(self._make_browse_button(widget, select_dir))
         return row
 
-    def _make_model_combo(self, edit: QLineEdit):
+    def _make_model_combo(self) -> QComboBox:
+        """Return editable combo box populated with recent models."""
         from GUI.models.MCConfigDB import get_recent_model_paths
 
         combo = QComboBox()
-        combo.setEditable(False)
+        combo.setEditable(True)
         combo.addItems(get_recent_model_paths())
-        combo.currentTextChanged.connect(edit.setText)
         return combo
 
-    def _make_browse_button(self, edit: QLineEdit, select_dir: bool):
-        button = QFileDialog.getExistingDirectory if select_dir else QFileDialog.getOpenFileName
-        btn = _BrowseButton(edit, button, select_dir)
+    def _make_browse_button(self, widget, select_dir: bool):
+        btn = _BrowseButton(widget, None, select_dir)
         return btn
 
     def _update_model_info(self, path: str) -> None:  # pragma: no cover - UI
@@ -180,7 +182,7 @@ class MCBankerWizard(QWizard):
             path = self.load_page.edit.text()
             return path if path else None
 
-        model_path = self.create_page.model_path.text()
+        model_path = self.create_page.model_path.currentText()
         if not model_path:
             return None
         outc_txt = self.create_page.out_channels.text()
@@ -199,6 +201,7 @@ class MCBankerWizard(QWizard):
             "MODEL_NAME": Path(model_path).name,
             "DATA_DIR": self.create_page.data_dir.text(),
             "FILE_LIST": self.create_page.file_list.text(),
+            "OUTPUT_DIR": self.create_page.output_dir.text(),
             "BATCH_SIZE": 1,
             "SHUFFLE_BUFFER_SIZE": 256,
             "OUT_CHANNELS": outc,
@@ -217,10 +220,9 @@ class MCBankerWizard(QWizard):
 class _BrowseButton(QPushButton):
     """Button helper for file/directory selection."""
 
-    def __init__(self, edit: QLineEdit, chooser, select_dir: bool) -> None:
+    def __init__(self, widget, _chooser, select_dir: bool) -> None:
         super().__init__("Browse…")
-        self.edit = edit
-        self._chooser = chooser
+        self.widget = widget
         self._dir = select_dir
         self.clicked.connect(self._choose)
 
@@ -230,5 +232,8 @@ class _BrowseButton(QPushButton):
         else:
             path, _ = QFileDialog.getOpenFileName(None, "Select File")
         if path:
-            self.edit.setText(path)
+            if hasattr(self.widget, "setText"):
+                self.widget.setText(path)
+            elif hasattr(self.widget, "setEditText"):
+                self.widget.setEditText(path)
 
