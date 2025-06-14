@@ -14,12 +14,11 @@ def test_build_cv_folds_group_preservation(tmp_path: Path):
     folds = build_cv_folds(tmp_path, n_splits=3, shuffle=False)
     assert len(folds) == 3
     seen_groups = set()
-    for train_df, test_df, weights in folds:
+    for train_df, test_df in folds:
         test_groups = {name.split("_")[0] for name in test_df["filename"]}
         assert len(test_groups) == 1
         assert test_groups.isdisjoint(seen_groups)
         seen_groups.update(test_groups)
-        assert set(weights.keys()) == {"0", "1"}
         for name in test_df["filename"]:
             assert name.split("_")[0] in test_groups
         train_groups = {name.split("_")[0] for name in train_df["filename"]}
@@ -38,11 +37,9 @@ def test_write_cv_folds_progress(tmp_path: Path):
     write_cv_folds(tmp_path, out_dir, n_splits=3, shuffle=False, progress=_progress)
     assert calls == [1, 2, 3]
     for i in range(1, 4):
-        w_file = out_dir / f"Fold_{i}_weights.txt"
         assert (out_dir / f"Fold_{i}_TrainingData.txt").exists()
-        assert w_file.exists()
-        weights = {row.split('\t')[0] for row in w_file.read_text().splitlines()[1:]}
-        assert weights == {"0", "1"}
+        assert (out_dir / f"Fold_{i}_TestData.txt").exists()
+        assert not (out_dir / f"Fold_{i}_weights.txt").exists()
 
 
 def test_write_cv_folds_overwrite(tmp_path: Path):
