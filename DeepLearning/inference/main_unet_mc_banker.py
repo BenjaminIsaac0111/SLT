@@ -395,7 +395,13 @@ def main(
                 logger.info("Aborting at user request")
                 break
             while should_pause():
+                if should_abort():
+                    logger.info("Aborting at user request")
+                    break
                 time.sleep(0.5)
+            if should_abort():
+                logger.info("Aborting at user request")
+                break
 
             bsz_actual = x_batch.shape[0]
 
