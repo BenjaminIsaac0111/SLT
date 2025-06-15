@@ -23,6 +23,7 @@ from GUI.models.export.Options import ExportOptions
 from GUI.models.export.Usecase import ExportAnnotationsUseCase
 from GUI.models.io.IOService import ProjectIOService
 from GUI.models.io.Persistence import ProjectState
+from GUI.models.RecentProjectsDB import save_path as save_recent_project
 from GUI.configuration.configuration import LATEST_SCHEMA_VERSION
 from GUI.models.navigation.ClusterSelection import make_selector
 from GUI.views.ClusteredCropsView import ClusteredCropsView
@@ -117,15 +118,18 @@ class MainController(QObject):
         if self.io.current_path is None:
             # View should open Save‑As dialog instead; ignore quietly.
             return
+        save_recent_project(str(self.io.current_path))
         self.io.save_async(self.get_current_state(), self.io.current_path)
 
     @pyqtSlot(str)
     def save_project_as(self, path: str):
         self.io.set_current_path(path)
+        save_recent_project(path)
         self.io.save_async(self.get_current_state(), path)
 
     @pyqtSlot(str)
     def load_project(self, path: str):
+        save_recent_project(path)
         self.io.load_async(path)
 
     @pyqtSlot(str)
@@ -170,6 +174,7 @@ class MainController(QObject):
     #  Callbacks for io.project_{loaded|saved|failed}
     # ==================================================================
     def _on_project_saved(self, path: str):
+        save_recent_project(path)
         QMessageBox.information(self.view, "Project Saved", f"Project written to {path}")
 
     def _on_save_failed(self, err: str):
