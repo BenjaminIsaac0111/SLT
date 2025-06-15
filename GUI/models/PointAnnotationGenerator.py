@@ -1,6 +1,8 @@
 import logging
 from typing import List, Tuple
 
+from .annotations import AnnotationBase, PointAnnotation
+
 import numpy as np
 from scipy.ndimage import gaussian_filter, maximum_filter
 
@@ -63,21 +65,30 @@ class BasePointAnnotationGenerator:
     # --------------------- public dispatcher -------------------------------- #
     def generate_annotations(
             self, uncertainty_map: np.ndarray, logits: np.ndarray
-    ) -> Tuple[np.ndarray, List[tuple]]:
-        """
-        1. Prepare map → 2. generate coords → 3. extract logits.
-        Returns ``(logits_at_points, coords)``.
-        """
+    ) -> List[AnnotationBase]:
+        """Generate :class:`AnnotationBase` objects for the given inputs."""
         map2d = self._prepare_uncertainty_map(uncertainty_map)
         coords = self._generate_coords(map2d)
 
         if not coords:
             logger.warning("%s: no coordinates produced.", self.__class__.__name__)
-            return np.empty((0, logits.shape[-1]), dtype=np.float32), []
+            return []
 
         feats = self._extract_logit_features(logits, coords)
-        logger.info("%s produced %d annotations.", self.__class__.__name__, len(coords))
-        return feats.astype(np.float32, copy=False), coords
+        annos: List[AnnotationBase] = []
+        for c, f in zip(coords, feats):
+            annos.append(
+                PointAnnotation(
+                    image_index=-1,
+                    filename="",
+                    coord=tuple(c),
+                    logit_features=f,
+                    uncertainty=float(map2d[tuple(c)]),
+                )
+            )
+
+        logger.info("%s produced %d annotations.", self.__class__.__name__, len(annos))
+        return annos
 
     # enforced in subclasses
     def _generate_coords(self, uncertainty_map: np.ndarray) -> List[tuple]:

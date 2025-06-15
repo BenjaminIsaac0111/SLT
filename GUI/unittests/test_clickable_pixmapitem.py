@@ -15,7 +15,7 @@ from PyQt5.QtGui import QPixmap, QMouseEvent
 from PyQt5.QtCore import Qt, QPoint, QPointF
 
 from GUI.views.ClickablePixmapItem import ClickablePixmapItem
-from GUI.models.Annotation import Annotation
+from GUI.models.annotations import PointAnnotation
 from GUI.configuration.configuration import CLASS_COMPONENTS
 
 
@@ -31,7 +31,7 @@ def make_item(qapp):
     scene = QGraphicsScene()
     parent = QWidget()
     QGraphicsView(scene, parent)
-    ann = Annotation(
+    ann = PointAnnotation(
         image_index=0,
         filename="img",
         coord=(0, 0),

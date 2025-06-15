@@ -6,7 +6,7 @@ from typing import List
 import numpy as np
 from PyQt5.QtCore import QObject, QRunnable, pyqtSignal
 
-from GUI.models.Annotation import Annotation
+from GUI.models.annotations import AnnotationBase
 from GUI.models.CacheManager import CacheManager
 from GUI.models.ImageDataModel import BaseImageDataModel
 from GUI.models.ImageProcessor import ImageProcessor
@@ -26,7 +26,7 @@ class OverlayPreviewWorker(QRunnable):
     def __init__(
             self,
             image_index: int,
-            annotations: List[Annotation],
+            annotations: List[AnnotationBase],
             model: BaseImageDataModel,
             processor: ImageProcessor,
     ) -> None:

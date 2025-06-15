@@ -17,6 +17,7 @@ from GUI.configuration.configuration import LATEST_SCHEMA_VERSION
 @pytest.fixture
 def example_state() -> ProjectState:
     annotation = {
+        "type": "point",
         "image_index": 0,
         "filename": "img0.png",
         "coord": [0, 0],
@@ -84,3 +85,31 @@ def test_migrate_from_v2():
     assert migrated["cluster_order"] == [1]
     assert migrated["uncertainty"] == "bald"
 
+
+def test_save_and_load_mask_annotation(tmp_path: Path):
+    mask_ann = {
+        "type": "mask",
+        "image_index": 1,
+        "filename": "img1.png",
+        "coord": [0, 0],
+        "mask": [[1, 0], [0, 1]],
+        "logit_features": [0.0],
+        "uncertainty": 0.2,
+        "adjusted_uncertainty": 0.2,
+        "class_id": 2,
+        "cluster_id": 2,
+        "model_prediction": None,
+    }
+    state = ProjectState(
+        schema_version=LATEST_SCHEMA_VERSION,
+        data_backend="hdf5",
+        data_path="/tmp/data",
+        clusters={"2": [mask_ann]},
+        cluster_order=[2],
+        selected_cluster_id=2,
+        annotation_method="Local Uncertainty Maxima",
+    )
+    path = tmp_path / "mask.slt"
+    save_state(state, path)
+    loaded = load_state(path)
+    assert loaded.dict() == state.dict()

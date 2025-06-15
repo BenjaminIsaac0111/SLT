@@ -22,7 +22,7 @@ from PyQt5.QtCore import QObject, QRunnable, pyqtSignal
 from sklearn.cluster import AgglomerativeClustering, MiniBatchKMeans
 from sklearn.mixture import GaussianMixture
 
-from GUI.models.Annotation import Annotation
+from GUI.models.annotations import AnnotationBase
 
 
 # -----------------------------------------------------------------------------
@@ -75,7 +75,7 @@ def k_center_greedy_numba(X: np.ndarray, k: int, random_state: Optional[int] = N
 
 class ClusteringWorkerSignals(QObject):
     progress_updated = pyqtSignal(int)  # 0-100 or -1 for stage sentinels
-    clustering_finished = pyqtSignal(dict)  # {cluster_id: [Annotation]}
+    clustering_finished = pyqtSignal(dict)  # {cluster_id: [AnnotationBase]}
     cancelled = pyqtSignal()
 
 
@@ -107,7 +107,7 @@ class AnnotationClusteringWorker(QRunnable):
     def __init__(
             self,
             *,
-            annotations: List[Annotation],
+            annotations: List[AnnotationBase],
             subsample_ratio: float = 1.0,
             cluster_method: str = "minibatchkmeans",
             cluster_size: int = 6,
@@ -198,14 +198,14 @@ class AnnotationClusteringWorker(QRunnable):
             self.signals.clustering_finished.emit(clusters)
 
     # --------------------------------------------------- helpers
-    def _anno_to_vec(self, ann: Annotation) -> np.ndarray:
+    def _anno_to_vec(self, ann: AnnotationBase) -> np.ndarray:
         if self.include_uncertainty:
             return np.concatenate([ann.logit_features, [ann.uncertainty]], dtype=np.float32)
         return ann.logit_features.astype(np.float32, copy=False)
 
     @staticmethod
-    def _group_by_cluster(annos: List[Annotation]) -> Dict[int, List[Annotation]]:
-        clust: Dict[int, List[Annotation]] = defaultdict(list)
+    def _group_by_cluster(annos: List[AnnotationBase]) -> Dict[int, List[AnnotationBase]]:
+        clust: Dict[int, List[AnnotationBase]] = defaultdict(list)
         for a in annos:
             clust[a.cluster_id].append(a)
         return clust
@@ -240,8 +240,8 @@ class AnnotationClusteringWorker(QRunnable):
         return lbl
 
     # --------------- down-sampling ----------------------
-    def _downsample_cluster(self, clusters: Dict[int, List[Annotation]]):
-        final: Dict[int, List[Annotation]] = {}
+    def _downsample_cluster(self, clusters: Dict[int, List[AnnotationBase]]):
+        final: Dict[int, List[AnnotationBase]] = {}
         for cid, annos in clusters.items():
             if len(annos) <= self.cluster_size:
                 final[cid] = annos

@@ -16,7 +16,7 @@ from PyQt5.QtWidgets import (
 )
 
 from GUI.configuration.configuration import CLASS_COMPONENTS
-from GUI.models.Annotation import Annotation
+from GUI.models.annotations import AnnotationBase, MaskAnnotation
 from GUI.models.ImageDataModel import BaseImageDataModel
 from GUI.models.ImageProcessor import ImageProcessor
 from GUI.workers.OverlayPreviewWorker import OverlayPreviewWorker
@@ -25,7 +25,7 @@ from GUI.workers.OverlayPreviewWorker import OverlayPreviewWorker
 class AnnotationPreviewDialog(QDialog):
     """Display full images with annotation overlays."""
 
-    def __init__(self, model: BaseImageDataModel, annotations: List[Annotation], parent=None):
+    def __init__(self, model: BaseImageDataModel, annotations: List[AnnotationBase], parent=None):
         super().__init__(parent)
         self.setWindowTitle("Annotation Preview")
 
@@ -33,7 +33,7 @@ class AnnotationPreviewDialog(QDialog):
         self.processor = ImageProcessor()
         self.threadpool = QThreadPool.globalInstance()
 
-        self._by_image: Dict[int, List[Annotation]] = {}
+        self._by_image: Dict[int, List[AnnotationBase]] = {}
         for ann in annotations:
             if ann.class_id == -1:
                 continue

@@ -15,7 +15,7 @@ from PyQt5.QtWidgets import (
 )
 
 from GUI.configuration.configuration import CLASS_COMPONENTS
-from GUI.models.Annotation import Annotation
+from GUI.models.annotations import AnnotationBase
 from GUI.models.export.ExportService import ExportOptions
 from GUI.views.ClickablePixmapItem import ClickablePixmapItem
 from GUI.views.LabelSlider import LabeledSlider
@@ -662,7 +662,7 @@ class ClusteredCropsView(QWidget):
         arranged_count = 0
 
         for idx, crop_data in enumerate(self.selected_crops):
-            annotation: Annotation = crop_data['annotation']
+            annotation: AnnotationBase = crop_data['annotation']
             pixmap: QPixmap = crop_data['processed_crop']
 
             if pixmap.isNull():
@@ -722,7 +722,7 @@ class ClusteredCropsView(QWidget):
         if class_id is None:
             class_id = -1
         for crop in self.selected_crops:
-            ann: Annotation = crop['annotation']
+            ann: AnnotationBase = crop['annotation']
             ann.class_id = class_id
             ann.is_manual = (class_id != -1)  # mark only real labels as manual
             if class_id == -1:  # unlabel: restore
@@ -772,7 +772,7 @@ class ClusteredCropsView(QWidget):
 
     def ask_export_options(
             self,
-            flat_annos: list[tuple[int, Annotation]],
+            flat_annos: list[tuple[int, AnnotationBase]],
     ) -> ExportOptions | None:
         """Return the user’s choice or *None* on cancel."""
         unlabeled = sum(

@@ -5,7 +5,7 @@ import numpy as np
 from PyQt5.QtCore import QObject, pyqtSignal, QThreadPool, pyqtSlot
 from PyQt5.QtGui import QPixmap, QImage
 
-from GUI.models.Annotation import Annotation
+from GUI.models.annotations import AnnotationBase
 from GUI.models.ImageDataModel import BaseImageDataModel
 from GUI.models.ImageProcessor import ImageProcessor
 from GUI.workers.ImageProcessingWorker import ImageProcessingWorker
@@ -36,7 +36,7 @@ class ImageProcessingController(QObject):
 
         self.loading_images = False
 
-        self.clusters: Dict[int, List[Annotation]] = {}
+        self.clusters: Dict[int, List[AnnotationBase]] = {}
         self.cluster_ids: List[int] = []
 
         # Keep track of clusters we’re currently prefetching to avoid duplicates
@@ -45,14 +45,14 @@ class ImageProcessingController(QObject):
     # -------------------------------------------------------------------------
     #                              CLUSTER SETUP
     # -------------------------------------------------------------------------
-    def set_clusters(self, clusters: Dict[int, List[Annotation]]):
+    def set_clusters(self, clusters: Dict[int, List[AnnotationBase]]):
         self.clusters = clusters
         self.cluster_ids = list(clusters.keys())
 
     # -------------------------------------------------------------------------
     #                         DISPLAY & PROCESS CROPS
     # -------------------------------------------------------------------------
-    def display_crops(self, annotations: List[Annotation]):
+    def display_crops(self, annotations: List[AnnotationBase]):
         """
         Displays crops for the top 'n' annotations from a single cluster.
         """
@@ -86,7 +86,7 @@ class ImageProcessingController(QObject):
     # -------------------------------------------------------------------------
     def _start_processing_worker(
             self,
-            annotations_to_process: List[Annotation],
+            annotations_to_process: List[AnnotationBase],
             processed_annotations: List[dict]
     ):
         """
@@ -212,7 +212,7 @@ class ImageProcessingController(QObject):
     #                           PRIVATE HELPERS
     # -------------------------------------------------------------------------
     @staticmethod
-    def _sort_annotations_by_uncertainty(annotations: List[Annotation]) -> List[Annotation]:
+    def _sort_annotations_by_uncertainty(annotations: List[AnnotationBase]) -> List[AnnotationBase]:
         """
         Sorts annotations by their uncertainty in descending order.
         """
@@ -228,7 +228,7 @@ class ImageProcessingController(QObject):
                 return False
         return True
 
-    def _split_cached_and_uncached(self, annotations: List[Annotation]) -> Tuple[List[dict], List[Annotation]]:
+    def _split_cached_and_uncached(self, annotations: List[AnnotationBase]) -> Tuple[List[dict], List[AnnotationBase]]:
         """
         Splits annotations into already cached (processed) and those that need processing.
         Returns (processed_list, uncached_list).

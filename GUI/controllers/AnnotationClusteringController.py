@@ -24,7 +24,7 @@ from PyQt5.QtCore import (
 from sklearn.utils.class_weight import compute_class_weight
 
 from GUI.configuration.configuration import CLASS_COMPONENTS
-from GUI.models.Annotation import Annotation
+from GUI.models.annotations import AnnotationBase, PointAnnotation, MaskAnnotation
 from GUI.models.ImageDataModel import BaseImageDataModel
 from GUI.models.PointAnnotationGenerator import CenterPointAnnotationGenerator
 from GUI.workers.AnnotationClusteringWorker import AnnotationClusteringWorker
@@ -35,7 +35,7 @@ class AnnotationExtractionWorker(QThread):
     """Per-image sampling; terminates early when `cancel()` is called."""
 
     progress = pyqtSignal(int)  # 0–100
-    finished = pyqtSignal(list)  # list[Annotation]
+    finished = pyqtSignal(list)  # list[AnnotationBase]
     cancelled = pyqtSignal()  # early abort
 
     def __init__(self, model: BaseImageDataModel, generator, parent=None):
@@ -64,28 +64,21 @@ class AnnotationExtractionWorker(QThread):
         self.finished.emit(annos)
 
     # helpers ---------------------------------------------------
-    def _extract_from_image(self, img: dict, idx: int) -> list[Annotation]:
-        out: list[Annotation] = []
+    def _extract_from_image(self, img: dict, idx: int) -> list[AnnotationBase]:
+        out: list[AnnotationBase] = []
         umap, logits, fname = img.get("uncertainty"), img.get("logits"), img.get("filename")
         if umap is None or logits is None or fname is None:
             return out
 
-        feats, coords = self._generator.generate_annotations(uncertainty_map=umap, logits=logits)
-        for c, f in zip(coords, feats):
-            if not f.any():
+        generated = self._generator.generate_annotations(uncertainty_map=umap, logits=logits)
+        for ann in generated:
+            if not ann.logit_features.any():
                 continue
-            out.append(
-                Annotation(
-                    filename=fname,
-                    coord=c,
-                    logit_features=f,
-                    class_id=-1,
-                    image_index=idx,
-                    uncertainty=float(umap[tuple(c)]),
-                    cluster_id=None,
-                    model_prediction=CLASS_COMPONENTS.get(int(np.argmax(f)), "None"),
-                )
-            )
+            ann.filename = fname
+            ann.image_index = idx
+            ann.cluster_id = None
+            ann.model_prediction = CLASS_COMPONENTS.get(int(np.argmax(ann.logit_features)), "None")
+            out.append(ann)
         return out
 
 
@@ -112,7 +105,7 @@ class AnnotationClusteringController(QObject):
         self.model = model
         self.annotation_generator = annotation_generator
 
-        self.clusters: Dict[int, List[Annotation]] = {}
+        self.clusters: Dict[int, List[AnnotationBase]] = {}
         self.cluster_labels: Dict[int, str] = {}
 
         self._extract_worker: Optional[AnnotationExtractionWorker] = None
@@ -156,7 +149,7 @@ class AnnotationClusteringController(QObject):
 
     # ─────────────────── extraction callbacks ───────────────────
     @pyqtSlot(list)
-    def _on_annotations_extracted(self, annos: List[Annotation]):
+    def _on_annotations_extracted(self, annos: List[AnnotationBase]):
         self.annotation_progress.emit(100)
         self.annotation_progress_finished.emit()
 
@@ -184,7 +177,7 @@ class AnnotationClusteringController(QObject):
 
     # ─────────────────── clustering callbacks ───────────────────
     @pyqtSlot(dict)
-    def _on_clustering_finished(self, clusters: Dict[int, List[Annotation]]):
+    def _on_clustering_finished(self, clusters: Dict[int, List[AnnotationBase]]):
         if self._abort:
             self._on_cancelled();
             return
@@ -266,7 +259,7 @@ class AnnotationClusteringController(QObject):
     def update_cluster_labels(self, cluster_id: int, label: str):
         self.cluster_labels[cluster_id] = label
 
-    def get_clusters(self) -> Dict[int, List[Annotation]]:
+    def get_clusters(self) -> Dict[int, List[AnnotationBase]]:
         return self.clusters
 
     def cleanup(self):

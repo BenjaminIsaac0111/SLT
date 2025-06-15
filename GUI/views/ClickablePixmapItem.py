@@ -2,11 +2,11 @@ from functools import partial
 from typing import Tuple
 
 from PyQt5.QtCore import QRectF, Qt, QPointF, pyqtSignal
-from PyQt5.QtGui import QPixmap, QFont, QFontMetrics, QPainter, QPen
+from PyQt5.QtGui import QPixmap, QFont, QFontMetrics, QPainter, QPen, QImage
 from PyQt5.QtWidgets import QGraphicsObject, QApplication, QMenu, QAction
 
 from GUI.configuration.configuration import CLASS_COMPONENTS
-from GUI.models.Annotation import Annotation
+from GUI.models.annotations import AnnotationBase, MaskAnnotation
 
 
 class ClickablePixmapItem(QGraphicsObject):
@@ -16,7 +16,7 @@ class ClickablePixmapItem(QGraphicsObject):
     """
     class_label_changed = pyqtSignal(dict, int)
 
-    def __init__(self, annotation: Annotation, pixmap: QPixmap, coord_pos: Tuple[int, int], *args, **kwargs):
+    def __init__(self, annotation: AnnotationBase, pixmap: QPixmap, coord_pos: Tuple[int, int], *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.annotation = annotation
         self.pixmap = pixmap
@@ -72,20 +72,27 @@ class ClickablePixmapItem(QGraphicsObject):
         ph = self.pixmap.height() * self.scale_factor
 
         if scene and getattr(scene, "overlays_visible", True):
-            x0 = self.coord_pos[0] * self.scale_factor
-            y0 = self.coord_pos[1] * self.scale_factor
-            r = max(8.0, min(pw, ph) // 40)  # 5 % radius, ≥ 4 px
+            if isinstance(self.annotation, MaskAnnotation) and self.annotation.mask is not None:
+                arr = (self.annotation.mask > 0).astype(np.uint8) * 255
+                h, w = arr.shape
+                qimg = QImage(arr.data, w, h, QImage.Format_Grayscale8)
+                mask_pix = QPixmap.fromImage(qimg).scaled(pw, ph)
+                painter.setOpacity(0.5)
+                painter.drawPixmap(0, 0, mask_pix)
+                painter.setOpacity(1.0)
+            else:
+                x0 = self.coord_pos[0] * self.scale_factor
+                y0 = self.coord_pos[1] * self.scale_factor
+                r = max(8.0, min(pw, ph) // 40)
 
-            # green circle
-            painter.setPen(QPen(Qt.green, 2))
-            painter.drawEllipse(QPointF(x0, y0), r, r)
+                painter.setPen(QPen(Qt.green, 2))
+                painter.drawEllipse(QPointF(x0, y0), r, r)
 
-            # hairlines with a gap = r
-            painter.setPen(QPen(Qt.black, 1))
-            painter.drawLine(x0, 0, x0, y0 - r)
-            painter.drawLine(x0, y0 + r, x0, ph)
-            painter.drawLine(0, y0, x0 - r, y0)
-            painter.drawLine(x0 + r, y0, pw, y0)
+                painter.setPen(QPen(Qt.black, 1))
+                painter.drawLine(x0, 0, x0, y0 - r)
+                painter.drawLine(x0, y0 + r, x0, ph)
+                painter.drawLine(0, y0, x0 - r, y0)
+                painter.drawLine(x0 + r, y0, pw, y0)
 
         pen = QPen(Qt.darkGray if self.hovered else Qt.black)
         pen.setWidth(4 if (self.selected or self.hovered or self.annotation.is_manual) else 1)
