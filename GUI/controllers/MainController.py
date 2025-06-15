@@ -36,10 +36,11 @@ class MainController(QObject):
     AUTOSAVE_IDLE_MS = 10_000
     _UNASSESSED_LABELS = {-1}
 
-    def __init__(self, model: Optional[BaseImageDataModel], view: ClusteredCropsView):
+    def __init__(self, model: Optional[BaseImageDataModel], view: ClusteredCropsView, tasks_widget=None):
         super().__init__()
         self.image_data_model = model
         self.view = view
+        self.tasks_widget = tasks_widget
 
         # ---------- core sub‑controllers ---------------------------------
         self.annotation_generator = LocalMaximaPointAnnotationGenerator()
@@ -62,6 +63,8 @@ class MainController(QObject):
         self._dirty = False
         self._idle_timer = QTimer(singleShot=True)
         self._idle_timer.timeout.connect(self._autosave_if_dirty)
+
+        self._mc_widget = None
 
         self._connect_signals()
         QCoreApplication.instance().aboutToQuit.connect(self.cleanup)
@@ -598,12 +601,57 @@ class MainController(QObject):
     # -----------------------------------------------------------------
     @pyqtSlot(dict)
     def run_mc_banker(self, config: dict) -> None:
-        worker = MCBankerWorker(config)
+        output_file = Path(config.get("OUTPUT_FILE", ""))
+        file_list = Path(config["FILE_LIST"])
+        total = sum(1 for _ in open(file_list))
+
+        resume = False
+        if output_file.exists():
+            try:
+                import h5py
+
+                with h5py.File(output_file, "r") as f:
+                    written = int(f.attrs.get("last_written_index", 0))
+            except Exception:
+                written = 0
+
+            if written < total:
+                box = QMessageBox(self.view)
+                box.setWindowTitle("Existing Output")
+                box.setText("Output file already exists.")
+                resume_btn = box.addButton("Resume", QMessageBox.AcceptRole)
+                overwrite_btn = box.addButton("Overwrite", QMessageBox.DestructiveRole)
+                cancel_btn = box.addButton("Cancel", QMessageBox.RejectRole)
+                box.exec_()
+                if box.clickedButton() == cancel_btn:
+                    return
+                if box.clickedButton() == resume_btn:
+                    resume = True
+                else:
+                    output_file.unlink()
+            else:
+                if QMessageBox.question(self.view, "Overwrite?", "Output file exists. Overwrite?") != QMessageBox.Yes:
+                    return
+                output_file.unlink()
+
+        worker = MCBankerWorker(config, resume=resume)
+        widget = getattr(self.tasks_widget, "mc_widget", None)
+        if widget is not None:
+            widget.start(str(output_file), total)
+            worker.signals.progress.connect(widget.update_progress)
+            widget.request_pause.connect(worker.pause)
+            widget.request_resume.connect(worker.resume_task)
+            widget.request_cancel.connect(worker.cancel)
+
         worker.signals.finished.connect(self._on_mc_banker_finished)
+        self._mc_widget = widget
         self.threadpool.start(worker)
 
     @pyqtSlot(bool)
     def _on_mc_banker_finished(self, success: bool) -> None:
+        if getattr(self, "_mc_widget", None):
+            self._mc_widget.finish()
+            self._mc_widget = None
         msg = "HDF5 file generated." if success else "HDF5 generation failed."
         QMessageBox.information(self.view, "MC Inference", msg)
 

@@ -77,6 +77,9 @@ def run_config(
     resume: bool = False,
     log_level: str = "INFO",
     n_samples: Optional[int] = None,
+    progress_cb: Optional[callable] = None,
+    should_abort: Optional[callable] = None,
+    should_pause: Optional[callable] = None,
 ) -> None:
     """Run MC banker inference using a configuration dict."""
     from DeepLearning.inference.main_unet_mc_banker import main, setup_logging
@@ -85,7 +88,14 @@ def run_config(
     cfg = _prepare_config(cfg, output_dir=output_dir, output_file=output_file)
     if n_samples is not None:
         cfg["N_SAMPLES"] = n_samples
-    main(cfg, logger=logger, resume=resume)
+    main(
+        cfg,
+        logger=logger,
+        resume=resume,
+        progress_cb=progress_cb,
+        should_abort=should_abort,
+        should_pause=should_pause,
+    )
 
 
 def run_from_file(
@@ -96,6 +106,9 @@ def run_from_file(
     resume: bool = False,
     log_level: str = "INFO",
     n_samples: Optional[int] = None,
+    progress_cb: Optional[callable] = None,
+    should_abort: Optional[callable] = None,
+    should_pause: Optional[callable] = None,
 ) -> None:
     """Run MC banker inference using a YAML configuration file."""
     from DeepLearning.inference.main_unet_mc_banker import main, setup_logging
@@ -107,7 +120,14 @@ def run_from_file(
     cfg = _prepare_config(cfg, output_dir=output_dir, output_file=output_file)
     if n_samples is not None:
         cfg["N_SAMPLES"] = n_samples
-    main(cfg, logger=logger, resume=resume)
+    main(
+        cfg,
+        logger=logger,
+        resume=resume,
+        progress_cb=progress_cb,
+        should_abort=should_abort,
+        should_pause=should_pause,
+    )
 
 
 def cli() -> None:

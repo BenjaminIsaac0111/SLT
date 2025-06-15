@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 import tempfile
+import time
 
 import h5py
 import numpy as np
@@ -182,12 +183,27 @@ def entropy_only(
 # Main processing -------------------------------------------------------------
 # ----------------------------------------------------------------------------
 
-def main(config: Dict[str, Any], *, logger: logging.Logger, resume: bool = False) -> None:
+def main(
+    config: Dict[str, Any],
+    *,
+    logger: logging.Logger,
+    resume: bool = False,
+    progress_cb: Optional[callable] = None,
+    should_abort: Optional[callable] = None,
+    should_pause: Optional[callable] = None,
+) -> None:
     """Run MC inference, compute uncertainties, and stream them to HDF5."""
 
     # ---------------------------------------------------------------------
     # Seed & I/O paths -----------------------------------------------------
     # ---------------------------------------------------------------------
+    if progress_cb is None:
+        progress_cb = lambda *_: None
+    if should_abort is None:
+        should_abort = lambda: False
+    if should_pause is None:
+        should_pause = lambda: False
+
     set_global_seed(int(config.get("SEED", 42)))
 
     input_size: List[int] = config["INPUT_SIZE"]  # [H, W, C]
@@ -365,10 +381,22 @@ def main(config: Dict[str, Any], *, logger: logging.Logger, resume: bool = False
         # -----------------------------------------------------------------
         # Main loop -------------------------------------------------------
         # -----------------------------------------------------------------
-        pbar = tqdm(total=samples_remaining, unit="samples", desc="Processing")
+        pbar = tqdm(
+            total=samples_remaining,
+            unit="samples",
+            desc="Processing",
+            disable=progress_cb is not None,
+        )
         idx = start_idx
+        progress_cb(0, samples_remaining)
 
         for filenames, x_batch, _ in ds:  # y_batch unused for inference
+            if should_abort():
+                logger.info("Aborting at user request")
+                break
+            while should_pause():
+                time.sleep(0.5)
+
             bsz_actual = x_batch.shape[0]
 
             # ----------------------------------- Uncertainties ----------
@@ -415,8 +443,10 @@ def main(config: Dict[str, Any], *, logger: logging.Logger, resume: bool = False
             idx += bsz_actual
             h5f.attrs["last_written_index"] = idx
             pbar.update(bsz_actual)
+            progress_cb(idx - start_idx, samples_remaining)
 
         pbar.close()
+        progress_cb(samples_remaining, samples_remaining)
         logger.info("Finished writing %d samples.", idx - start_idx)
 
     if subset_file is not None:
