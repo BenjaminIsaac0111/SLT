@@ -15,10 +15,10 @@ from PyQt5.QtWidgets import (
     QPushButton,
     QSpinBox,
     QDoubleSpinBox,
-    QVBoxLayout,
     QWizard,
     QWizardPage,
 )
+from PyQt5.QtCore import Qt
 
 
 
@@ -30,6 +30,9 @@ class _CreatePage(QWizardPage):
         super().__init__(wizard)
         self.setTitle("Create Configuration")
         form = QFormLayout(self)
+
+        self.recent = wizard._make_recent_combo()
+        form.addRow("Recent run:", self.recent)
 
         self.model_path = wizard._make_model_combo()
         self.model_path.setEditable(True)
@@ -154,6 +157,20 @@ class MCBankerWizard(QWizard):
         combo.addItems(get_recent_model_paths())
         return combo
 
+    def _make_recent_combo(self) -> QComboBox:
+        """Return combo box listing the most recent configurations."""
+        from GUI.models.MCConfigDB import get_recent_configs
+
+        combo = QComboBox()
+        combo.addItem("Select recent…", None)
+        for cfg in get_recent_configs(10):
+            label = cfg.get("OUTPUT_FILE") or str(Path(cfg.get("MODEL_DIR", "")) / cfg.get("MODEL_NAME", ""))
+            combo.addItem(label, cfg)
+        combo.currentIndexChanged.connect(
+            lambda idx: self._load_recent_config(combo.itemData(idx, Qt.UserRole))
+        )
+        return combo
+
     def _make_browse_button(
         self,
         widget,
@@ -198,6 +215,29 @@ class MCBankerWizard(QWizard):
         else:
             self.create_page.in_size.setText("x".join(str(x) for x in input_size))
             self.create_page.out_channels.setText(str(outc))
+
+    def _load_recent_config(self, cfg: Optional[Dict[str, Any]]) -> None:
+        """Populate form fields from a saved configuration."""
+        if not cfg:
+            return
+        page = self.create_page
+        model_path = str(Path(cfg.get("MODEL_DIR", "")) / cfg.get("MODEL_NAME", ""))
+        page.model_path.setEditText(model_path)
+        page.data_dir.setText(cfg.get("DATA_DIR", ""))
+        page.file_list.setText(cfg.get("FILE_LIST", ""))
+        page.output_file.setText(cfg.get("OUTPUT_FILE", ""))
+        page.unc_type.setCurrentText(cfg.get("UNCERTAINTY_TYPE", "BALD").capitalize())
+        page.mc_iter.setValue(int(cfg.get("MC_N_ITER", 1)))
+        page.temperature.setValue(float(cfg.get("TEMPERATURE", 1.0)))
+        page.subset.setValue(max(0, int(cfg.get("N_SAMPLES", -1))))
+        if cfg.get("INPUT_SIZE"):
+            page.in_size.setText("x".join(str(v) for v in cfg["INPUT_SIZE"]))
+        else:
+            page.in_size.setText("?")
+        if cfg.get("OUT_CHANNELS") is not None:
+            page.out_channels.setText(str(cfg["OUT_CHANNELS"]))
+        else:
+            page.out_channels.setText("?")
 
     @staticmethod
     def _infer_model_spec(path: str) -> Tuple[list[int], int]:

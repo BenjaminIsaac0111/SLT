@@ -6,6 +6,8 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Dict, List
 
+import yaml
+
 _DB_PATH = Path.home() / ".attentionunet" / "mc_banker_configs.db"
 
 
@@ -22,6 +24,7 @@ def _ensure_db() -> None:
                 mc_iter INTEGER,
                 temperature REAL,
                 n_samples INTEGER,
+                config TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
             """
@@ -32,6 +35,8 @@ def _ensure_db() -> None:
             conn.execute("ALTER TABLE configs ADD COLUMN temperature REAL")
         if "n_samples" not in cols:
             conn.execute("ALTER TABLE configs ADD COLUMN n_samples INTEGER")
+        if "config" not in cols:
+            conn.execute("ALTER TABLE configs ADD COLUMN config TEXT")
 
 
 def save_config(cfg: Dict[str, Any]) -> None:
@@ -39,14 +44,15 @@ def save_config(cfg: Dict[str, Any]) -> None:
     _ensure_db()
     with sqlite3.connect(_DB_PATH) as conn:
         conn.execute(
-            "INSERT INTO configs (model_path, data_dir, file_list, mc_iter, temperature, n_samples) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO configs (model_path, data_dir, file_list, mc_iter, temperature, n_samples, config) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 str(Path(cfg["MODEL_DIR"]) / cfg["MODEL_NAME"]),
-                cfg["DATA_DIR"],
-                cfg["FILE_LIST"],
-                int(cfg["MC_N_ITER"]),
+                cfg.get("DATA_DIR", ""),
+                cfg.get("FILE_LIST", ""),
+                int(cfg.get("MC_N_ITER", 1)),
                 float(cfg.get("TEMPERATURE", 1.0)),
                 int(cfg.get("N_SAMPLES", -1)),
+                yaml.safe_dump(cfg),
             ),
         )
         conn.commit()
@@ -61,3 +67,14 @@ def get_recent_model_paths(limit: int = 5) -> List[str]:
             (limit,),
         )
         return [row[0] for row in cur.fetchall()]
+
+
+def get_recent_configs(limit: int = 10) -> List[Dict[str, Any]]:
+    """Return the last *limit* configurations saved."""
+    _ensure_db()
+    with sqlite3.connect(_DB_PATH) as conn:
+        cur = conn.execute(
+            "SELECT config FROM configs ORDER BY id DESC LIMIT ?",
+            (limit,),
+        )
+        return [yaml.safe_load(row[0]) for row in cur.fetchall() if row[0]]
