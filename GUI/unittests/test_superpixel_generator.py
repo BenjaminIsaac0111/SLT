@@ -8,7 +8,8 @@ def test_superpixel_generator_outputs_masks():
     uncertainty = np.zeros((10, 10), dtype=np.float32)
     uncertainty[2:7, 2:7] = 1.0
     logits = np.random.rand(10, 10, 2).astype(np.float32)
-    annos = gen.generate_annotations(uncertainty, logits)
+    rgb = (np.random.rand(10, 10, 3) * 255).astype(np.uint8)
+    annos = gen.generate_annotations(uncertainty, logits, image=rgb)
     assert annos
     assert isinstance(annos[0], MaskAnnotation)
     assert annos[0].mask.shape == (10, 10)

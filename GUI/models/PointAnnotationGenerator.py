@@ -64,9 +64,23 @@ class BasePointAnnotationGenerator:
 
     # --------------------- public dispatcher -------------------------------- #
     def generate_annotations(
-            self, uncertainty_map: np.ndarray, logits: np.ndarray
+            self,
+            uncertainty_map: np.ndarray,
+            logits: np.ndarray,
+            image: np.ndarray | None = None,
     ) -> List[AnnotationBase]:
-        """Generate :class:`AnnotationBase` objects for the given inputs."""
+        """Generate :class:`AnnotationBase` objects for the given inputs.
+
+        Parameters
+        ----------
+        uncertainty_map
+            Uncertainty heatmap for the image.
+        logits
+            Per-pixel class logits ``H×W×C``.
+        image
+            Optional RGB image. Subclasses that require it may override the
+            method and expect a non-``None`` value.
+        """
         map2d = self._prepare_uncertainty_map(uncertainty_map)
         coords = self._generate_coords(map2d)
 
@@ -217,63 +231,78 @@ class CenterPointAnnotationGenerator(BasePointAnnotationGenerator):
 #
 #                    SUPERPIXEL IMPLEMENTATION
 # -----------------------------------------------------------------------------
-class SLICSuperpixelAnnotationGenerator:
-    """Generate mask annotations from uncertainty map superpixels."""
+class SLICSuperpixelAnnotationGenerator(BasePointAnnotationGenerator):
+    """Generate mask annotations from image superpixels around high-uncertainty areas."""
 
     def __init__(self, n_segments: int = 100, compactness: float = 10.0, edge_buffer: int = 64):
+        super().__init__(edge_buffer=edge_buffer)
         if n_segments <= 0:
             raise ValueError("n_segments must be positive")
         if compactness <= 0:
             raise ValueError("compactness must be positive")
         self.n_segments = int(n_segments)
         self.compactness = float(compactness)
-        self.edge_buffer = int(edge_buffer)
         logger.info(
             "SLICSuperpixelAnnotationGenerator(segments=%d, compactness=%.1f)",
-            self.n_segments, self.compactness,
+            self.n_segments,
+            self.compactness,
         )
 
-    # --------------------------------------------------------------------- #
+    # ------------------------------------------------------------------ #
     def generate_annotations(
-        self, uncertainty_map: np.ndarray, logits: np.ndarray
+        self,
+        uncertainty_map: np.ndarray,
+        logits: np.ndarray,
+        image: np.ndarray | None = None,
     ) -> List[AnnotationBase]:
-        """Return mask annotations from SLIC superpixels."""
+        """Return mask annotations for superpixels covering local maxima."""
+        if image is None:
+            raise ValueError("image must be provided for superpixel annotations")
+
         from skimage.segmentation import slic
 
-        map2d = BasePointAnnotationGenerator._prepare_uncertainty_map(uncertainty_map)
+        map2d = self._prepare_uncertainty_map(uncertainty_map)
+
+        lm_gen = LocalMaximaPointAnnotationGenerator(
+            filter_size=48,
+            gaussian_sigma=4.0,
+            edge_buffer=self.edge_buffer,
+            use_gaussian=False,
+        )
+        maxima = lm_gen._generate_coords(map2d)
+
         segments = slic(
-            map2d,
+            image,
             n_segments=self.n_segments,
             compactness=self.compactness,
             start_label=0,
-            channel_axis=None,
+            channel_axis=-1 if image.ndim == 3 else None,
         )
+
         annos: List[AnnotationBase] = []
-        for label in np.unique(segments):
+        seen: set[int] = set()
+        for r, c in maxima:
+            label = int(segments[r, c])
+            if label in seen:
+                continue
+            seen.add(label)
             mask = segments == label
-            coords = np.argwhere(mask)
-            if coords.size == 0:
-                continue
-            cy, cx = coords.mean(axis=0)
-            cyi, cxi = int(cy), int(cx)
-            if (
-                cyi < self.edge_buffer
-                or cyi >= map2d.shape[0] - self.edge_buffer
-                or cxi < self.edge_buffer
-                or cxi >= map2d.shape[1] - self.edge_buffer
-            ):
-                continue
             feats = logits[mask].mean(axis=0)
             uncert = float(map2d[mask].mean())
             annos.append(
                 MaskAnnotation(
                     image_index=-1,
                     filename="",
-                    coord=(cyi, cxi),
+                    coord=(int(r), int(c)),
                     logit_features=feats,
                     uncertainty=uncert,
                     mask=mask.astype(np.uint8),
                 )
             )
-        logger.info("%s produced %d annotations.", self.__class__.__name__, len(annos))
+
+        logger.info(
+            "%s produced %d annotations.",
+            self.__class__.__name__,
+            len(annos),
+        )
         return annos
