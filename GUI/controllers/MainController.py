@@ -289,8 +289,8 @@ class MainController(QObject):
         try:
             self.clustering_controller.annotation_progress.disconnect()
             self.clustering_controller.clustering_progress.disconnect()
-            self.clustering_controller.clusters_ready.disconnect()
-            self.clustering_controller.cancelled.disconnect()
+            self.clustering_controller.clusters_ready.disconnect(self._finish_progress_dialog)
+            self.clustering_controller.cancelled.disconnect(self._finish_progress_dialog)
         except TypeError:
             pass  # already disconnected
 

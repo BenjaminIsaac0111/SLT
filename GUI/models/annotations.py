@@ -44,6 +44,11 @@ class PointAnnotation:
             self.adjusted_uncertainty = self.uncertainty
 
     # ------------------------------------------------------------------
+    def reset_uncertainty(self) -> None:
+        """Restore ``adjusted_uncertainty`` to the original value."""
+        self.adjusted_uncertainty = self.uncertainty
+
+    # ------------------------------------------------------------------
     def to_dict(self) -> dict:
         return {
             "type": "point",
