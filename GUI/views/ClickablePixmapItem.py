@@ -1,6 +1,8 @@
 from functools import partial
 from typing import Tuple
 
+import numpy as np
+
 from PyQt5.QtCore import QRectF, Qt, QPointF, pyqtSignal
 from PyQt5.QtGui import QPixmap, QFont, QFontMetrics, QPainter, QPen, QImage
 from PyQt5.QtWidgets import QGraphicsObject, QApplication, QMenu, QAction
