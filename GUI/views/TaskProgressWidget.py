@@ -54,11 +54,13 @@ class MCBankerProgressWidget(QGroupBox):
         self._paused = not self._paused
 
     def start(self, output_file: str, total: int) -> None:
+        self._paused = False
+        self.pause_btn.setText("Pause")
+        self.pause_btn.setEnabled(True)
         self._total = total
         self.bar.setRange(0, total)
         self.bar.setValue(0)
         self.label.setText(Path(output_file).name)
-        self.pause_btn.setEnabled(True)
 
     def update_progress(self, processed: int, total: int) -> None:
         if total != self._total:
@@ -68,6 +70,8 @@ class MCBankerProgressWidget(QGroupBox):
         self.label.setText(f"{processed}/{total} samples")
 
     def finish(self):
+        self._paused = False
+        self.pause_btn.setText("Pause")
         self.pause_btn.setEnabled(False)
         self.label.setText("Done")
 
