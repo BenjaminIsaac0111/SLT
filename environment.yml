@@ -24,6 +24,7 @@ dependencies:
       - numba
       - joblib
       - PyQt5
+      - scikit-image
       - pydantic
       - pytest
       - pyinstaller

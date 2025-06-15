@@ -1,7 +1,7 @@
 import logging
 from typing import List, Tuple
 
-from .annotations import AnnotationBase, PointAnnotation
+from .annotations import AnnotationBase, PointAnnotation, MaskAnnotation
 
 import numpy as np
 from scipy.ndimage import gaussian_filter, maximum_filter
@@ -211,3 +211,69 @@ class CenterPointAnnotationGenerator(BasePointAnnotationGenerator):
         centre = (r // 2, c // 2)
         logger.debug("Centre point at %s", centre)
         return [centre]
+
+
+# -----------------------------------------------------------------------------
+#
+#                    SUPERPIXEL IMPLEMENTATION
+# -----------------------------------------------------------------------------
+class SLICSuperpixelAnnotationGenerator:
+    """Generate mask annotations from uncertainty map superpixels."""
+
+    def __init__(self, n_segments: int = 100, compactness: float = 10.0, edge_buffer: int = 64):
+        if n_segments <= 0:
+            raise ValueError("n_segments must be positive")
+        if compactness <= 0:
+            raise ValueError("compactness must be positive")
+        self.n_segments = int(n_segments)
+        self.compactness = float(compactness)
+        self.edge_buffer = int(edge_buffer)
+        logger.info(
+            "SLICSuperpixelAnnotationGenerator(segments=%d, compactness=%.1f)",
+            self.n_segments, self.compactness,
+        )
+
+    # --------------------------------------------------------------------- #
+    def generate_annotations(
+        self, uncertainty_map: np.ndarray, logits: np.ndarray
+    ) -> List[AnnotationBase]:
+        """Return mask annotations from SLIC superpixels."""
+        from skimage.segmentation import slic
+
+        map2d = BasePointAnnotationGenerator._prepare_uncertainty_map(uncertainty_map)
+        segments = slic(
+            map2d,
+            n_segments=self.n_segments,
+            compactness=self.compactness,
+            start_label=0,
+            channel_axis=None,
+        )
+        annos: List[AnnotationBase] = []
+        for label in np.unique(segments):
+            mask = segments == label
+            coords = np.argwhere(mask)
+            if coords.size == 0:
+                continue
+            cy, cx = coords.mean(axis=0)
+            cyi, cxi = int(cy), int(cx)
+            if (
+                cyi < self.edge_buffer
+                or cyi >= map2d.shape[0] - self.edge_buffer
+                or cxi < self.edge_buffer
+                or cxi >= map2d.shape[1] - self.edge_buffer
+            ):
+                continue
+            feats = logits[mask].mean(axis=0)
+            uncert = float(map2d[mask].mean())
+            annos.append(
+                MaskAnnotation(
+                    image_index=-1,
+                    filename="",
+                    coord=(cyi, cxi),
+                    logit_features=feats,
+                    uncertainty=uncert,
+                    mask=mask.astype(np.uint8),
+                )
+            )
+        logger.info("%s produced %d annotations.", self.__class__.__name__, len(annos))
+        return annos

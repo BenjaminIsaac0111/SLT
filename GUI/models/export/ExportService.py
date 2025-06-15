@@ -8,11 +8,29 @@ from collections import defaultdict
 from typing import Dict, Iterable, List, Tuple
 
 from GUI.models.annotations import AnnotationBase, PointAnnotation, MaskAnnotation
+import numpy as np
 from .Options import ExportOptions
 
 __all__ = ["build_grouped_annotations"]
 
 Grouped = Dict[str, List[dict]]
+
+
+def _rle_encode(mask: np.ndarray) -> List[int]:
+    """Return run-length encoding for a binary mask."""
+    flat = mask.astype(np.uint8).ravel()
+    counts: List[int] = []
+    prev = flat[0]
+    length = 1
+    for val in flat[1:]:
+        if val == prev:
+            length += 1
+        else:
+            counts.append(length)
+            length = 1
+            prev = val
+    counts.append(length)
+    return counts
 
 
 def _should_include(anno: AnnotationBase, opts: ExportOptions) -> bool:
@@ -53,7 +71,8 @@ def build_grouped_annotations(
             "cluster_id": int(cluster_id),
         }
         if isinstance(anno, MaskAnnotation) and anno.mask is not None:
-            entry["mask"] = anno.mask.tolist()
+            entry["mask_rle"] = _rle_encode(anno.mask)
+            entry["mask_shape"] = list(anno.mask.shape)
             entry["coord"] = [int(c) for c in anno.coord]
         else:
             entry["coord"] = [int(c) for c in anno.coord]
