@@ -5,6 +5,8 @@ import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+import tempfile
+import time
 
 import h5py
 import numpy as np
@@ -82,10 +84,10 @@ def set_global_seed(seed: int) -> None:
 mixed_precision.set_global_policy("mixed_float16")
 
 
-def _predict_logits(x: tf.Tensor, model: tf.keras.Model) -> tf.Tensor:
-    """Raw logits from the model *in float32* with dropout active."""
+def _predict_logits(x: tf.Tensor, model: tf.keras.Model, *, training: bool = True) -> tf.Tensor:
+    """Return logits in float32 with optional dropout."""
 
-    logits_fp16 = model(x, training=True)  # honours dropout layers
+    logits_fp16 = model(x, training=training)
     return tf.cast(logits_fp16, tf.float32)
 
 
@@ -119,7 +121,7 @@ def mc_infer(
     # ---------------------------------------------------------------------
     batch_size = tf.shape(x)[0]
     x_tiled = tf.repeat(x, repeats=n_iter, axis=0)  # [n_iter⋅B, ...]
-    logits = _predict_logits(x_tiled, model)  # float32
+    logits = _predict_logits(x_tiled, model, training=True)  # float32
 
     h, w = tf.shape(logits)[1], tf.shape(logits)[2]
     logits = tf.reshape(logits, (n_iter, batch_size, h, w, num_classes))  # [T, B, H, W, K]
@@ -144,12 +146,36 @@ def mc_infer(
 
     # BALD (mutual information) -------------------------------------------
     bald = entropy - expected_entropy
+    variance = tf.reduce_sum(tf.math.reduce_variance(probs, axis=0), axis=-1)
 
     return {
         "entropy": entropy_norm,
+        "variance": variance,
         "bald": bald,
         "mean_probs": mean_probs,
         "mean_logits": mean_logits,
+    }
+
+
+def entropy_only(
+        x: tf.Tensor,
+        *,
+        model: tf.keras.Model,
+        num_classes: int,
+        temperature: float = 1.0,
+) -> Dict[str, tf.Tensor]:
+    """Return entropy without MC sampling."""
+
+    logits = _predict_logits(x, model, training=False)
+    logits_scaled = logits / tf.cast(temperature, tf.float32)
+    probs = tf.nn.softmax(logits_scaled, axis=-1)
+    entropy = -tf.reduce_sum(probs * tf.math.log(probs + 1e-6), axis=-1)
+    max_entropy = tf.math.log(tf.cast(num_classes, tf.float32))
+    entropy_norm = entropy / max_entropy
+    return {
+        "entropy": entropy_norm,
+        "mean_probs": probs,
+        "mean_logits": logits_scaled,
     }
 
 
@@ -157,12 +183,27 @@ def mc_infer(
 # Main processing -------------------------------------------------------------
 # ----------------------------------------------------------------------------
 
-def main(config: Dict[str, Any], *, logger: logging.Logger, resume: bool = False) -> None:
+def main(
+    config: Dict[str, Any],
+    *,
+    logger: logging.Logger,
+    resume: bool = False,
+    progress_cb: Optional[callable] = None,
+    should_abort: Optional[callable] = None,
+    should_pause: Optional[callable] = None,
+) -> None:
     """Run MC inference, compute uncertainties, and stream them to HDF5."""
 
     # ---------------------------------------------------------------------
     # Seed & I/O paths -----------------------------------------------------
     # ---------------------------------------------------------------------
+    if progress_cb is None:
+        progress_cb = lambda *_: None
+    if should_abort is None:
+        should_abort = lambda: False
+    if should_pause is None:
+        should_pause = lambda: False
+
     set_global_seed(int(config.get("SEED", 42)))
 
     input_size: List[int] = config["INPUT_SIZE"]  # [H, W, C]
@@ -171,10 +212,12 @@ def main(config: Dict[str, Any], *, logger: logging.Logger, resume: bool = False
     h_in, w_in, c_in = input_size
 
     num_classes: int = config["OUT_CHANNELS"]
-    batch_size: int = config["BATCH_SIZE"]
+    batch_size: int = config.get("BATCH_SIZE", 1)
 
     model_path = Path(config["MODEL_DIR"]) / f"{config['MODEL_NAME']}"
     logger.info("Loading model from %s", model_path)
+
+    mixed_precision.set_global_policy("mixed_float16")
 
     model = load_model(
         model_path,
@@ -191,24 +234,47 @@ def main(config: Dict[str, Any], *, logger: logging.Logger, resume: bool = False
     # ---------------------------------------------------------------------
     # Dataset -------------------------------------------------------------
     # ---------------------------------------------------------------------
+    file_list_path = config.get("FILE_LIST") or config.get("TRAINING_LIST")
+    with open(file_list_path, "r") as f:
+        rel_paths = [line.strip().split("\t")[0] for line in f if line.strip()]
+
+    n_samples_cfg = int(config.get("N_SAMPLES", -1))
+    rng = np.random.default_rng(int(config.get("SEED", 42)))
+    subset_file = None
+    if 0 < n_samples_cfg < len(rel_paths):
+        rel_paths = rng.choice(rel_paths, size=n_samples_cfg, replace=False).tolist()
+        subset_file = tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".txt")
+        subset_file.write("\n".join(rel_paths))
+        subset_file.close()
+        file_list_used = subset_file.name
+    else:
+        file_list_used = file_list_path
+
+    total_samples = len(rel_paths)
+    logger.info("Total samples to process: %s", total_samples)
+
     ds = get_dataset_v2(
         data_dir=config["DATA_DIR"],
-        filelists=config["TRAINING_LIST"],
+        filelists=file_list_used,
         repeat=False,
         shuffle=False,
         batch_size=batch_size,
-        shuffle_buffer_size=config["SHUFFLE_BUFFER_SIZE"],
+        shuffle_buffer_size=config.get("SHUFFLE_BUFFER_SIZE", 256),
         out_channels=num_classes,
     )
 
     # ---------------------------------------------------------------------
     # Output file ---------------------------------------------------------
     # ---------------------------------------------------------------------
-    output_dir = Path(config.get("OUTPUT_DIR", config["MODEL_DIR"]))
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_file = output_dir / (
-        f"mc_{Path(config['MODEL_NAME']).stem}_inference_output.h5"
-    )
+    if "OUTPUT_FILE" in config:
+        output_file = Path(config["OUTPUT_FILE"])
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        output_dir = Path(config.get("OUTPUT_DIR", config["MODEL_DIR"]))
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_file = output_dir / (
+            f"mc_{Path(config['MODEL_NAME']).stem}_inference_output.h5"
+        )
 
     logger.info("Writing to %s", output_file)
 
@@ -221,18 +287,16 @@ def main(config: Dict[str, Any], *, logger: logging.Logger, resume: bool = False
     # ---------------------------------------------------------------------
     # Uncertainty selection ----------------------------------------------
     # ---------------------------------------------------------------------
-    uncertainty_types = [ut.lower() for ut in config.get("UNCERTAINTY_TYPES", ["variance", "bald", "entropy"])]
+    if "UNCERTAINTY_TYPE" in config:
+        uncertainty_types = [config["UNCERTAINTY_TYPE"].lower()]
+    else:
+        uncertainty_types = [
+            ut.lower() for ut in config.get("UNCERTAINTY_TYPES", ["variance", "bald", "entropy"])
+        ]
 
     # ---------------------------------------------------------------------
     # Optional cap on #samples --------------------------------------------
     # ---------------------------------------------------------------------
-    n_samples_cfg = int(config.get("N_SAMPLES", -1))
-    if n_samples_cfg == -1:
-        with open(config["TRAINING_LIST"], "r") as f:
-            total_samples = sum(1 for _ in f if _.strip())
-    else:
-        total_samples = n_samples_cfg
-
     logger.info("Total samples to process: %s", total_samples)
 
     # ---------------------------------------------------------------------
@@ -317,20 +381,46 @@ def main(config: Dict[str, Any], *, logger: logging.Logger, resume: bool = False
         # -----------------------------------------------------------------
         # Main loop -------------------------------------------------------
         # -----------------------------------------------------------------
-        pbar = tqdm(total=samples_remaining, unit="samples", desc="Processing")
+        pbar = tqdm(
+            total=samples_remaining,
+            unit="samples",
+            desc="Processing",
+            disable=progress_cb is not None,
+        )
         idx = start_idx
+        progress_cb(0, samples_remaining)
 
         for filenames, x_batch, _ in ds:  # y_batch unused for inference
+            if should_abort():
+                logger.info("Aborting at user request")
+                break
+            while should_pause():
+                if should_abort():
+                    logger.info("Aborting at user request")
+                    break
+                time.sleep(0.5)
+            if should_abort():
+                logger.info("Aborting at user request")
+                break
+
             bsz_actual = x_batch.shape[0]
 
             # ----------------------------------- Uncertainties ----------
-            uncs = mc_infer(
-                x_batch,
-                n_iter=int(config["MC_N_ITER"]),
-                model=model,
-                num_classes=num_classes,
-                temperature=float(config.get("TEMPERATURE", 1.0)),
-            )
+            if uncertainty_types == ["entropy"]:
+                uncs = entropy_only(
+                    x_batch,
+                    model=model,
+                    num_classes=num_classes,
+                    temperature=float(config.get("TEMPERATURE", 1.0)),
+                )
+            else:
+                uncs = mc_infer(
+                    x_batch,
+                    n_iter=int(config["MC_N_ITER"]),
+                    model=model,
+                    num_classes=num_classes,
+                    temperature=float(config.get("TEMPERATURE", 1.0)),
+                )
 
             # Cast to numpy early (1 cpu copy) --------------------------
             x_uint8 = (x_batch.numpy() * 255).astype("uint8")
@@ -352,15 +442,21 @@ def main(config: Dict[str, Any], *, logger: logging.Logger, resume: bool = False
             fname_ds[idx:new_size] = filenames_str
 
             for ut in uncertainty_types:
-                data_np = uncs[ut if ut != "total" else "entropy"].numpy().astype("float16")
+                key = ut if ut != "total" else "entropy"
+                data_np = uncs[key].numpy().astype("float16")
                 unc_ds[ut][idx:new_size] = data_np
 
             idx += bsz_actual
             h5f.attrs["last_written_index"] = idx
             pbar.update(bsz_actual)
+            progress_cb(idx - start_idx, samples_remaining)
 
         pbar.close()
+        progress_cb(samples_remaining, samples_remaining)
         logger.info("Finished writing %d samples.", idx - start_idx)
+
+    if subset_file is not None:
+        os.unlink(subset_file.name)
 
 
 # ----------------------------------------------------------------------------
@@ -374,6 +470,12 @@ if __name__ == "__main__":
     parser.add_argument("--log_level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])
     parser.add_argument("--log_file", help="Path to log file")
     parser.add_argument("--output_dir", help="Override OUTPUT_DIR from YAML")
+    parser.add_argument("--output_file", help="Override OUTPUT_FILE from YAML")
+    parser.add_argument(
+        "--n_samples",
+        type=int,
+        help="Number of random samples to process (0 or negative for all)",
+    )
     parser.add_argument("--resume", action="store_true", help="Append to existing HDF5 instead of overwrite")
 
     args = parser.parse_args()
@@ -385,18 +487,19 @@ if __name__ == "__main__":
             cfg = yaml.safe_load(fh)
         if args.output_dir:
             cfg["OUTPUT_DIR"] = args.output_dir
+        if args.output_file:
+            cfg["OUTPUT_FILE"] = args.output_file
+        if args.n_samples is not None:
+            cfg["N_SAMPLES"] = args.n_samples
 
         required = [
             "MODEL_DIR",
             "MODEL_NAME",
             "DATA_DIR",
-            "TRAINING_LIST",
-            "BATCH_SIZE",
-            "SHUFFLE_BUFFER_SIZE",
-            "OUT_CHANNELS",
-            "INPUT_SIZE",
-            "MC_N_ITER",
+            "FILE_LIST",
         ]
+        if cfg.get("UNCERTAINTY_TYPE", "entropy").lower() != "entropy":
+            required.append("MC_N_ITER")
         missing = [k for k in required if k not in cfg]
         if missing:
             logger.error("Missing required config keys: %s", missing)

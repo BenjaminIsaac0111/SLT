@@ -23,12 +23,14 @@ class AppMenuBar(QMenuBar):
     request_set_nav_policy = pyqtSignal(str)
     request_annotation_preview = pyqtSignal()
     request_build_cv_folds = pyqtSignal(str, str, int)
+    request_run_mc_banker = pyqtSignal(dict)
 
     # ----------------------------------------------------------------
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._build_file_menu()
         self._build_actions_menu()
+        self._build_deep_learning_menu()
 
     # ----------------------------------------------------------------
     def _build_file_menu(self) -> None:
@@ -94,6 +96,13 @@ class AppMenuBar(QMenuBar):
         act_cv.triggered.connect(self._pick_cv_folders)
 
     # ----------------------------------------------------------------
+    def _build_deep_learning_menu(self) -> None:
+        """Create menu for deep learning utilities."""
+        dl_menu = self.addMenu("Deep Learning")
+        act_mc = dl_menu.addAction("Build MC Inference HDF5…")
+        act_mc.triggered.connect(self._pick_mc_config)
+
+    # ----------------------------------------------------------------
     def set_checked_annotation_method(self, label: str) -> None:
         """Tick QAction matching *label* and untick others."""
         for act in self.findChildren(QAction):
@@ -134,3 +143,11 @@ class AppMenuBar(QMenuBar):
         if cfg is not None:
             img_dir, out_dir, folds = cfg
             self.request_build_cv_folds.emit(img_dir, out_dir, folds)
+
+    def _pick_mc_config(self) -> None:
+        from .MCBankerWizard import MCBankerWizard
+
+        wiz = MCBankerWizard(self)
+        cfg = wiz.get_config()
+        if cfg is not None:
+            self.request_run_mc_banker.emit(cfg)

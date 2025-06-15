@@ -173,10 +173,16 @@ def _startup_dialog(autosave: Optional[str], controller, icon_path: str) -> bool
 
 # -------------------------------------------------------------------- main‑window factory
 
-def _main_window(view, controller) -> QMainWindow:  # noqa: D401 – imperative
+def _main_window(view, controller, tasks_tab=None) -> QMainWindow:  # noqa: D401 – imperative
     win = QMainWindow()
     tabs = QTabWidget()
     tabs.addTab(view, "Clustered Crops")
+    if tasks_tab is not None:
+        tabs.addTab(tasks_tab, "Tasks")
+    else:
+        from GUI.views.TasksTab import TasksTab
+        tasks_tab = TasksTab()
+        tabs.addTab(tasks_tab, "Tasks")
     win.setCentralWidget(tabs)
 
     # ---- menu bar --------------------------------------------------
@@ -195,6 +201,7 @@ def _main_window(view, controller) -> QMainWindow:  # noqa: D401 – imperative
     mb.request_load_project.connect(controller.load_project)  # slot(path)
     mb.request_export_annotations.connect(controller.export_annotations)
     mb.request_build_cv_folds.connect(controller.build_cross_validation_folds)
+    mb.request_run_mc_banker.connect(controller.run_mc_banker)
     mb.request_set_nav_policy.connect(controller.on_navigation_policy_changed)
 
 
@@ -219,16 +226,18 @@ def main() -> None:  # noqa: D401
     _set_app_icon(app, icon)
 
     from GUI.views.ClusteredCropsView import ClusteredCropsView
+    from GUI.views.TasksTab import TasksTab
     from GUI.controllers.MainController import MainController
 
     view = ClusteredCropsView()
-    controller = MainController(model=None, view=view)
+    tasks_tab = TasksTab()
+    controller = MainController(model=None, view=view, tasks_widget=tasks_tab)
 
     latest = _latest_autosave()
     if not _startup_dialog(latest, controller, icon):
         sys.exit()
 
-    _win = _main_window(view, controller)  # Needs to be stored for persistence.
+    _win = _main_window(view, controller, tasks_tab)  # Needs to be stored for persistence.
     sys.exit(app.exec_())
 
 
