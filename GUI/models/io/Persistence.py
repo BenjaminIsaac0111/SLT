@@ -44,9 +44,11 @@ from pydantic import BaseModel, Field, validator
 
 
 class AnnotationJSON(BaseModel):
+    type: str = "point"
     image_index: int
     filename: str
-    coord: List[int]
+    coord: List[int] = []
+    mask: Optional[List[List[int]]] = None
     logit_features: List[float]
     uncertainty: Union[float, List[float]]
     adjusted_uncertainty: Union[float, List[float], None] = None

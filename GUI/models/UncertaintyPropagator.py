@@ -64,7 +64,7 @@ import numpy as np
 from numba import njit
 from scipy.spatial import cKDTree
 
-from GUI.models.Annotation import Annotation
+from GUI.models.annotations import AnnotationBase
 
 __all__ = [
     "auto_lambda",
@@ -268,7 +268,7 @@ class DistanceBasedPropagator(BaseUncertaintyPropagator):
 
 
 def propagate_for_annotations(
-        annos: List[Annotation],
+        annos: List[AnnotationBase],
         *,
         lambda_param: Union[float, str] = "auto",
         threshold: float = np.inf,

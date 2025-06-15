@@ -2,14 +2,14 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 from GUI.configuration.configuration import CLASS_COMPONENTS
-from GUI.models.Annotation import Annotation
+from GUI.models.annotations import PointAnnotation, MaskAnnotation
 from GUI.models.ImageProcessor import ImageProcessor
 
 
 def test_create_annotation_overlay_draws_crosshair():
     proc = ImageProcessor()
     img = np.zeros((20, 20, 3), dtype=np.uint8)
-    ann = Annotation(
+    ann = PointAnnotation(
         image_index=0,
         filename="a",
         coord=(10, 10),
@@ -29,7 +29,7 @@ def test_create_annotation_overlay_draws_crosshair():
 def test_create_annotation_overlay_draws_label_box():
     proc = ImageProcessor()
     img = np.ones((80, 80, 3), dtype=np.uint8) * 255
-    ann = Annotation(
+    ann = PointAnnotation(
         image_index=0,
         filename="a",
         coord=(20, 20),
@@ -51,3 +51,22 @@ def test_create_annotation_overlay_draws_label_box():
     cy = ly + th // 2
     assert arr[cy, cx, 0] < 255
 
+
+def test_create_annotation_overlay_draws_mask():
+    proc = ImageProcessor()
+    img = np.zeros((20, 20, 3), dtype=np.uint8)
+    mask = np.zeros((20, 20), dtype=np.uint8)
+    mask[5:15, 5:15] = 1
+    ann = MaskAnnotation(
+        image_index=0,
+        filename="a",
+        coord=(10, 10),
+        logit_features=np.array([0.0]),
+        uncertainty=0.5,
+        class_id=1,
+        mask=mask,
+    )
+    out = proc.create_annotation_overlay(img, [ann], radius=2, show_labels=False)
+    arr = np.array(out.convert("RGB"))
+    expected = proc.class_color_map[1]
+    assert tuple(arr[10, 10]) == expected

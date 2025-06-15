@@ -5,7 +5,7 @@ from typing import List, Dict, Any, Optional
 
 from PyQt5.QtCore import QRunnable, QObject, pyqtSignal
 
-from GUI.models.Annotation import Annotation
+from GUI.models.annotations import AnnotationBase
 from GUI.models.CacheManager import CacheManager
 from GUI.models.ImageDataModel import BaseImageDataModel
 from GUI.models.ImageProcessor import ImageProcessor
@@ -28,7 +28,7 @@ class ImageProcessingWorker(QRunnable):
 
     def __init__(
             self,
-            sampled_annotations: List[Annotation],
+            sampled_annotations: List[AnnotationBase],
             image_data_model: BaseImageDataModel,
             image_processor: ImageProcessor,
             crop_size: int = 512,
@@ -87,7 +87,7 @@ class ImageProcessingWorker(QRunnable):
         total_results = self.already_processed + processed_data
         self.signals.processing_finished.emit(total_results)
 
-    def _process_single_annotation(self, annotation: Annotation) -> Optional[Dict[str, Any]]:
+    def _process_single_annotation(self, annotation: AnnotationBase) -> Optional[Dict[str, Any]]:
         """
         Processes a single Annotation, extracting and caching its crop.
         """

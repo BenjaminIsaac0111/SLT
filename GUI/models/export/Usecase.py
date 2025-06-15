@@ -7,7 +7,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Iterable, Tuple
 
-from GUI.models.Annotation import Annotation  # external dependency
+from GUI.models.annotations import AnnotationBase
 from .ExportService import build_grouped_annotations
 from .Options import ExportOptions
 from .Writer import BaseWriter, JSONWriter
@@ -26,7 +26,7 @@ class ExportAnnotationsUseCase:
     # ---------------------------------------------------------------------
     def __call__(
             self,
-            cluster_annos: Iterable[Tuple[int, Annotation]],
+            cluster_annos: Iterable[Tuple[int, AnnotationBase]],
             opts: ExportOptions,
             out_path: Path | str,
     ) -> int:

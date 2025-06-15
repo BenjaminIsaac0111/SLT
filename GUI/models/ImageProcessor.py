@@ -12,7 +12,7 @@ from matplotlib import pyplot as plt
 from matplotlib.colors import Colormap
 
 from GUI.models.CacheManager import CacheManager
-from GUI.models.Annotation import Annotation
+from GUI.models.annotations import AnnotationBase, PointAnnotation, MaskAnnotation
 from GUI.configuration.configuration import CLASS_COMPONENTS
 
 
@@ -120,7 +120,7 @@ class ImageProcessor:
     def create_annotation_overlay(
             self,
             image: np.ndarray,
-            annotations: List['Annotation'],
+            annotations: List[AnnotationBase],
             radius: int = 6,
             crosshair: bool = True,
             show_labels: bool = False,
@@ -154,16 +154,22 @@ class ImageProcessor:
             if ann.class_id == -1:
                 continue
             colour = self.class_color_map.get(ann.class_id, (255, 255, 255))
-            y, x = map(int, ann.coord)
-            bbox = [x - radius, y - radius, x + radius, y + radius]
-            draw.ellipse(bbox, fill=colour, outline=colour)
-            if crosshair:
-                draw.line([(x - offset, y), (x + offset, y)], fill="black", width=3)
-                draw.line([(x, y - offset), (x, y + offset)], fill="black", width=3)
-                draw.line([(x - offset, y), (x + offset, y)], fill=colour, width=1)
-                draw.line([(x, y - offset), (x, y + offset)], fill=colour, width=1)
+            if isinstance(ann, MaskAnnotation) and ann.mask is not None:
+                mask_img = Image.fromarray((ann.mask > 0).astype(np.uint8) * 255)
+                overlay = Image.new("RGBA", mask_img.size, colour + (160,))
+                pil.paste(overlay, mask=mask_img)
+            else:
+                y, x = map(int, ann.coord)
+                bbox = [x - radius, y - radius, x + radius, y + radius]
+                draw.ellipse(bbox, fill=colour, outline=colour)
+                if crosshair:
+                    draw.line([(x - offset, y), (x + offset, y)], fill="black", width=3)
+                    draw.line([(x, y - offset), (x, y + offset)], fill="black", width=3)
+                    draw.line([(x - offset, y), (x + offset, y)], fill=colour, width=1)
+                    draw.line([(x, y - offset), (x, y + offset)], fill=colour, width=1)
             if show_labels:
                 label = CLASS_COMPONENTS.get(ann.class_id, str(ann.class_id))
+                y, x = map(int, ann.coord)
                 tb = draw.textbbox((0, 0), label, font=font)
                 tw, th = tb[2] - tb[0], tb[3] - tb[1]
                 lx = x + radius + 4

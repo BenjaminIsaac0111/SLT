@@ -2,12 +2,12 @@ import numpy as np
 from scipy.spatial import cKDTree
 import pytest
 
-from GUI.models.Annotation import Annotation
+from GUI.models.annotations import PointAnnotation
 from GUI.models.UncertaintyPropagator import auto_lambda, propagate_for_annotations
 
 
 def make_annotation(x, uncertainty=1.0, class_id=-1):
-    return Annotation(
+    return PointAnnotation(
         image_index=0,
         filename="img",
         coord=(0, 0),
@@ -65,6 +65,7 @@ def test_unlabeling_resets_uncertainty():
     ]
     propagate_for_annotations(annos, lambda_param=1.0)
     annos[0].class_id = -1
+    annos[0].reset_uncertainty()
     propagate_for_annotations(annos, lambda_param=1.0)
     for ann in annos:
         assert ann.adjusted_uncertainty == pytest.approx(0.6)

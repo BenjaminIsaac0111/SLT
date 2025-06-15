@@ -7,7 +7,7 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Dict, Iterable, List, Tuple
 
-from GUI.models.Annotation import Annotation
+from GUI.models.annotations import AnnotationBase, PointAnnotation, MaskAnnotation
 from .Options import ExportOptions
 
 __all__ = ["build_grouped_annotations"]
@@ -15,7 +15,7 @@ __all__ = ["build_grouped_annotations"]
 Grouped = Dict[str, List[dict]]
 
 
-def _should_include(anno: Annotation, opts: ExportOptions) -> bool:
+def _should_include(anno: AnnotationBase, opts: ExportOptions) -> bool:
     """Return *True* when *anno* must be part of the export."""
     if anno.class_id in {None, -1, -2}:  # unlabeled or unsure
         return False
@@ -25,7 +25,7 @@ def _should_include(anno: Annotation, opts: ExportOptions) -> bool:
 
 
 def build_grouped_annotations(
-        cluster_annos: Iterable[Tuple[int, Annotation]],
+        cluster_annos: Iterable[Tuple[int, AnnotationBase]],
         opts: ExportOptions,
 ) -> Grouped:
     """Group annotations by *filename* applying the filtering rules in *opts*.
@@ -48,12 +48,15 @@ def build_grouped_annotations(
         if not _should_include(anno, opts):
             continue
 
-        grouped[anno.filename].append(
-            {
-                "coord": [int(c) for c in anno.coord],
-                "class_id": int(anno.class_id),
-                "cluster_id": int(cluster_id),
-            }
-        )
+        entry = {
+            "class_id": int(anno.class_id),
+            "cluster_id": int(cluster_id),
+        }
+        if isinstance(anno, MaskAnnotation) and anno.mask is not None:
+            entry["mask"] = anno.mask.tolist()
+            entry["coord"] = [int(c) for c in anno.coord]
+        else:
+            entry["coord"] = [int(c) for c in anno.coord]
+        grouped[anno.filename].append(entry)
 
     return dict(grouped)

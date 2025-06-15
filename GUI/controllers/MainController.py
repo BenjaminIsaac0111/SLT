@@ -11,7 +11,7 @@ from PyQt5.QtWidgets import QMessageBox, QProgressDialog
 
 from GUI.controllers.AnnotationClusteringController import AnnotationClusteringController
 from GUI.controllers.ImageProcessingController import ImageProcessingController
-from GUI.models.Annotation import Annotation
+from GUI.models.annotations import AnnotationBase, annotation_from_dict
 from GUI.models.ImageDataModel import BaseImageDataModel, create_image_data_model
 from GUI.models.PointAnnotationGenerator import (
     LocalMaximaPointAnnotationGenerator,
@@ -247,7 +247,7 @@ class MainController(QObject):
         self._idle_timer.start(self.AUTOSAVE_IDLE_MS)
 
     @pyqtSlot(dict)
-    def on_clusters_ready(self, clusters: Dict[int, List[Annotation]]):
+    def on_clusters_ready(self, clusters: Dict[int, List[AnnotationBase]]):
         """
         Handles when clusters are ready after clustering finishes.
         Updates the ImageProcessingController with the new clusters.
@@ -289,8 +289,8 @@ class MainController(QObject):
         try:
             self.clustering_controller.annotation_progress.disconnect()
             self.clustering_controller.clustering_progress.disconnect()
-            self.clustering_controller.clusters_ready.disconnect()
-            self.clustering_controller.cancelled.disconnect()
+            self.clustering_controller.clusters_ready.disconnect(self._finish_progress_dialog)
+            self.clustering_controller.cancelled.disconnect(self._finish_progress_dialog)
         except TypeError:
             pass  # already disconnected
 
@@ -353,7 +353,7 @@ class MainController(QObject):
         if class_id == -1:
             for anno in labeled_annotations:
                 anno.class_id = class_id
-                anno.adjusted_uncertainty = anno.uncertainty
+                anno.reset_uncertainty()
         else:
             for anno in labeled_annotations:
                 anno.class_id = class_id
@@ -452,7 +452,7 @@ class MainController(QObject):
         self.view.populate_cluster_selection(cluster_info, selected_cluster_id=last)
         self.on_select_cluster(last, force=True)
 
-    def _get_all_annotations(self) -> List[Annotation]:
+    def _get_all_annotations(self) -> List[AnnotationBase]:
         """
         Retrieves all annotations from the current clusters.
         Returns:
@@ -724,9 +724,9 @@ class MainController(QObject):
 
     def _clusters_from_state(
             self, state: ProjectState
-    ) -> dict[int, list[Annotation]]:
-        clusters: dict[int, list[Annotation]] = {
-            int(cid): [Annotation.from_dict(a.dict()) for a in annos]
+    ) -> dict[int, list[AnnotationBase]]:
+        clusters: dict[int, list[AnnotationBase]] = {
+            int(cid): [annotation_from_dict(a.dict()) for a in annos]
             for cid, annos in state.clusters.items()
         }
 

@@ -10,7 +10,7 @@ import numpy as np
 from matplotlib import pyplot as plt
 from scipy import stats
 
-from GUI.models.Annotation import Annotation
+from GUI.models.annotations import PointAnnotation as Annotation
 
 
 # -----------------------------------------------------------------------------
