@@ -3,10 +3,10 @@ import logging
 import math
 import os
 import sys
-from pathlib import Path
-from typing import Any, Dict, List, Optional
 import tempfile
 import time
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 import h5py
 import numpy as np
@@ -126,13 +126,14 @@ def mc_infer(
     h, w = tf.shape(logits)[1], tf.shape(logits)[2]
     logits = tf.reshape(logits, (n_iter, batch_size, h, w, num_classes))  # [T, B, H, W, K]
 
-    # Temperature scaling --------------------------------------------------
-    logits_scaled = logits / tf.cast(temperature, tf.float32)
-    probs = tf.nn.softmax(logits_scaled, axis=-1)  # [T, B, H, W, K]
+    # ── NEW: 1) work with *raw* logits per draw  ────────────────────────────────
+    probs_per_draw = tf.nn.softmax(logits, axis=-1)  # [T,B,H,W,K]
 
-    # Expected values across iterations -----------------------------------
-    mean_probs = tf.reduce_mean(probs, axis=0)  # [B, H, W, K]
-    mean_logits = tf.reduce_mean(logits_scaled, axis=0)
+    # ── NEW: 2) average logits first, then apply temperature once  ─────────────
+    mean_logits = tf.reduce_mean(logits, axis=0)  # [B,H,W,K]
+    mean_probs = tf.nn.softmax(
+        mean_logits / tf.cast(temperature, tf.float32), axis=-1
+    )  # [B,H,W,K]
 
     # Predictive entropy (total) ------------------------------------------
     entropy = -tf.reduce_sum(mean_probs * tf.math.log(mean_probs + 1e-6), axis=-1)  # [B, H, W]
@@ -141,12 +142,14 @@ def mc_infer(
 
     # Expected entropy -----------------------------------------------------
     expected_entropy = -tf.reduce_mean(
-        tf.reduce_sum(probs * tf.math.log(probs + 1e-6), axis=-1), axis=0
+        tf.reduce_sum(probs_per_draw * tf.math.log(probs_per_draw + 1e-6), axis=-1),
+        axis=0,
     )
 
     # BALD (mutual information) -------------------------------------------
     bald = entropy - expected_entropy
-    variance = tf.reduce_sum(tf.math.reduce_variance(probs, axis=0), axis=-1)
+
+    variance = tf.reduce_sum(tf.math.reduce_variance(probs_per_draw, axis=0), axis=-1)
 
     return {
         "entropy": entropy_norm,
