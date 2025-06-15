@@ -16,6 +16,8 @@ def test_create_annotation_overlay_draws_crosshair():
         logit_features=np.array([0.0]),
         uncertainty=0.5,
         class_id=1,
+        mask_rle=None,
+        mask_shape=None,
     )
     out = proc.create_annotation_overlay(img, [ann], radius=2, show_labels=False)
     arr = np.array(out.convert("RGB"))
@@ -36,6 +38,8 @@ def test_create_annotation_overlay_draws_label_box():
         logit_features=np.array([0.0]),
         uncertainty=0.5,
         class_id=1,
+        mask_rle=None,
+        mask_shape=None,
     )
     out = proc.create_annotation_overlay(
         img, [ann], radius=3, crosshair=False, show_labels=True

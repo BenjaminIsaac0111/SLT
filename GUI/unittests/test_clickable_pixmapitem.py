@@ -37,6 +37,8 @@ def make_item(qapp):
         coord=(0, 0),
         logit_features=np.array([], dtype=np.float32),
         uncertainty=0.5,
+        mask_rle=None,
+        mask_shape=None,
     )
     pixmap = QPixmap(10, 10)
     item = ClickablePixmapItem(annotation=ann, pixmap=pixmap, coord_pos=(2, 3))

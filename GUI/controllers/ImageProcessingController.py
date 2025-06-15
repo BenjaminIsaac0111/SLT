@@ -125,17 +125,20 @@ class ImageProcessingController(QObject):
             anno = data['annotation']
             np_image = data['processed_crop']
             coord_pos = data['coord_pos']
+            mask_crop = data.get('mask_crop')
 
             if np_image is None or coord_pos is None:
                 logging.warning(f"Missing image or coords for annotation: {anno}")
                 continue
 
             q_pixmap = self._numpy_to_qpixmap(np_image)
+            mask_pix = self._numpy_to_qpixmap(mask_crop) if mask_crop is not None else None
 
             sampled_crops.append({
                 'annotation': anno,
                 'processed_crop': q_pixmap,
-                'coord_pos': coord_pos
+                'coord_pos': coord_pos,
+                'mask_pixmap': mask_pix,
             })
 
         self.crops_ready.emit(sampled_crops)

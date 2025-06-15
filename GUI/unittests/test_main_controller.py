@@ -166,8 +166,8 @@ def test_visible_crops_complete():
     from GUI.models.Annotation import Annotation
 
     view = DummyView()
-    anno1 = Annotation(0, "a", (0, 0), [], 0.5, class_id=1)
-    anno2 = Annotation(0, "b", (1, 1), [], 0.5, class_id=-1)
+    anno1 = Annotation(0, "a", (0, 0), [], 0.5, class_id=1, mask_rle=None, mask_shape=None)
+    anno2 = Annotation(0, "b", (1, 1), [], 0.5, class_id=-1, mask_rle=None, mask_shape=None)
     view.selected_crops = [{"annotation": anno1}]
     ctrl = build_controller(view)
     assert ctrl._visible_crops_complete()
@@ -180,7 +180,7 @@ def test_propagate_labeling_changes(monkeypatch):
 
     view = DummyView()
     ctrl = build_controller(view)
-    ann = Annotation(0, "a", (0, 0), [], 0.5)
+    ann = Annotation(0, "a", (0, 0), [], 0.5, mask_rle=None, mask_shape=None)
     ctrl.clustering_controller.get_clusters = lambda: {1: [ann]}
     called = {}
 

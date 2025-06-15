@@ -53,6 +53,8 @@ def build_grouped_annotations(
                 "coord": [int(c) for c in anno.coord],
                 "class_id": int(anno.class_id),
                 "cluster_id": int(cluster_id),
+                "mask_rle": anno.mask_rle,
+                "mask_shape": list(anno.mask_shape) if anno.mask_shape else None,
             }
         )
 

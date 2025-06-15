@@ -17,7 +17,9 @@ from GUI.models.PointAnnotationGenerator import (
     LocalMaximaPointAnnotationGenerator,
     EquidistantPointAnnotationGenerator,
     CenterPointAnnotationGenerator,
+    LocalMaximaPointAnnotationGenerator,
 )
+from GUI.models.SuperpixelAnnotationGenerator import SLICSuperpixelGenerator
 from GUI.models.UncertaintyPropagator import propagate_for_annotations
 from GUI.models.export.Options import ExportOptions
 from GUI.models.export.Usecase import ExportAnnotationsUseCase
@@ -231,6 +233,9 @@ class MainController(QObject):
         elif method == "Image Centre":
             self.annotation_generator = CenterPointAnnotationGenerator()
             self._use_greedy_nav = False
+        elif method == "Superpixel Masks":
+            self.annotation_generator = SLICSuperpixelGenerator()
+            self._use_greedy_nav = True
         else:
             self.annotation_generator = LocalMaximaPointAnnotationGenerator(
                 filter_size=48, gaussian_sigma=4.0, use_gaussian=False

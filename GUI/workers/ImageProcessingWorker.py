@@ -3,6 +3,9 @@
 import logging
 from typing import List, Dict, Any, Optional
 
+import numpy as np
+from PIL import Image
+
 from PyQt5.QtCore import QRunnable, QObject, pyqtSignal
 
 from GUI.models.Annotation import Annotation
@@ -98,6 +101,7 @@ class ImageProcessingWorker(QRunnable):
         cached_result = self.cache.get(cache_key)
         if cached_result:
             processed_crop, coord_pos = cached_result
+            mask_crop = None
         else:
             image_data = self.image_data_model.get_image_data(annotation.image_index)
             image_array = image_data.get('image')
@@ -108,10 +112,30 @@ class ImageProcessingWorker(QRunnable):
             processed_crop, coord_pos = self.image_processor.extract_crop_data(
                 image_array, coord, crop_size=self.crop_size, zoom_factor=self.zoom_factor
             )
+            mask_crop = None
+            if annotation.mask_rle and annotation.mask_shape:
+                mask = Annotation.decode_mask(annotation.mask_rle, annotation.mask_shape)
+                row, col = map(int, coord)
+                original_height, original_width = mask.shape
+                half_crop = self.crop_size // 2
+                x_start = max(0, col - half_crop)
+                y_start = max(0, row - half_crop)
+                if x_start + self.crop_size > original_width:
+                    x_start = original_width - self.crop_size
+                if y_start + self.crop_size > original_height:
+                    y_start = original_height - self.crop_size
+                width_crop = min(self.crop_size, original_width - x_start)
+                height_crop = min(self.crop_size, original_height - y_start)
+                mask_crop = mask[y_start:y_start + height_crop, x_start:x_start + width_crop]
+                pil_mask = Image.fromarray(mask_crop * 255)
+                new_size = (mask_crop.shape[1] * self.zoom_factor, mask_crop.shape[0] * self.zoom_factor)
+                mask_crop = np.array(pil_mask.resize(new_size, Image.NEAREST))
+
             self.cache.set(cache_key, (processed_crop, coord_pos))
 
         return {
             'annotation': annotation,
             'processed_crop': processed_crop,
-            'coord_pos': coord_pos
+            'coord_pos': coord_pos,
+            'mask_crop': mask_crop,
         }

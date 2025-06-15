@@ -70,8 +70,13 @@ class AnnotationExtractionWorker(QThread):
         if umap is None or logits is None or fname is None:
             return out
 
-        feats, coords = self._generator.generate_annotations(uncertainty_map=umap, logits=logits)
-        for c, f in zip(coords, feats):
+        result = self._generator.generate_annotations(uncertainty_map=umap, logits=logits)
+        if len(result) == 2:
+            feats, coords = result
+            masks = [None] * len(coords)
+        else:
+            feats, coords, masks = result
+        for c, f, m in zip(coords, feats, masks):
             if not f.any():
                 continue
             out.append(
@@ -84,6 +89,8 @@ class AnnotationExtractionWorker(QThread):
                     uncertainty=float(umap[tuple(c)]),
                     cluster_id=None,
                     model_prediction=CLASS_COMPONENTS.get(int(np.argmax(f)), "None"),
+                    mask_rle=m,
+                    mask_shape=umap.shape[:2],
                 )
             )
         return out

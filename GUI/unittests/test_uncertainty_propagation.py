@@ -14,6 +14,8 @@ def make_annotation(x, uncertainty=1.0, class_id=-1):
         logit_features=np.array([x], dtype=np.float32),
         uncertainty=uncertainty,
         class_id=class_id,
+        mask_rle=None,
+        mask_shape=None,
     )
 
 

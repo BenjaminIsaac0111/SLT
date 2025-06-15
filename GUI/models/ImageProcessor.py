@@ -154,6 +154,11 @@ class ImageProcessor:
             if ann.class_id == -1:
                 continue
             colour = self.class_color_map.get(ann.class_id, (255, 255, 255))
+            if ann.mask_rle and ann.mask_shape:
+                mask = Annotation.decode_mask(ann.mask_rle, ann.mask_shape)
+                mimg = Image.fromarray(mask * 255).convert("L")
+                overlay = Image.new("RGBA", pil.size, colour + (100,))
+                pil.paste(overlay, mask=mimg)
             y, x = map(int, ann.coord)
             bbox = [x - radius, y - radius, x + radius, y + radius]
             draw.ellipse(bbox, fill=colour, outline=colour)

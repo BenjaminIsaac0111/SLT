@@ -27,3 +27,4 @@ dependencies:
       - pydantic
       - pytest
       - pyinstaller
+      - scikit-image
