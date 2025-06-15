@@ -669,7 +669,12 @@ class ClusteredCropsView(QWidget):
                 logging.warning(f"Invalid QPixmap for image index {annotation.image_index}. Skipping.")
                 continue
 
-            pixmap_item = ClickablePixmapItem(annotation=annotation, pixmap=pixmap, coord_pos=crop_data['coord_pos'])
+            pixmap_item = ClickablePixmapItem(
+                annotation=annotation,
+                pixmap=pixmap,
+                coord_pos=crop_data['coord_pos'],
+                mask_pixmap=crop_data.get('mask_pixmap'),
+            )
             pixmap_item.setFlag(QGraphicsItem.ItemIsSelectable, True)
             pixmap_item.class_label_changed.connect(self.crop_label_changed.emit)
 

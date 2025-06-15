@@ -17,6 +17,8 @@ class Annotation:
     cluster_id: Optional[int] = None
     model_prediction: Optional[str] = None
     adjusted_uncertainty: Optional[Union[float, np.ndarray]] = None
+    mask_rle: Optional[list] = None
+    mask_shape: Optional[Tuple[int, int]] = None
 
     # ---------- core ---------------------------------------------------------------
     def __setattr__(self, name, value):
@@ -27,6 +29,28 @@ class Annotation:
     def __post_init__(self):
         if self.adjusted_uncertainty is None:
             self.adjusted_uncertainty = self.uncertainty
+
+    # ---------- mask helpers -------------------------------------------------
+    @staticmethod
+    def encode_mask(mask: np.ndarray) -> list:
+        """Return run-length encoding for ``mask``."""
+        pixels = mask.astype(np.uint8).flatten(order="F")
+        pixels = np.concatenate([[0], pixels, [0]])
+        runs = np.where(pixels[1:] != pixels[:-1])[0] + 1
+        runs[1::2] -= runs[::2]
+        return runs.tolist()
+
+    @staticmethod
+    def decode_mask(rle: list, shape: Tuple[int, int]) -> np.ndarray:
+        """Decode RLE ``rle`` back to a binary mask of ``shape``."""
+        rle = np.asarray(rle, dtype=int)
+        starts = rle[0::2] - 1
+        lengths = rle[1::2]
+        ends = starts + lengths
+        img = np.zeros(shape[0] * shape[1], dtype=np.uint8)
+        for s, e in zip(starts, ends):
+            img[s:e] = 1
+        return img.reshape(shape, order="F")
 
     # ---------- public helpers -----------------------------------------------------
     def reset_uncertainty(self) -> None:
@@ -56,6 +80,8 @@ class Annotation:
                 int(self.cluster_id) if self.cluster_id is not None else None
             ),
             "model_prediction": self.model_prediction,
+            "mask_rle": self.mask_rle,
+            "mask_shape": list(self.mask_shape) if self.mask_shape else None,
         }
 
     @staticmethod
@@ -81,6 +107,10 @@ class Annotation:
         cluster_id_val = int(cluster_id_raw) if cluster_id_raw is not None else None
 
         is_manual_val = data.get("is_manual", False)
+        mask_rle_val = data.get("mask_rle")
+        mask_shape_val = (
+            tuple(data.get("mask_shape")) if data.get("mask_shape") else None
+        )
 
         # --- construct -------------------------------------------------------------
         return Annotation(
@@ -94,4 +124,6 @@ class Annotation:
             class_id=int(data.get("class_id", -1)),
             cluster_id=cluster_id_val,
             model_prediction=data.get("model_prediction", None),
+            mask_rle=mask_rle_val,
+            mask_shape=mask_shape_val,
         )

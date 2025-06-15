@@ -16,11 +16,20 @@ class ClickablePixmapItem(QGraphicsObject):
     """
     class_label_changed = pyqtSignal(dict, int)
 
-    def __init__(self, annotation: Annotation, pixmap: QPixmap, coord_pos: Tuple[int, int], *args, **kwargs):
+    def __init__(
+        self,
+        annotation: Annotation,
+        pixmap: QPixmap,
+        coord_pos: Tuple[int, int],
+        mask_pixmap: QPixmap | None = None,
+        *args,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         self.annotation = annotation
         self.pixmap = pixmap
         self.coord_pos = coord_pos
+        self.mask_pixmap = mask_pixmap
         self.class_id = annotation.class_id
         self.model_prediction = annotation.model_prediction
 
@@ -65,6 +74,10 @@ class ClickablePixmapItem(QGraphicsObject):
         painter.save()
         painter.scale(self.scale_factor, self.scale_factor)
         painter.drawPixmap(0, 0, self.pixmap)
+        if self.mask_pixmap:
+            painter.setOpacity(0.4)
+            painter.drawPixmap(0, 0, self.mask_pixmap)
+            painter.setOpacity(1.0)
         painter.restore()
 
         # 2) Compute scaled dimensions

@@ -53,6 +53,8 @@ class AnnotationJSON(BaseModel):
     class_id: int
     cluster_id: Optional[int] = None
     model_prediction: Optional[str] = None
+    mask_rle: Optional[List[int]] = None
+    mask_shape: Optional[List[int]] = None
 
 
 class ProjectState(BaseModel):

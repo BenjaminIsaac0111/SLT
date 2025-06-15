@@ -26,6 +26,8 @@ def example_state() -> ProjectState:
         "class_id": -1,
         "cluster_id": 1,
         "model_prediction": None,
+        "mask_rle": None,
+        "mask_shape": None,
     }
     return ProjectState(
         schema_version=LATEST_SCHEMA_VERSION,
