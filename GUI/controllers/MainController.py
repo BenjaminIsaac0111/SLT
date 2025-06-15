@@ -65,6 +65,7 @@ class MainController(QObject):
         self._idle_timer.timeout.connect(self._autosave_if_dirty)
 
         self._mc_widget = None
+        self._mc_worker = None
 
         self._connect_signals()
         QCoreApplication.instance().aboutToQuit.connect(self.cleanup)
@@ -601,6 +602,13 @@ class MainController(QObject):
     # -----------------------------------------------------------------
     @pyqtSlot(dict)
     def run_mc_banker(self, config: dict) -> None:
+        if self._mc_worker is not None:
+            QMessageBox.warning(
+                self.view,
+                "MC Banker Running",
+                "Please wait for the current job to finish",
+            )
+            return
         output_file = Path(config.get("OUTPUT_FILE", ""))
         file_list = Path(config["FILE_LIST"])
         total = sum(1 for _ in open(file_list))
@@ -635,6 +643,7 @@ class MainController(QObject):
                 output_file.unlink()
 
         worker = MCBankerWorker(config, resume=resume)
+        self._mc_worker = worker
         widget = getattr(self.tasks_widget, "mc_widget", None)
         if widget is not None:
             widget.start(str(output_file), total)
@@ -652,6 +661,7 @@ class MainController(QObject):
         if getattr(self, "_mc_widget", None):
             self._mc_widget.finish()
             self._mc_widget = None
+        self._mc_worker = None
         msg = "HDF5 file generated." if success else "HDF5 generation failed."
         QMessageBox.information(self.view, "MC Inference", msg)
 
