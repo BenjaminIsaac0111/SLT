@@ -353,7 +353,7 @@ class MainController(QObject):
         if class_id == -1:
             for anno in labeled_annotations:
                 anno.class_id = class_id
-                anno.adjusted_uncertainty = anno.uncertainty
+                anno.reset_uncertainty()
         else:
             for anno in labeled_annotations:
                 anno.class_id = class_id

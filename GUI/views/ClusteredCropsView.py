@@ -726,7 +726,7 @@ class ClusteredCropsView(QWidget):
             ann.class_id = class_id
             ann.is_manual = (class_id != -1)  # mark only real labels as manual
             if class_id == -1:  # unlabel: restore
-                ann.adjusted_uncertainty = ann.uncertainty
+                ann.reset_uncertainty()
                 ann.is_manual = False
         self.bulk_label_changed.emit(class_id)
         self.arrange_crops()

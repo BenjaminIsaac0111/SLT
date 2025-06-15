@@ -20,6 +20,10 @@ class AnnotationBase(Protocol):
     model_prediction: Optional[str]
     adjusted_uncertainty: Optional[Union[float, np.ndarray]]
 
+    def reset_uncertainty(self) -> None:
+        """Restore ``adjusted_uncertainty`` to ``uncertainty``."""
+        ...
+
     def to_dict(self) -> dict:
         ...
 
