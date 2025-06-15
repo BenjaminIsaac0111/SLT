@@ -17,6 +17,7 @@ class AppMenuBar(QMenuBar):
     request_load_project = pyqtSignal(str)
     request_save_project = pyqtSignal()
     request_save_project_as = pyqtSignal(str)
+    request_new_project = pyqtSignal(str)
     request_export_annotations = pyqtSignal(str)
     request_generate_annos = pyqtSignal()
     request_set_ann_method = pyqtSignal(str)
@@ -39,6 +40,13 @@ class AppMenuBar(QMenuBar):
 
         act_load = file_menu.addAction("Load Project…")
         act_load.triggered.connect(self._pick_project_to_load)
+
+        recent_menu = file_menu.addMenu("Open Recent")
+        self._recent_menu = recent_menu
+        recent_menu.aboutToShow.connect(self._populate_recent_menu)
+
+        act_new = file_menu.addAction("Start New Project…")
+        act_new.triggered.connect(self._pick_new_project_data)
 
         act_save = file_menu.addAction("Save")
         act_save.setShortcut("Ctrl+S")
@@ -112,6 +120,16 @@ class AppMenuBar(QMenuBar):
                 act.setChecked(False)
 
     # ----------------------------------------------------------------
+    def _populate_recent_menu(self) -> None:
+        """Refresh the Open Recent submenu."""
+        from GUI.models.RecentProjectsDB import get_recent_paths
+
+        self._recent_menu.clear()
+        for path in get_recent_paths(5):
+            act = self._recent_menu.addAction(path)
+            act.triggered.connect(lambda checked=False, p=path: self.request_load_project.emit(p))
+
+    # ----------------------------------------------------------------
     #  QFileDialog helpers (private)
     # ----------------------------------------------------------------
     def _pick_project_to_load(self) -> None:
@@ -120,6 +138,16 @@ class AppMenuBar(QMenuBar):
         )
         if path:
             self.request_load_project.emit(path)
+
+    def _pick_new_project_data(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Data File",
+            "",
+            "HDF5 & SQLite Files (*.h5;*.hdf5;*.sqlite;*.db);;All Files (*)",
+        )
+        if path:
+            self.request_new_project.emit(path)
 
     def _pick_path_to_save_as(self) -> None:
         path, _ = QFileDialog.getSaveFileName(

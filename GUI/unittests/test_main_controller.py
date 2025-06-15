@@ -193,3 +193,24 @@ def test_propagate_labeling_changes(monkeypatch):
 
     ctrl.propagate_labeling_changes()
     assert called["annos"] == [ann]
+
+
+def test_start_new_project_sets_model(monkeypatch):
+    view = DummyView()
+    ctrl = build_controller(view)
+    dummy_model = types.SimpleNamespace(data_path="data.h5")
+    recorded = {}
+
+    def fake_cidm(state):
+        recorded["state"] = state
+        return dummy_model
+
+    monkeypatch.setattr(
+        "GUI.controllers.MainController.create_image_data_model",
+        fake_cidm,
+    )
+    ctrl.set_model = lambda m: recorded.setdefault("model", m)
+
+    ctrl.start_new_project("data.h5")
+    assert recorded["model"] is dummy_model
+    assert recorded["state"].data_path == "data.h5"

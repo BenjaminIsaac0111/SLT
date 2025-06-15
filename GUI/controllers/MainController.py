@@ -23,6 +23,8 @@ from GUI.models.export.Options import ExportOptions
 from GUI.models.export.Usecase import ExportAnnotationsUseCase
 from GUI.models.io.IOService import ProjectIOService
 from GUI.models.io.Persistence import ProjectState
+from GUI.models.RecentProjectsDB import save_path as save_recent_project
+from GUI.configuration.configuration import LATEST_SCHEMA_VERSION
 from GUI.models.navigation.ClusterSelection import make_selector
 from GUI.views.ClusteredCropsView import ClusteredCropsView
 from GUI.views.ClusteringProgressDialog import ClusteringProgressDialog
@@ -116,16 +118,35 @@ class MainController(QObject):
         if self.io.current_path is None:
             # View should open Save‑As dialog instead; ignore quietly.
             return
+        save_recent_project(str(self.io.current_path))
         self.io.save_async(self.get_current_state(), self.io.current_path)
 
     @pyqtSlot(str)
     def save_project_as(self, path: str):
         self.io.set_current_path(path)
+        save_recent_project(path)
         self.io.save_async(self.get_current_state(), path)
 
     @pyqtSlot(str)
     def load_project(self, path: str):
+        save_recent_project(path)
         self.io.load_async(path)
+
+    @pyqtSlot(str)
+    def start_new_project(self, data_path: str) -> None:
+        """Initialise controllers with a new data source."""
+        backend = self._backend_from_path(data_path)
+        state = ProjectState(
+            schema_version=LATEST_SCHEMA_VERSION,
+            data_backend=backend,
+            data_path=data_path,
+            uncertainty="bald",
+            clusters={},
+            cluster_order=[],
+            selected_cluster_id=None,
+            annotation_method="Local Uncertainty Maxima",
+        )
+        self.set_model(create_image_data_model(state))
 
     # restore from autosave ---------------------------------------------------
     def restore_autosave(self):
@@ -153,6 +174,7 @@ class MainController(QObject):
     #  Callbacks for io.project_{loaded|saved|failed}
     # ==================================================================
     def _on_project_saved(self, path: str):
+        save_recent_project(path)
         QMessageBox.information(self.view, "Project Saved", f"Project written to {path}")
 
     def _on_save_failed(self, err: str):
@@ -748,3 +770,12 @@ class MainController(QObject):
         # update IO service so frames directory fingerprint is stable
         self.io._tag = model.data_path  # _tag is only used for temp dir names
         logging.info("Data model set → %s", model.data_path)
+
+    @staticmethod
+    def _backend_from_path(path: str) -> str:
+        ext = Path(path).suffix.lower()
+        if ext in {".h5", ".hdf5"}:
+            return "hdf5"
+        if ext in {".sqlite", ".db"}:
+            return "sqlite"
+        raise ValueError(f"Unsupported data file type: {ext}")
