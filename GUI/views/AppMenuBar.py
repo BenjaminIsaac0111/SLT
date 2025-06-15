@@ -17,6 +17,7 @@ class AppMenuBar(QMenuBar):
     request_load_project = pyqtSignal(str)
     request_save_project = pyqtSignal()
     request_save_project_as = pyqtSignal(str)
+    request_new_project = pyqtSignal(str)
     request_export_annotations = pyqtSignal(str)
     request_generate_annos = pyqtSignal()
     request_set_ann_method = pyqtSignal(str)
@@ -39,6 +40,9 @@ class AppMenuBar(QMenuBar):
 
         act_load = file_menu.addAction("Load Project…")
         act_load.triggered.connect(self._pick_project_to_load)
+
+        act_new = file_menu.addAction("Start New Project…")
+        act_new.triggered.connect(self._pick_new_project_data)
 
         act_save = file_menu.addAction("Save")
         act_save.setShortcut("Ctrl+S")
@@ -120,6 +124,16 @@ class AppMenuBar(QMenuBar):
         )
         if path:
             self.request_load_project.emit(path)
+
+    def _pick_new_project_data(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Data File",
+            "",
+            "HDF5 & SQLite Files (*.h5;*.hdf5;*.sqlite;*.db);;All Files (*)",
+        )
+        if path:
+            self.request_new_project.emit(path)
 
     def _pick_path_to_save_as(self) -> None:
         path, _ = QFileDialog.getSaveFileName(

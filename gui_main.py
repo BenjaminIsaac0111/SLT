@@ -199,6 +199,7 @@ def _main_window(view, controller, tasks_tab=None) -> QMainWindow:  # noqa: D401
     mb.request_save_project.connect(controller.save_project)
     mb.request_save_project_as.connect(controller.save_project_as)  # expects slot(path)
     mb.request_load_project.connect(controller.load_project)  # slot(path)
+    mb.request_new_project.connect(controller.start_new_project)
     mb.request_export_annotations.connect(controller.export_annotations)
     mb.request_build_cv_folds.connect(controller.build_cross_validation_folds)
     mb.request_run_mc_banker.connect(controller.run_mc_banker)
@@ -232,10 +233,6 @@ def main() -> None:  # noqa: D401
     view = ClusteredCropsView()
     tasks_tab = TasksTab()
     controller = MainController(model=None, view=view, tasks_widget=tasks_tab)
-
-    latest = _latest_autosave()
-    if not _startup_dialog(latest, controller, icon):
-        sys.exit()
 
     _win = _main_window(view, controller, tasks_tab)  # Needs to be stored for persistence.
     sys.exit(app.exec_())

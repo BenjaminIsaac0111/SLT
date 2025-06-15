@@ -23,6 +23,7 @@ from GUI.models.export.Options import ExportOptions
 from GUI.models.export.Usecase import ExportAnnotationsUseCase
 from GUI.models.io.IOService import ProjectIOService
 from GUI.models.io.Persistence import ProjectState
+from GUI.configuration.configuration import LATEST_SCHEMA_VERSION
 from GUI.models.navigation.ClusterSelection import make_selector
 from GUI.views.ClusteredCropsView import ClusteredCropsView
 from GUI.views.ClusteringProgressDialog import ClusteringProgressDialog
@@ -126,6 +127,22 @@ class MainController(QObject):
     @pyqtSlot(str)
     def load_project(self, path: str):
         self.io.load_async(path)
+
+    @pyqtSlot(str)
+    def start_new_project(self, data_path: str) -> None:
+        """Initialise controllers with a new data source."""
+        backend = self._backend_from_path(data_path)
+        state = ProjectState(
+            schema_version=LATEST_SCHEMA_VERSION,
+            data_backend=backend,
+            data_path=data_path,
+            uncertainty="bald",
+            clusters={},
+            cluster_order=[],
+            selected_cluster_id=None,
+            annotation_method="Local Uncertainty Maxima",
+        )
+        self.set_model(create_image_data_model(state))
 
     # restore from autosave ---------------------------------------------------
     def restore_autosave(self):
@@ -748,3 +765,12 @@ class MainController(QObject):
         # update IO service so frames directory fingerprint is stable
         self.io._tag = model.data_path  # _tag is only used for temp dir names
         logging.info("Data model set → %s", model.data_path)
+
+    @staticmethod
+    def _backend_from_path(path: str) -> str:
+        ext = Path(path).suffix.lower()
+        if ext in {".h5", ".hdf5"}:
+            return "hdf5"
+        if ext in {".sqlite", ".db"}:
+            return "sqlite"
+        raise ValueError(f"Unsupported data file type: {ext}")
