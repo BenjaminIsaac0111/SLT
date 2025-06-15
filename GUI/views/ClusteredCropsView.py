@@ -17,7 +17,10 @@ from PyQt5.QtWidgets import (
 from GUI.configuration.configuration import CLASS_COMPONENTS
 from GUI.models.annotations import AnnotationBase
 from GUI.models.export.ExportService import ExportOptions
-from GUI.views.ClickablePixmapItem import ClickablePixmapItem
+from GUI.views.ClickablePixmapItem import (
+    PointClickablePixmapItem,
+    MaskClickablePixmapItem,
+)
 from GUI.views.LabelSlider import LabeledSlider
 
 # ---------------------------------------------------------------------------
@@ -669,12 +672,18 @@ class ClusteredCropsView(QWidget):
                 logging.warning(f"Invalid QPixmap for image index {annotation.image_index}. Skipping.")
                 continue
 
-            pixmap_item = ClickablePixmapItem(
-                annotation=annotation,
-                pixmap=pixmap,
-                coord_pos=crop_data['coord_pos'],
-                mask_patch=crop_data.get('mask_patch'),
-            )
+            if crop_data.get('mask_patch') is not None:
+                pixmap_item = MaskClickablePixmapItem(
+                    annotation=annotation,
+                    pixmap=pixmap,
+                    mask_patch=crop_data['mask_patch'],
+                )
+            else:
+                pixmap_item = PointClickablePixmapItem(
+                    annotation=annotation,
+                    pixmap=pixmap,
+                    coord_pos=crop_data['coord_pos'],
+                )
             pixmap_item.setFlag(QGraphicsItem.ItemIsSelectable, True)
             pixmap_item.class_label_changed.connect(self.crop_label_changed.emit)
 

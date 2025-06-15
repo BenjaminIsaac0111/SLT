@@ -14,7 +14,10 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtGui import QPixmap, QMouseEvent
 from PyQt5.QtCore import Qt, QPoint, QPointF
 
-from GUI.views.ClickablePixmapItem import ClickablePixmapItem
+from GUI.views.ClickablePixmapItem import (
+    PointClickablePixmapItem,
+    MaskClickablePixmapItem,
+)
 from GUI.models.annotations import PointAnnotation
 from GUI.configuration.configuration import CLASS_COMPONENTS
 
@@ -27,7 +30,7 @@ def qapp():
     return app
 
 
-def make_item(qapp):
+def make_item(qapp, cls=PointClickablePixmapItem, **kwargs):
     scene = QGraphicsScene()
     parent = QWidget()
     QGraphicsView(scene, parent)
@@ -39,7 +42,10 @@ def make_item(qapp):
         uncertainty=0.5,
     )
     pixmap = QPixmap(10, 10)
-    item = ClickablePixmapItem(annotation=ann, pixmap=pixmap, coord_pos=(2, 3), mask_patch=None)
+    if cls is MaskClickablePixmapItem:
+        item = cls(annotation=ann, pixmap=pixmap, mask_patch=kwargs.get("mask_patch"))
+    else:
+        item = cls(annotation=ann, pixmap=pixmap, coord_pos=(2, 3))
     scene.addItem(item)
     return item, ann, scene, parent
 
@@ -175,9 +181,9 @@ def test_paint_draws_overlays_by_default(qapp):
 
 
 def test_paint_draws_mask_edges(qapp):
-    item, ann, scene, _ = make_item(qapp)
-    item.mask_patch = np.zeros((10, 10), dtype=np.uint8)
-    item.mask_patch[2:8, 2:8] = 1
+    mask = np.zeros((10, 10), dtype=np.uint8)
+    mask[2:8, 2:8] = 1
+    item, ann, scene, _ = make_item(qapp, cls=MaskClickablePixmapItem, mask_patch=mask)
     painter = DummyPainter()
     item.paint(painter, None, None)
     assert sum(1 for c in painter.calls if c[0] == "drawPixmap") == 2

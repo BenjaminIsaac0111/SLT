@@ -3,35 +3,23 @@ from typing import Tuple
 
 import numpy as np
 
-from PyQt5.QtCore import QRectF, Qt, QPointF, pyqtSignal
-from PyQt5.QtGui import QPixmap, QFont, QFontMetrics, QPainter, QPen, QImage
-from PyQt5.QtWidgets import QGraphicsObject, QApplication, QMenu, QAction
+from PyQt5.QtCore import QPointF, QRectF, Qt, pyqtSignal
+from PyQt5.QtGui import QFont, QFontMetrics, QImage, QPainter, QPen, QPixmap
+from PyQt5.QtWidgets import QApplication, QGraphicsObject, QMenu, QAction
 
 from GUI.configuration.configuration import CLASS_COMPONENTS
-from GUI.models.annotations import AnnotationBase, MaskAnnotation
+from GUI.models.annotations import AnnotationBase
 
 
-class ClickablePixmapItem(QGraphicsObject):
-    """
-    A QGraphicsObject that displays a QPixmap and emits signals when interacted with.
-    It holds a reference to an Annotation instance.
-    """
+class BaseClickablePixmapItem(QGraphicsObject):
+    """Common functionality for crop pixmap items."""
+
     class_label_changed = pyqtSignal(dict, int)
 
-    def __init__(
-        self,
-        annotation: AnnotationBase,
-        pixmap: QPixmap,
-        coord_pos: Tuple[int, int],
-        mask_patch: np.ndarray | None = None,
-        *args,
-        **kwargs,
-    ):
+    def __init__(self, annotation: AnnotationBase, pixmap: QPixmap, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.annotation = annotation
         self.pixmap = pixmap
-        self.coord_pos = coord_pos
-        self.mask_patch = mask_patch
         self.class_id = annotation.class_id
         self.model_prediction = annotation.model_prediction
 
@@ -67,45 +55,27 @@ class ClickablePixmapItem(QGraphicsObject):
         h = self.pixmap.height() * self.scale_factor
         return QRectF(0, -self.label_height, w, h + self.label_height)
 
+    # ----- overlays --------------------------------------------------
+    def draw_overlay(self, painter: QPainter, pw: float, ph: float):
+        """Subclasses override to render annotation overlays."""
+        pass
+
     # ----- drawing ---------------------------------------------------
     def paint(self, painter: QPainter, option, widget):
-        """Draw pixmap, border, labels, and ✓/✗."""
+        """Draw pixmap, overlay, border and labels."""
         scene = self.scene()
-        # 1) Draw the scaled image
+
         painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
         painter.save()
         painter.scale(self.scale_factor, self.scale_factor)
         painter.drawPixmap(0, 0, self.pixmap)
         painter.restore()
 
-        # 2) Compute scaled dimensions
         pw = self.pixmap.width() * self.scale_factor
         ph = self.pixmap.height() * self.scale_factor
 
         if scene and getattr(scene, "overlays_visible", True):
-            if self.mask_patch is not None:
-                from skimage.segmentation import find_boundaries
-
-                edges = find_boundaries(self.mask_patch, mode="inner")
-                edge_img = np.zeros((*edges.shape, 4), dtype=np.uint8)
-                edge_img[edges] = [0, 255, 0, 255]
-                h, w, _ = edge_img.shape
-                qimg = QImage(edge_img.data, w, h, QImage.Format_RGBA8888)
-                mask_pix = QPixmap.fromImage(qimg).scaled(int(pw), int(ph))
-                painter.drawPixmap(0, 0, mask_pix)
-            else:
-                x0 = self.coord_pos[0] * self.scale_factor
-                y0 = self.coord_pos[1] * self.scale_factor
-                r = max(8.0, min(pw, ph) // 40)
-
-                painter.setPen(QPen(Qt.green, 2))
-                painter.drawEllipse(QPointF(x0, y0), r, r)
-
-                painter.setPen(QPen(Qt.black, 1))
-                painter.drawLine(x0, 0, x0, y0 - r)
-                painter.drawLine(x0, y0 + r, x0, ph)
-                painter.drawLine(0, y0, x0 - r, y0)
-                painter.drawLine(x0 + r, y0, pw, y0)
+            self.draw_overlay(painter, pw, ph)
 
         pen = QPen(Qt.darkGray if self.hovered else Qt.black)
         pen.setWidth(4 if (self.selected or self.hovered or self.annotation.is_manual) else 1)
@@ -203,3 +173,48 @@ class ClickablePixmapItem(QGraphicsObject):
     def _view(self):
         views = self.scene().views() if self.scene() else []
         return views[0] if views else None
+
+
+class PointClickablePixmapItem(BaseClickablePixmapItem):
+    """Clickable item displaying point annotations."""
+
+    def __init__(self, annotation: AnnotationBase, pixmap: QPixmap, coord_pos: Tuple[int, int], *args, **kwargs):
+        super().__init__(annotation, pixmap, *args, **kwargs)
+        self.coord_pos = coord_pos
+
+    def draw_overlay(self, painter: QPainter, pw: float, ph: float):
+        x0 = self.coord_pos[0] * self.scale_factor
+        y0 = self.coord_pos[1] * self.scale_factor
+        r = max(8.0, min(pw, ph) // 40)
+
+        painter.setPen(QPen(Qt.green, 2))
+        painter.drawEllipse(QPointF(x0, y0), r, r)
+
+        painter.setPen(QPen(Qt.black, 1))
+        painter.drawLine(x0, 0, x0, y0 - r)
+        painter.drawLine(x0, y0 + r, x0, ph)
+        painter.drawLine(0, y0, x0 - r, y0)
+        painter.drawLine(x0 + r, y0, pw, y0)
+
+
+class MaskClickablePixmapItem(BaseClickablePixmapItem):
+    """Clickable item displaying mask annotation overlays."""
+
+    def __init__(self, annotation: AnnotationBase, pixmap: QPixmap, mask_patch: np.ndarray, *args, **kwargs):
+        super().__init__(annotation, pixmap, *args, **kwargs)
+        self.mask_patch = mask_patch
+
+    def draw_overlay(self, painter: QPainter, pw: float, ph: float):
+        from skimage.segmentation import find_boundaries
+
+        edges = find_boundaries(self.mask_patch, mode="inner")
+        edge_img = np.zeros((*edges.shape, 4), dtype=np.uint8)
+        edge_img[edges] = [0, 255, 0, 255]
+        h, w, _ = edge_img.shape
+        qimg = QImage(edge_img.data, w, h, QImage.Format_RGBA8888)
+        mask_pix = QPixmap.fromImage(qimg).scaled(int(pw), int(ph))
+        painter.drawPixmap(0, 0, mask_pix)
+
+
+# Backwards compatibility
+ClickablePixmapItem = PointClickablePixmapItem
