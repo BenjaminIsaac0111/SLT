@@ -5,7 +5,7 @@ from typing import List, Dict, Any, Optional
 
 from PyQt5.QtCore import QRunnable, QObject, pyqtSignal
 
-from GUI.models.annotations import AnnotationBase
+from GUI.models.annotations import AnnotationBase, MaskAnnotation
 from GUI.models.CacheManager import CacheManager
 from GUI.models.ImageDataModel import BaseImageDataModel
 from GUI.models.ImageProcessor import ImageProcessor
@@ -97,21 +97,26 @@ class ImageProcessingWorker(QRunnable):
         # Check if already cached:
         cached_result = self.cache.get(cache_key)
         if cached_result:
-            processed_crop, coord_pos = cached_result
+            processed_crop, coord_pos, mask_crop = cached_result
         else:
             image_data = self.image_data_model.get_image_data(annotation.image_index)
             image_array = image_data.get('image')
             if image_array is None:
                 logging.warning(f"No image data found for index {annotation.image_index}.")
                 return None
-
-            processed_crop, coord_pos = self.image_processor.extract_crop_data(
-                image_array, coord, crop_size=self.crop_size, zoom_factor=self.zoom_factor
+            mask = annotation.mask if isinstance(annotation, MaskAnnotation) else None
+            processed_crop, coord_pos, mask_crop = self.image_processor.extract_crop_data(
+                image_array,
+                coord,
+                crop_size=self.crop_size,
+                zoom_factor=self.zoom_factor,
+                mask=mask,
             )
-            self.cache.set(cache_key, (processed_crop, coord_pos))
+            self.cache.set(cache_key, (processed_crop, coord_pos, mask_crop))
 
         return {
             'annotation': annotation,
             'processed_crop': processed_crop,
-            'coord_pos': coord_pos
+            'coord_pos': coord_pos,
+            'mask_patch': mask_crop,
         }

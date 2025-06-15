@@ -238,8 +238,9 @@ class ImageProcessor:
             image: np.ndarray,
             coord: Tuple[int, int],
             crop_size: int = 256,
-            zoom_factor: int = 2
-    ) -> Tuple[np.ndarray, Tuple[int, int]]:
+            zoom_factor: int = 2,
+            mask: np.ndarray | None = None,
+    ) -> Tuple[np.ndarray, Tuple[int, int], np.ndarray | None]:
         """
         Extracts a zoomed-in crop from the RGB image at the specified coordinate without padding.
         Handles image data in float (0-1) or uint8 (0-255) formats.
@@ -248,8 +249,9 @@ class ImageProcessor:
         :param coord: A tuple (row, column) indicating the center of the crop.
         :param crop_size: Desired size of the crop in pixels (crop_size x crop_size).
         :param zoom_factor: Factor by which to zoom the crop.
-        :return: A tuple containing the processed image as a NumPy array
-                 and the (x, y) position of the coordinate within the zoomed crop.
+        :param mask: Optional segmentation mask aligned with ``image``.
+        :return: ``(zoomed_crop, coord_pos, zoomed_mask)`` where ``zoomed_mask``
+            is ``None`` when *mask* is ``None``.
         """
         # Generate a cache key using a hash of the image and other parameters
         cache_key = self._generate_cache_key(image, coord, crop_size, zoom_factor)
@@ -283,6 +285,9 @@ class ImageProcessor:
         height_crop = int(height_crop)
 
         crop = image[y_start:y_start + height_crop, x_start:x_start + width_crop]
+        mask_crop = None
+        if mask is not None:
+            mask_crop = mask[y_start:y_start + height_crop, x_start:x_start + width_crop]
 
         # Ensure crop is uint8 for further processing
         if np.issubdtype(crop.dtype, np.floating):
@@ -292,6 +297,11 @@ class ImageProcessor:
         new_size = (crop.shape[1] * zoom_factor, crop.shape[0] * zoom_factor)
         zoomed_pil = pil_image.resize(new_size, Image.BICUBIC)
         zoomed_crop = np.array(zoomed_pil)
+        zoomed_mask = None
+        if mask_crop is not None:
+            mask_pil = Image.fromarray(mask_crop.astype(np.uint8) * 255)
+            zoomed_mask = mask_pil.resize(new_size, Image.NEAREST)
+            zoomed_mask = (np.array(zoomed_mask) > 127).astype(np.uint8)
 
         # Calculate the position of the original coordinate within the zoomed crop
         arrow_rel_x = col - x_start
@@ -299,7 +309,7 @@ class ImageProcessor:
         pos_x_zoomed = arrow_rel_x * zoom_factor
         pos_y_zoomed = arrow_rel_y * zoom_factor
 
-        result = (zoomed_crop, (int(pos_x_zoomed), int(pos_y_zoomed)))
+        result = (zoomed_crop, (int(pos_x_zoomed), int(pos_y_zoomed)), zoomed_mask)
 
         # Store the result in the cache
         self.cache.set(cache_key, result)

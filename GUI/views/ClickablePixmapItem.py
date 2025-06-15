@@ -18,11 +18,20 @@ class ClickablePixmapItem(QGraphicsObject):
     """
     class_label_changed = pyqtSignal(dict, int)
 
-    def __init__(self, annotation: AnnotationBase, pixmap: QPixmap, coord_pos: Tuple[int, int], *args, **kwargs):
+    def __init__(
+        self,
+        annotation: AnnotationBase,
+        pixmap: QPixmap,
+        coord_pos: Tuple[int, int],
+        mask_patch: np.ndarray | None = None,
+        *args,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         self.annotation = annotation
         self.pixmap = pixmap
         self.coord_pos = coord_pos
+        self.mask_patch = mask_patch
         self.class_id = annotation.class_id
         self.model_prediction = annotation.model_prediction
 
@@ -74,14 +83,16 @@ class ClickablePixmapItem(QGraphicsObject):
         ph = self.pixmap.height() * self.scale_factor
 
         if scene and getattr(scene, "overlays_visible", True):
-            if isinstance(self.annotation, MaskAnnotation) and self.annotation.mask is not None:
-                arr = (self.annotation.mask > 0).astype(np.uint8) * 255
-                h, w = arr.shape
-                qimg = QImage(arr.data, w, h, QImage.Format_Grayscale8)
-                mask_pix = QPixmap.fromImage(qimg).scaled(pw, ph)
-                painter.setOpacity(0.5)
+            if self.mask_patch is not None:
+                from skimage.segmentation import find_boundaries
+
+                edges = find_boundaries(self.mask_patch, mode="inner")
+                edge_img = np.zeros((*edges.shape, 4), dtype=np.uint8)
+                edge_img[edges] = [0, 255, 0, 255]
+                h, w, _ = edge_img.shape
+                qimg = QImage(edge_img.data, w, h, QImage.Format_RGBA8888)
+                mask_pix = QPixmap.fromImage(qimg).scaled(int(pw), int(ph))
                 painter.drawPixmap(0, 0, mask_pix)
-                painter.setOpacity(1.0)
             else:
                 x0 = self.coord_pos[0] * self.scale_factor
                 y0 = self.coord_pos[1] * self.scale_factor
