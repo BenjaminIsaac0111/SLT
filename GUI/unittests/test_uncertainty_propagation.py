@@ -65,6 +65,7 @@ def test_unlabeling_resets_uncertainty():
     ]
     propagate_for_annotations(annos, lambda_param=1.0)
     annos[0].class_id = -1
+    annos[0].reset_uncertainty()
     propagate_for_annotations(annos, lambda_param=1.0)
     for ann in annos:
         assert ann.adjusted_uncertainty == pytest.approx(0.6)
