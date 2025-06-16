@@ -22,6 +22,8 @@ def _ensure_db() -> None:
                 config TEXT,
                 status TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                started_at TIMESTAMP,
+                finished_at TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
             """
@@ -46,10 +48,21 @@ def update_status(job_id: int, status: str) -> None:
     """Update the status for *job_id*."""
     _ensure_db()
     with sqlite3.connect(_DB_PATH) as conn:
-        conn.execute(
-            "UPDATE jobs SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-            (status, job_id),
-        )
+        if status == "running":
+            conn.execute(
+                "UPDATE jobs SET status = ?, started_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (status, job_id),
+            )
+        elif status in {"completed", "failed", "cancelled"}:
+            conn.execute(
+                "UPDATE jobs SET status = ?, finished_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (status, job_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE jobs SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (status, job_id),
+            )
         conn.commit()
 
 
@@ -58,7 +71,7 @@ def list_jobs(limit: int = 50) -> List[Dict[str, Any]]:
     _ensure_db()
     with sqlite3.connect(_DB_PATH) as conn:
         cur = conn.execute(
-            "SELECT id, name, config, status FROM jobs ORDER BY id DESC LIMIT ?",
+            "SELECT id, name, config, status, started_at, finished_at FROM jobs ORDER BY id DESC LIMIT ?",
             (limit,),
         )
         return [
@@ -67,8 +80,19 @@ def list_jobs(limit: int = 50) -> List[Dict[str, Any]]:
                 "name": row[1],
                 "config": json.loads(row[2]) if row[2] else {},
                 "status": row[3],
+                "started_at": row[4] or "",
+                "finished_at": row[5] or "",
             }
             for row in cur.fetchall()
         ]
+
+
+def delete_job(job_id: int) -> None:
+    """Remove a job record."""
+    _ensure_db()
+    with sqlite3.connect(_DB_PATH) as conn:
+        conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+        conn.commit()
+
 
 

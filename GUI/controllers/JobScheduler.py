@@ -89,3 +89,19 @@ class JobScheduler(QObject):
                 self._queue.insert(0, self._queue.pop(i))
                 break
 
+    def cancel_job(self, job_id: int) -> None:
+        """Cancel a running or queued job."""
+        if self._current and self._current[0] == job_id:
+            _, runnable = self._current
+            if hasattr(runnable, "cancel"):
+                runnable.cancel()  # type: ignore[attr-defined]
+            JobDB.update_status(job_id, "cancelled")
+            self._current = None
+            self._start_next()
+            return
+        for i, item in enumerate(self._queue):
+            if item[0] == job_id:
+                self._queue.pop(i)
+                JobDB.update_status(job_id, "cancelled")
+                break
+

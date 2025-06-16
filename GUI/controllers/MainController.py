@@ -72,7 +72,6 @@ class MainController(QObject):
         self._idle_timer = QTimer(singleShot=True)
         self._idle_timer.timeout.connect(self._autosave_if_dirty)
 
-        self._mc_widget = None
         self._mc_worker = None
 
         self._connect_signals()
@@ -696,32 +695,17 @@ class MainController(QObject):
 
         worker = MCBankerWorker(config, resume=resume)
         self._mc_worker = worker
-        widget = getattr(self.tasks_widget, "mc_widget", None)
-        if widget is not None:
-            widget.start(str(output_file), total)
-            worker.signals.progress.connect(widget.update_progress)
-            if self.scheduler is not None:
-                widget.request_pause.connect(self.scheduler.pause_current)
-                widget.request_resume.connect(self.scheduler.resume_current)
-            else:
-                widget.request_pause.connect(worker.pause)
-                widget.request_resume.connect(worker.resume_task)
-            widget.request_cancel.connect(worker.cancel)
-
         worker.signals.finished.connect(self._on_mc_banker_finished)
-        self._mc_widget = widget
+
         if self.scheduler is not None:
-            self.scheduler.schedule_job("MC Banker", worker, config)
-            if getattr(self.tasks_widget, "refresh_jobs", None):
-                self.tasks_widget.refresh_jobs()
+            job_id = self.scheduler.schedule_job("MC Banker", worker, config)
+            if hasattr(self.tasks_widget, "add_active_job"):
+                self.tasks_widget.add_active_job(job_id, "MC Banker", config, worker)
         else:
             self.threadpool.start(worker)
 
     @pyqtSlot(bool)
     def _on_mc_banker_finished(self, success: bool) -> None:
-        if getattr(self, "_mc_widget", None):
-            self._mc_widget.finish()
-            self._mc_widget = None
         self._mc_worker = None
         msg = "HDF5 file generated." if success else "HDF5 generation failed."
         QMessageBox.information(self.view, "MC Inference", msg)

@@ -59,6 +59,7 @@ def test_run_two_jobs_in_order(tmp_path, monkeypatch):
     statuses = {j["id"]: j["status"] for j in jobs}
     assert statuses[jid1] == "completed"
     assert statuses[jid2] == "completed"
+    assert jobs[0]["started_at"] and jobs[0]["finished_at"]
     assert t1.count == 1 and t2.count == 1
 
 
@@ -80,4 +81,5 @@ def test_pause_and_resume(tmp_path, monkeypatch):
     jobs = JobDB.list_jobs(1)
     assert jobs[0]["id"] == jid
     assert jobs[0]["status"] == "completed"
+
 

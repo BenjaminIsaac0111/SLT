@@ -35,11 +35,16 @@ def test_tasks_tab_refresh(qapp, tmp_path, monkeypatch):
 
     t = DummyTask()
     scheduler.schedule_job("job", t)
+    tab.refresh_jobs()
     assert tab.job_list.count() == 1
-    assert "running" in tab.job_list.item(0).text()
+    widget = tab.job_list.itemWidget(tab.job_list.item(0))
+    assert "running" in widget.meta.text()
 
     assert pool.runnable is not None
     pool.runnable.run()
     qapp.processEvents()
+    tab.refresh_jobs()
 
-    assert "completed" in tab.job_list.item(0).text()
+    widget = tab.job_list.itemWidget(tab.job_list.item(0))
+    assert "completed" in widget.meta.text()
+

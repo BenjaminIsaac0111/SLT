@@ -18,5 +18,13 @@ def test_add_and_list_jobs(tmp_path, monkeypatch):
 
     JobDB.update_status(jid1, "running")
     jobs = JobDB.list_jobs(2)
-    assert any(j["status"] == "running" for j in jobs)
+    running = next(j for j in jobs if j["id"] == jid1)
+    assert running["status"] == "running"
+    assert running["started_at"]
+
+    JobDB.update_status(jid1, "completed")
+    jobs = JobDB.list_jobs(2)
+    finished = next(j for j in jobs if j["id"] == jid1)
+    assert finished["finished_at"]
+
 
