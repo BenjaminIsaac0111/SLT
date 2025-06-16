@@ -39,11 +39,12 @@ class MainController(QObject):
     AUTOSAVE_IDLE_MS = 10_000
     _UNASSESSED_LABELS = {-1}
 
-    def __init__(self, model: Optional[BaseImageDataModel], view: ClusteredCropsView, tasks_widget=None):
+    def __init__(self, model: Optional[BaseImageDataModel], view: ClusteredCropsView, tasks_widget=None, scheduler=None):
         super().__init__()
         self.image_data_model = model
         self.view = view
         self.tasks_widget = tasks_widget
+        self.scheduler = scheduler
 
         # ---------- core sub‑controllers ---------------------------------
         self.annotation_generator = LocalMaximaPointAnnotationGenerator()
@@ -52,6 +53,10 @@ class MainController(QObject):
         self.io = ProjectIOService(data_anchor=Path(model.data_path) if model else None)
         self._export_usecase = ExportAnnotationsUseCase()
         self.threadpool = QThreadPool.globalInstance()
+        if self.scheduler is None:
+            from GUI.controllers.JobScheduler import JobScheduler
+
+            self.scheduler = JobScheduler(pool=self.threadpool)
 
         self.cluster_selector = make_selector("greedy", self.clustering_controller)
 
@@ -701,7 +706,12 @@ class MainController(QObject):
 
         worker.signals.finished.connect(self._on_mc_banker_finished)
         self._mc_widget = widget
-        self.threadpool.start(worker)
+        if self.scheduler is not None:
+            self.scheduler.schedule_job("MC Banker", worker, config)
+            if getattr(self.tasks_widget, "refresh_jobs", None):
+                self.tasks_widget.refresh_jobs()
+        else:
+            self.threadpool.start(worker)
 
     @pyqtSlot(bool)
     def _on_mc_banker_finished(self, success: bool) -> None:
