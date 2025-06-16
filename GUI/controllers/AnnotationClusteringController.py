@@ -70,7 +70,12 @@ class AnnotationExtractionWorker(QThread):
         if umap is None or logits is None or fname is None:
             return out
 
-        generated = self._generator.generate_annotations(uncertainty_map=umap, logits=logits)
+        image = img.get("image")
+        generated = self._generator.generate_annotations(
+            uncertainty_map=umap,
+            logits=logits,
+            image=image,
+        )
         for ann in generated:
             if not ann.logit_features.any():
                 continue

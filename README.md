@@ -22,6 +22,7 @@ The typical workflow is to train a segmentation model, run inference to obtain p
 - Propagates uncertainty scores as labels are applied so that recommendations update in real time.
 - Autosave, project management and preview dialogs to inspect full size images with overlayed annotations.
 - Export of labelled points to JSON for further model training or analysis.
+- Optional superpixel annotations using SLIC for region labelling.
 
 ## Getting Started
 ### Environment

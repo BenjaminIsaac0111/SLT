@@ -76,6 +76,7 @@ class AppMenuBar(QMenuBar):
             "Local Uncertainty Maxima",
             "Equidistant Spots",
             "Image Centre",
+            "Superpixels",
         ]:
             act = QAction(label, self, checkable=True)
             grp.addAction(act)
