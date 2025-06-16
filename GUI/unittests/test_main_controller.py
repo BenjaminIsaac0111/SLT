@@ -1,6 +1,5 @@
 import sys
 import types
-import pytest
 
 # Provide lightweight stubs for heavy optional dependencies so that
 # MainController and its imports can be loaded without installing the
@@ -17,6 +16,11 @@ for name in [
     "sklearn.cluster",
     "sklearn.mixture",
     "numba",
+    "sklearn.model_selection",
+    "numba",
+    "pandas",
+    "yaml",
+    "PIL",
 ]:
     if name not in sys.modules:
         sys.modules[name] = types.ModuleType(name)
@@ -53,6 +57,7 @@ class DummyView:
     def __init__(self):
         self.menu = DummyMenu()
         self.calls = []
+        self.data_path = None
 
     def window(self):
         return self
@@ -68,6 +73,9 @@ class DummyView:
 
     def update_labeling_statistics(self, stats):
         self.calls.append(("stats", stats))
+
+    def set_data_path(self, path: str):
+        self.data_path = path
 
 
 class DummyClusteringController:
@@ -214,3 +222,16 @@ def test_start_new_project_sets_model(monkeypatch):
     ctrl.start_new_project("data.h5")
     assert recorded["model"] is dummy_model
     assert recorded["state"].data_path == "data.h5"
+
+
+def test_set_model_updates_view():
+    view = DummyView()
+    ctrl = types.SimpleNamespace(
+        image_data_model=None,
+        clustering_controller=types.SimpleNamespace(model=None),
+        image_processing_controller=types.SimpleNamespace(model=None),
+        io=types.SimpleNamespace(_tag=None),
+        view=view,
+    )
+    MainController.set_model(ctrl, types.SimpleNamespace(data_path="foo.h5"))
+    assert view.data_path == "foo.h5"

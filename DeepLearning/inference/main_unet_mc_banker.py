@@ -98,57 +98,66 @@ def mc_infer(
         n_iter: int,
         model: tf.keras.Model,
         num_classes: int,
-        temperature: float = 1.0,
+        temperature: float,
 ) -> Dict[str, tf.Tensor]:
-    """Vectorised MC‑Dropout with epistemic / aleatoric metrics.
+    """
+    Vectorised MC-Dropout inference returning BALD, entropy, variance
+    and mean predictions.
 
     Parameters
     ----------
-    x
-        Input batch [B, H, W, C].
-    n_iter
+    x : tf.Tensor
+        Input batch of shape [B, H, W, C].
+    n_iter : int
         Number of stochastic forward passes.
-    model
-        Keras model returning logits.
-    num_classes
-        #classes for normalisation.
-    temperature
-        Positive scalar for post‑hoc temperature scaling.
+    model : tf.keras.Model
+        Keras model that outputs logits.
+    num_classes : int
+        Number of output classes.
+    temperature : float
+        Temperature divisor applied to logits before each softmax.
     """
 
     # ---------------------------------------------------------------------
-    # One fused forward pass ------------------------------------------------
+    # Vectorised forward passes
     # ---------------------------------------------------------------------
     batch_size = tf.shape(x)[0]
-    x_tiled = tf.repeat(x, repeats=n_iter, axis=0)  # [n_iter⋅B, ...]
+    x_tiled = tf.repeat(x, repeats=n_iter, axis=0)  # [T·B, H, W, C]
     logits = _predict_logits(x_tiled, model, training=True)  # float32
-
     h, w = tf.shape(logits)[1], tf.shape(logits)[2]
-    logits = tf.reshape(logits, (n_iter, batch_size, h, w, num_classes))  # [T, B, H, W, K]
 
-    # ── NEW: 1) work with *raw* logits per draw  ────────────────────────────────
-    probs_per_draw = tf.nn.softmax(logits, axis=-1)  # [T,B,H,W,K]
+    logits = tf.reshape(
+        logits, (n_iter, batch_size, h, w, num_classes)
+    )  # [T, B, H, W, K]
 
-    # ── NEW: 2) average logits first, then apply temperature once  ─────────────
-    mean_logits = tf.reduce_mean(logits, axis=0)  # [B,H,W,K]
-    mean_probs = tf.nn.softmax(
-        mean_logits / tf.cast(temperature, tf.float32), axis=-1
-    )  # [B,H,W,K]
+    # ---------------------------------------------------------------------
+    # Per-draw probabilities (with temperature scaling)
+    # ---------------------------------------------------------------------
+    logits_scaled = logits / tf.cast(temperature, tf.float32)
+    probs_per_draw = tf.nn.softmax(logits_scaled, axis=-1)  # [T, B, H, W, K]
 
-    # Predictive entropy (total) ------------------------------------------
-    entropy = -tf.reduce_sum(mean_probs * tf.math.log(mean_probs + 1e-6), axis=-1)  # [B, H, W]
+    # Predictive distribution (mean probability over draws)
+    mean_probs = tf.reduce_mean(probs_per_draw, axis=0)  # [B, H, W, K]
+
+    # Optional: keep mean logits for diagnostics / storage
+    mean_logits = tf.reduce_mean(logits_scaled, axis=0)  # calibrated
+
+    # ---------------------------------------------------------------------
+    # Uncertainty metrics
+    # ---------------------------------------------------------------------
+    entropy = -tf.reduce_sum(mean_probs * tf.math.log(mean_probs), axis=-1)  # [B, H, W]
     max_entropy = tf.math.log(tf.cast(num_classes, tf.float32))
-    entropy_norm = entropy / max_entropy  # 0‑1
+    entropy_norm = entropy / max_entropy  # 0–1 normalised entropy
 
-    # Expected entropy -----------------------------------------------------
     expected_entropy = -tf.reduce_mean(
-        tf.reduce_sum(probs_per_draw * tf.math.log(probs_per_draw + 1e-6), axis=-1),
-        axis=0,
-    )
+        tf.reduce_sum(probs_per_draw * tf.math.log(probs_per_draw), axis=-1), axis=0
+    )  # [B, H, W]
 
-    # BALD (mutual information) -------------------------------------------
     bald = entropy - expected_entropy
-
+    tf.debugging.assert_greater_equal(
+        bald, 0.0,
+        message="BALD went negative—check softmax / MC-sample logic."
+    )
     variance = tf.reduce_sum(tf.math.reduce_variance(probs_per_draw, axis=0), axis=-1)
 
     return {
@@ -157,6 +166,7 @@ def mc_infer(
         "bald": bald,
         "mean_probs": mean_probs,
         "mean_logits": mean_logits,
+        "expected_entropy": expected_entropy,
     }
 
 

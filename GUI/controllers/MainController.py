@@ -9,26 +9,27 @@ from typing import Optional, Dict, List
 from PyQt5.QtCore import QObject, pyqtSlot, QTimer, QCoreApplication, QThreadPool
 from PyQt5.QtWidgets import QMessageBox, QProgressDialog
 
+from GUI.configuration.configuration import LATEST_SCHEMA_VERSION
 from GUI.controllers.AnnotationClusteringController import AnnotationClusteringController
 from GUI.controllers.ImageProcessingController import ImageProcessingController
-from GUI.models.annotations import AnnotationBase, annotation_from_dict
 from GUI.models.ImageDataModel import BaseImageDataModel, create_image_data_model
 from GUI.models.PointAnnotationGenerator import (
+    HMaximaNMSPointAnnotationGenerator,
     LocalMaximaPointAnnotationGenerator,
     EquidistantPointAnnotationGenerator,
     CenterPointAnnotationGenerator,
 )
+from GUI.models.RecentProjectsDB import save_path as save_recent_project
 from GUI.models.UncertaintyPropagator import propagate_for_annotations
+from GUI.models.annotations import AnnotationBase, annotation_from_dict
 from GUI.models.export.Options import ExportOptions
 from GUI.models.export.Usecase import ExportAnnotationsUseCase
 from GUI.models.io.IOService import ProjectIOService
 from GUI.models.io.Persistence import ProjectState
-from GUI.models.RecentProjectsDB import save_path as save_recent_project
-from GUI.configuration.configuration import LATEST_SCHEMA_VERSION
 from GUI.models.navigation.ClusterSelection import make_selector
+from GUI.views.AnnotationPreviewDialog import AnnotationPreviewDialog
 from GUI.views.ClusteredCropsView import ClusteredCropsView
 from GUI.views.ClusteringProgressDialog import ClusteringProgressDialog
-from GUI.views.AnnotationPreviewDialog import AnnotationPreviewDialog
 from GUI.workers import CrossValidationWorker, MCBankerWorker
 
 
@@ -222,7 +223,15 @@ class MainController(QObject):
         """
         if method == "Local Maxima":
             self.annotation_generator = LocalMaximaPointAnnotationGenerator(
-                filter_size=48, gaussian_sigma=4.0, use_gaussian=False
+                filter_size=32, gaussian_sigma=4.0, use_gaussian=False
+            )
+            self._use_greedy_nav = True
+        elif method == "Contrast Peaks":  # label as shown in the UI
+            self.annotation_generator = HMaximaNMSPointAnnotationGenerator(
+                contrast_h=0.05,  # min uncertainty to exclude.
+                min_distance=32,
+                gaussian_sigma=None,  # keep None to disable smoothing
+                edge_buffer=64,
             )
             self._use_greedy_nav = True
         elif method == "Equidistant Spots":
@@ -658,11 +667,27 @@ class MainController(QObject):
                 if box.clickedButton() == resume_btn:
                     resume = True
                 else:
-                    output_file.unlink()
+                    try:
+                        output_file.unlink()
+                    except PermissionError:
+                        QMessageBox.warning(
+                            self.view,
+                            "File In Use",
+                            f"Cannot delete {output_file} because it is in use.",
+                        )
+                        return
             else:
                 if QMessageBox.question(self.view, "Overwrite?", "Output file exists. Overwrite?") != QMessageBox.Yes:
                     return
-                output_file.unlink()
+                try:
+                    output_file.unlink()
+                except PermissionError:
+                    QMessageBox.warning(
+                        self.view,
+                        "File In Use",
+                        f"Cannot delete {output_file} because it is in use.",
+                    )
+                    return
 
         worker = MCBankerWorker(config, resume=resume)
         self._mc_worker = worker
@@ -738,7 +763,7 @@ class MainController(QObject):
 
     @staticmethod
     def _reorder_clusters(cluster_order: List[int],
-                          clusters_data: Dict[int, List[Annotation]]) -> OrderedDict:
+                          clusters_data: Dict[int, List[AnnotationBase]]) -> OrderedDict:
         """
         Reorders a dictionary of clusters based on a given list of cluster IDs.
         """
@@ -769,6 +794,8 @@ class MainController(QObject):
         self.image_processing_controller.model = model
         # update IO service so frames directory fingerprint is stable
         self.io._tag = model.data_path  # _tag is only used for temp dir names
+        if hasattr(self.view, "set_data_path"):
+            self.view.set_data_path(model.data_path)
         logging.info("Data model set → %s", model.data_path)
 
     @staticmethod

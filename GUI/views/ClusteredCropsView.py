@@ -316,58 +316,41 @@ class LabelingStatisticsWidget(QGroupBox):
 
     def _init_ui(self):
         layout = QVBoxLayout()
-        # Create a table for per-class statistics.
         self.table = QTableWidget()
-        # Three columns: Class (with ID), Count, and Weight.
-        self.table.setColumnCount(3)
-        self.table.setHorizontalHeaderLabels(["Class (ID)", "Count", "Weight"])
-        # Set row count based on primary classes only.
-        num_primary = len(CLASS_COMPONENTS)
-        self.table.setRowCount(num_primary)
-        # Make the table fill available space.
+
+        # ⇩⇩ now five columns
+        self.table.setColumnCount(4)
+        self.table.setHorizontalHeaderLabels(
+            ["Class (ID)", "Count", "Weight", "Mean Unc."]
+        )
+
+        self.table.setRowCount(len(CLASS_COMPONENTS))
         self.table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        # Ensure that columns stretch to fill the available horizontal space.
-        header = self.table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+
         layout.addWidget(self.table)
 
-        # A label for overall summary statistics.
         self.summary_label = QLabel("")
-        # Allow the summary label to expand horizontally.
         self.summary_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.summary_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         layout.addWidget(self.summary_label)
-
         self.setLayout(layout)
 
     def update_statistics_table(self, statistics: dict):
-        """
-        Update the table and summary label with new statistics.
-        Expects a statistics dict containing:
-         - 'total_annotations'
-         - 'total_labeled'
-         - 'class_counts': dict mapping class id to count
-         - 'disagreement_count'
-         - 'agreement_percentage'
-         - 'class_weights': dict mapping class id (for primary classes) to weight
-        """
-        # Update table rows for primary classes (from CLASS_COMPONENTS)
         primary_ids = sorted(CLASS_COMPONENTS.keys())
         for row, cid in enumerate(primary_ids):
             class_name = CLASS_COMPONENTS[cid]
-            count = statistics.get('class_counts', {}).get(cid, 0)
-            # Only show weights for primary classes (ignore special ones).
-            weight = statistics.get('class_weights', {}).get(cid, None)
+            count = statistics["class_counts"].get(cid, 0)
+            weight = statistics["class_weights"].get(cid)
+            mu = statistics["class_mean_uncertainty"].get(cid)
+
             weight_str = f"{weight:.2f}" if weight is not None else "N/A"
+            mu_str = f"{mu:.3f}" if mu is not None else "N/A"
 
-            # Create/update the table items.
-            class_item = QTableWidgetItem(f"{class_name} ({cid})")
-            count_item = QTableWidgetItem(str(count))
-            weight_item = QTableWidgetItem(weight_str)
-
-            self.table.setItem(row, 0, class_item)
-            self.table.setItem(row, 1, count_item)
-            self.table.setItem(row, 2, weight_item)
+            self.table.setItem(row, 0, QTableWidgetItem(f"{class_name} ({cid})"))
+            self.table.setItem(row, 1, QTableWidgetItem(str(count)))
+            self.table.setItem(row, 2, QTableWidgetItem(weight_str))
+            self.table.setItem(row, 3, QTableWidgetItem(mu_str))
 
         # Format summary for special classes and overall counts.
         special_counts = []
@@ -461,6 +444,10 @@ class ClusteredCropsView(QWidget):
     def _create_control_panel(self) -> QScrollArea:
         control_panel = QWidget()
         control_panel_layout = QVBoxLayout(control_panel)
+
+        self.data_path_label = QLabel("")
+        self.data_path_label.setWordWrap(True)
+        control_panel_layout.addWidget(self.data_path_label)
 
         self.navigation_widget = NavigationControlsWidget()
         self.navigation_widget.sample_cluster.connect(self.sample_cluster.emit)
@@ -762,6 +749,13 @@ class ClusteredCropsView(QWidget):
 
     def update_labeling_statistics(self, statistics: dict):
         self.statistics_widget.update_statistics_table(statistics)
+
+    # ------------------------------------------------------------------
+    #  Display helpers
+    # ------------------------------------------------------------------
+    def set_data_path(self, path: str) -> None:
+        """Update the label showing the active HDF5/SQLite file."""
+        self.data_path_label.setText(f"Data file: {path}")
 
     # --- File & Project Signals ---
     def on_load_project_state(self):

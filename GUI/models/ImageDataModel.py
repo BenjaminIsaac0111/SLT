@@ -64,6 +64,11 @@ class BaseImageDataModel(QObject, metaclass=ABCQObjectMeta):
         ``image``, ``logits``, ``uncertainty``, ``filename``."""
 
     @abstractmethod
+    def get_annotation_data(self, index: int) -> Dict[str, Any]:
+        """Return the *index*‑th sample as a dictionary with keys
+        ``logits``, ``uncertainty`` and ``filename``."""
+
+    @abstractmethod
     def get_filenames(self) -> List[str]:
         """Return all filenames stored in the dataset in order."""
 
@@ -123,6 +128,22 @@ class HDF5ImageDataModel(BaseImageDataModel):
             "filename": fname,
         }
         return record
+
+    def get_annotation_data(self, index: int) -> Dict[str, Any]:
+        self._ensure_open()
+        if not (0 <= index < len(self._filenames)):
+            raise IndexError("index out of range")
+
+        f: h5py.File = self._tls.h5f
+        logits = f["logits"][index]
+        uncertainty = f[self._uncertainty_type][index]
+        fname = self._filenames[index]
+
+        return {
+            "logits": logits,
+            "uncertainty": uncertainty,
+            "filename": fname,
+        }
 
     def get_filenames(self) -> List[str]:
         self._ensure_open()

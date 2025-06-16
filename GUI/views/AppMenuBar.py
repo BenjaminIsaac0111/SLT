@@ -74,6 +74,7 @@ class AppMenuBar(QMenuBar):
         grp = QActionGroup(self)
         for label in [
             "Local Uncertainty Maxima",
+            "Contrast Peaks",
             "Equidistant Spots",
             "Image Centre",
         ]:

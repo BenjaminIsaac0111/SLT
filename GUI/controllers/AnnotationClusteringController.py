@@ -24,9 +24,9 @@ from PyQt5.QtCore import (
 from sklearn.utils.class_weight import compute_class_weight
 
 from GUI.configuration.configuration import CLASS_COMPONENTS
-from GUI.models.annotations import AnnotationBase, PointAnnotation, MaskAnnotation
 from GUI.models.ImageDataModel import BaseImageDataModel
 from GUI.models.PointAnnotationGenerator import CenterPointAnnotationGenerator
+from GUI.models.annotations import AnnotationBase
 from GUI.workers.AnnotationClusteringWorker import AnnotationClusteringWorker
 
 
@@ -50,23 +50,23 @@ class AnnotationExtractionWorker(QThread):
 
     # worker entry ----------------------------------------------
     def run(self):
-        annos: list[Annotation] = []
+        annos: list[AnnotationBase] = []
         n_images = self._model.get_number_of_images()
         for idx in range(n_images):
             if self._abort:
                 self.cancelled.emit()
                 return
 
-            img = self._model.get_image_data(idx)
-            annos.extend(self._extract_from_image(img, idx))
+            entry = self._model.get_annotation_data(idx)
+            annos.extend(self._extract_from_uncertainty(entry, idx))
             self.progress.emit(int((idx + 1) / n_images * 100))
 
         self.finished.emit(annos)
 
     # helpers ---------------------------------------------------
-    def _extract_from_image(self, img: dict, idx: int) -> list[AnnotationBase]:
+    def _extract_from_uncertainty(self, entry: dict, idx: int) -> list[AnnotationBase]:
         out: list[AnnotationBase] = []
-        umap, logits, fname = img.get("uncertainty"), img.get("logits"), img.get("filename")
+        umap, logits, fname = entry.get("uncertainty"), entry.get("logits"), entry.get("filename")
         if umap is None or logits is None or fname is None:
             return out
 
@@ -207,6 +207,11 @@ class AnnotationClusteringController(QObject):
         class_counts = {cid: 0 for cid in CLASS_COMPONENTS}
         class_counts.update({-1: 0, -2: 0, -3: 0})
 
+        # ── NEW: per-class cumulative uncertainties ────────────────────────────────
+        unc_sum = {cid: 0.0 for cid in CLASS_COMPONENTS}
+        adj_unc_sum = {cid: 0.0 for cid in CLASS_COMPONENTS}
+        # --------------------------------------------------------------------------
+
         labeled, disagreements = 0, 0
         y_all: list[int] = []
 
@@ -216,18 +221,36 @@ class AnnotationClusteringController(QObject):
                 class_counts[cid] = class_counts.get(cid, 0) + 1
                 y_all.append(cid)
 
-                if cid not in (-1, -2, -3):
+                if cid not in (-1, -2, -3):  # primary classes only
                     labeled += 1
+
+                    # accumulate uncertainties (skip None)
+                    if getattr(a, "uncertainty", None) is not None:
+                        unc_sum[cid] += float(a.uncertainty)
+                    if getattr(a, "adjusted_uncertainty", None) is not None:
+                        adj_unc_sum[cid] += float(a.adjusted_uncertainty)
+
+                    # disagreement logic unchanged
                     pred = self.get_class_id_from_prediction(a.model_prediction)
                     if pred is not None and pred != cid:
                         disagreements += 1
 
         agree_pct = 0.0 if labeled == 0 else (labeled - disagreements) / labeled * 100
+
+        # weights (unchanged)
         weights = {}
         filtered = [c for c in y_all if c not in (-1, -2, -3)]
         if filtered:
             cls = np.unique(filtered)
-            weights = dict(zip(cls, compute_class_weight("balanced", classes=cls, y=filtered)))
+            weights = dict(zip(cls,
+                               compute_class_weight("balanced", classes=cls, y=filtered)))
+
+        # ── NEW: convert sums → means (None when class is absent) ──────────────────
+        mean_unc = {cid: (unc_sum[cid] / class_counts[cid] if class_counts[cid] else None)
+                    for cid in CLASS_COMPONENTS}
+        mean_adj = {cid: (adj_unc_sum[cid] / class_counts[cid] if class_counts[cid] else None)
+                    for cid in CLASS_COMPONENTS}
+        # --------------------------------------------------------------------------
 
         return {
             "total_annotations": total,
@@ -236,6 +259,9 @@ class AnnotationClusteringController(QObject):
             "disagreement_count": disagreements,
             "agreement_percentage": agree_pct,
             "class_weights": weights,
+            # NEW
+            "class_mean_uncertainty": mean_unc,
+            "class_mean_adjusted_uncertainty": mean_adj,
         }
 
     # ─────────────────────── cluster meta ───────────────────────

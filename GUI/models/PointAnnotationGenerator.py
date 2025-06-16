@@ -1,10 +1,15 @@
+from __future__ import annotations
+
 import logging
 from typing import List, Tuple
 
-from .annotations import AnnotationBase, PointAnnotation
-
 import numpy as np
-from scipy.ndimage import gaussian_filter, maximum_filter
+from scipy.ndimage import gaussian_filter, label, maximum_filter
+from scipy.spatial import cKDTree
+from skimage.filters import gaussian
+from skimage.morphology import h_maxima
+
+from .annotations import AnnotationBase, PointAnnotation
 
 logger = logging.getLogger(__name__)  # module-level logger
 
@@ -93,6 +98,96 @@ class BasePointAnnotationGenerator:
     # enforced in subclasses
     def _generate_coords(self, uncertainty_map: np.ndarray) -> List[tuple]:
         raise NotImplementedError
+
+
+class HMaximaNMSPointAnnotationGenerator(BasePointAnnotationGenerator):
+    """
+    Peak = local maximum at least `contrast_h` above its neighbourhood,
+           separated by `min_distance` pixels.
+    """
+
+    def __init__(
+            self,
+            contrast_h: float = 0.05,
+            min_distance: int = 64,
+            gaussian_sigma: float | None = None,
+            edge_buffer: int = 64,
+    ):
+        super().__init__(edge_buffer=edge_buffer)
+        if contrast_h <= 0:
+            raise ValueError("contrast_h must be positive.")
+        if min_distance <= 0:
+            raise ValueError("min_distance must be positive.")
+
+        self.contrast_h = contrast_h
+        self.min_distance = min_distance
+        self.gaussian_sigma = gaussian_sigma
+
+        logger.info(
+            "%s(contrast_h=%.3f, min_distance=%d, gaussian_sigma=%s)",
+            self.__class__.__name__, contrast_h, min_distance, gaussian_sigma
+        )
+
+    # ------------------------------------------------------------------ #
+    def _generate_coords(self, uncertainty_map: np.ndarray) -> List[Tuple[int, int]]:
+        img = (
+            gaussian(uncertainty_map, sigma=self.gaussian_sigma, preserve_range=True)
+            if self.gaussian_sigma is not None
+            else uncertainty_map
+        )
+
+        # 1) h-maxima → boolean mask
+        maxima_mask = h_maxima(img, h=self.contrast_h)
+        if not maxima_mask.any():
+            return []
+
+        # 2) collapse plateaus to single points (centroids)
+        labels, nlab = label(maxima_mask)
+        coords = []
+        for lab in range(1, nlab + 1):
+            ys, xs = np.where(labels == lab)
+            # pick centroid (could also take argmax for speed)
+            coords.append((int(np.mean(ys)), int(np.mean(xs))))
+
+        # 3) KD-tree NMS for spatial thinning
+        coords = np.array(coords)
+        # sort by descending uncertainty
+        vals = img[coords[:, 0], coords[:, 1]]
+        order = np.argsort(-vals)
+        coords_sorted = coords[order]
+
+        keep: List[Tuple[int, int]] = []
+        tree = cKDTree(coords_sorted)
+        taken = np.zeros(len(coords_sorted), dtype=bool)
+
+        for i, p in enumerate(coords_sorted):
+            if taken[i]:
+                continue
+            keep.append(tuple(p))
+            # mark neighbours within min_distance
+            idxs = tree.query_ball_point(p, self.min_distance)
+            taken[idxs] = True
+
+        # 4) edge buffer
+        r, c = img.shape
+        keep = [
+            k
+            for k in keep
+            if (
+                    self.edge_buffer
+                    <= k[0]
+                    < r - self.edge_buffer
+                    and self.edge_buffer
+                    <= k[1]
+                    < c - self.edge_buffer
+            )
+        ]
+
+        logger.debug(
+            "h-maxima peaks: raw=%d, after NMS=%d, after edge-buffer=%d",
+            nlab, len(coords_sorted), len(keep),
+        )
+        return keep
 
 
 # ----------------------------------------------------------------------------- #
