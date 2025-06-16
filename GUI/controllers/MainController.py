@@ -700,8 +700,12 @@ class MainController(QObject):
         if widget is not None:
             widget.start(str(output_file), total)
             worker.signals.progress.connect(widget.update_progress)
-            widget.request_pause.connect(worker.pause)
-            widget.request_resume.connect(worker.resume_task)
+            if self.scheduler is not None:
+                widget.request_pause.connect(self.scheduler.pause_current)
+                widget.request_resume.connect(self.scheduler.resume_current)
+            else:
+                widget.request_pause.connect(worker.pause)
+                widget.request_resume.connect(worker.resume_task)
             widget.request_cancel.connect(worker.cancel)
 
         worker.signals.finished.connect(self._on_mc_banker_finished)
