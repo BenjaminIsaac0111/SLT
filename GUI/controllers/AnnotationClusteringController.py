@@ -159,8 +159,12 @@ class AnnotationClusteringController(QObject):
 
         # centre-only generator → bypass clustering
         if isinstance(self.annotation_generator, CenterPointAnnotationGenerator):
-            self.clusters = {i: [a] for i, a in enumerate(annos)}
-            self._finish_success();
+            clusters = {}
+            for i, a in enumerate(annos):
+                a.cluster_id = i  # ← unique dummy id
+                clusters[i] = [a]
+            self.clusters = clusters
+            self._finish_success()
             return
 
         # kick off clustering worker

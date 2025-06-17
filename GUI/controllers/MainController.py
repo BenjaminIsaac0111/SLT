@@ -235,8 +235,8 @@ class MainController(QObject):
             )
             self._use_greedy_nav = True
         elif method == "Equidistant Spots":
-            self.annotation_generator = EquidistantPointAnnotationGenerator(grid_spacing=48)
-            self._use_greedy_nav = True
+            self.annotation_generator = EquidistantPointAnnotationGenerator()
+            self._use_greedy_nav = False
         elif method == "Image Centre":
             self.annotation_generator = CenterPointAnnotationGenerator()
             self._use_greedy_nav = False

@@ -1,6 +1,7 @@
 from functools import partial
 from typing import Tuple
 
+import numpy as np
 from PyQt5.QtCore import QRectF, Qt, QPointF, pyqtSignal
 from PyQt5.QtGui import QPixmap, QFont, QFontMetrics, QPainter, QPen, QImage
 from PyQt5.QtWidgets import QGraphicsObject, QApplication, QMenu, QAction
@@ -87,6 +88,13 @@ class ClickablePixmapItem(QGraphicsObject):
 
                 painter.setPen(QPen(Qt.green, 2))
                 painter.drawEllipse(QPointF(x0, y0), r, r)
+
+                centre_r = max(1, r // 6)  # keep it visible but small    # <<<
+                painter.save()  # <<<
+                painter.setPen(Qt.NoPen)  # <<<
+                painter.setBrush(Qt.black)  # solid fill, matches outline   # <<<
+                painter.drawEllipse(QPointF(x0, y0), centre_r, centre_r)  # <<<
+                painter.restore()
 
                 painter.setPen(QPen(Qt.black, 1))
                 painter.drawLine(x0, 0, x0, y0 - r)
