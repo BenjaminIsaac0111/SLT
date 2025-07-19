@@ -21,10 +21,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import signal
-import sys
 from collections import Counter
 from dataclasses import dataclass
+from datetime import time
 from pathlib import Path
 from typing import Sequence
 
@@ -34,7 +35,7 @@ from tensorflow.keras.models import load_model
 from tensorflow.keras.utils import Progbar
 
 # ────────────────────────────────────────────────────────────────────────────────
-# Project‑specific imports
+# Project‑specific imports (assumed to exist in your environment)
 # ────────────────────────────────────────────────────────────────────────────────
 from DeepLearning.dataloader.dataloader import (
     get_dataset_from_json_v2,
@@ -119,6 +120,7 @@ class Config:
     epochs: int = 10
     learning_rate: float = 1e-7
     use_xla: bool = True
+    log_every_n_batches: int = 1
 
     # Derived fields (set in __post_init__)
     ckpt_dir: Path | None = None
@@ -137,6 +139,19 @@ class Config:
 class Trainer:
     def __init__(self, cfg: Config):
         self.cfg = cfg
+        self.tab10 = [
+            (0.12156862745098039, 0.4666666666666667, 0.7058823529411765),
+            (1.0, 0.4980392156862745, 0.054901960784313725),
+            (0.17254901960784313, 0.6274509803921569, 0.17254901960784313),
+            (0.8392156862745098, 0.15294117647058825, 0.1568627450980392),
+            (0.5803921568627451, 0.403921568627451, 0.7411764705882353),
+            (0.5490196078431373, 0.33725490196078434, 0.29411764705882354),
+            (0.8941176470588236, 0.4666666666666667, 0.7607843137254902),
+            (0.4980392156862745, 0.4980392156862745, 0.4980392156862745),
+            (0.7372549019607844, 0.7411764705882353, 0.13333333333333333),
+            (0.09019607843137255, 0.7450980392156863, 0.8117647058823529),
+        ]
+
         set_memory_growth()
         mixed_precision.set_global_policy("mixed_float16")
 
@@ -165,6 +180,7 @@ class Trainer:
                 directory=str(self.cfg.ckpt_dir / "ckpts"),
                 max_to_keep=5,
             )
+            self.cleanup_stale_ckpt_temps(Path(self.ckpt_manager.directory))
             latest = self.ckpt_manager.latest_checkpoint
             if latest:
                 self.ckpt.restore(latest).expect_partial()
@@ -309,7 +325,7 @@ class Trainer:
 
     def _checkpoint(self, epoch: int):
         # Object-based checkpoint (persists global_step)
-        ckpt_path = self.ckpt_manager.save(checkpoint_number=int(self.global_step.numpy()))
+        ckpt_path = self.robust_save(step=int(self.global_step.numpy()))
         tf.print(f"[INFO] Saved checkpoint: {ckpt_path}")
         # Optional: also export an H5 snapshot of the full model each epoch
         try:
@@ -318,10 +334,169 @@ class Trainer:
             tf.print(f"[WARN] Could not save H5 snapshot: {exc}")
 
     def _interrupt_handler(self, *_):  # signal handler
-        tf.print("\n[WARN] KeyboardInterrupt detected — saving checkpoint before exit…")
+        # Graceful interrupt: save state and flush summaries
+        tf.print("[WARN] KeyboardInterrupt detected — saving checkpoint before exit… (interrupt handler)")
         self._stop_training = True
         self._checkpoint(epoch=-1)
         self.tb_writer.flush()
+        tf.print("[INFO] Interrupt handling complete; exiting after current step.")
+
+    # ────────────────────────────────────────────────────────────────────
+    # Debug / visualization helpers
+    # ────────────────────────────────────────────────────────────────────
+    def sample_batch(self):
+        """Return a *single* batch (x, y) from the training dataset for ad-hoc inspection."""
+        batch = next(iter(self.dataset))
+        if isinstance(batch, (list, tuple)) and len(batch) == 3:
+            _, x, y = batch
+        elif isinstance(batch, (list, tuple)) and len(batch) == 2:
+            x, y = batch
+        else:
+            raise ValueError("Unexpected batch structure fetched from dataset.")
+        return x, y
+
+    def visualize_sample(self, save_path: str | None = None, class_colors: list | None = None, alpha: float = 0.5,
+                         log_to_tb: bool = False):
+        """Visualize first image/mask prediction pair.
+
+        Handles ground-truth masks that may be one-hot (H, W, C) or single-channel (H, W).
+        Also robust to stray last-dimension of size 1. Casts all images to float32 for matplotlib.
+
+        Parameters
+        ----------
+        save_path : str | None
+            If provided, saves the composite figure (PNG). Otherwise displays.
+        class_colors : list | None
+            Optional list/array of RGB triples in [0,1] of length num_classes.
+        alpha : float
+            Blend between input image and predicted mask for overlay panel.
+        log_to_tb : bool
+            If True, also logs the composite panel as a TensorBoard image summary.
+        """
+        import numpy as np
+        import matplotlib.pyplot as plt
+        import tensorflow as tf
+        import io
+
+        x, y = self.sample_batch()
+        x0 = x[0:1]
+        y0 = y[0]
+
+        # Normalize ground truth shape to (H, W)
+        if y0.ndim == 3:
+            if y0.shape[-1] == self.cfg.num_classes:  # one-hot
+                y0 = tf.argmax(y0, axis=-1)
+            elif y0.shape[-1] == 1:  # redundant channel
+                y0 = tf.squeeze(y0, axis=-1)
+        y0 = tf.cast(y0, tf.int32)
+
+        logits = self.model(x0, training=False)
+        if logits.shape[-1] != self.cfg.num_classes:
+            raise ValueError(f"Model output last dim {logits.shape[-1]} != num_classes {self.cfg.num_classes}")
+        pred = tf.argmax(logits[0], axis=-1)
+        pred = tf.cast(pred, tf.int32)
+
+        num_classes = self.cfg.num_classes
+        if class_colors is None:
+            rng = np.random.default_rng(42)
+            class_colors = rng.uniform(0.15, 0.95, size=(num_classes, 3))
+            class_colors[0] = [0, 0, 0]
+        class_colors = np.asarray(class_colors, dtype=np.float32)
+
+        def colorize(mask_tensor):
+            mask_np = mask_tensor.numpy() if isinstance(mask_tensor, tf.Tensor) else mask_tensor
+            if mask_np.ndim == 3:
+                if mask_np.shape[-1] == 1:
+                    mask_np = mask_np[..., 0]
+                elif mask_np.shape[-1] == num_classes:
+                    mask_np = np.argmax(mask_np, axis=-1)
+            h, w = mask_np.shape
+            out = np.zeros((h, w, 3), dtype=np.float32)
+            for c in range(num_classes):
+                out[mask_np == c] = class_colors[c]
+            return out
+
+        pred_color = colorize(pred)
+        gt_color = colorize(y0)
+
+        x_img = x0[0].numpy()
+        if x_img.dtype == np.float16:
+            x_img = x_img.astype(np.float32)
+        if x_img.dtype != np.uint8:
+            x_img = (x_img - x_img.min()) / (x_img.ptp() + 1e-8)
+        if x_img.shape[-1] == 1:
+            x_img = np.repeat(x_img, 3, axis=-1)
+        x_img = x_img.astype(np.float32)
+        overlay = ((1 - alpha) * x_img + alpha * pred_color).astype(np.float32)
+
+        fig, axes = plt.subplots(1, 4, figsize=(16, 8))
+        panels = [("Input", x_img), ("Ground Truth", gt_color), ("Prediction", pred_color), ("Overlay", overlay)]
+        for ax, (title, img) in zip(axes, panels):
+            ax.set_title(title)
+            ax.imshow(img)
+            ax.axis("off")
+        plt.tight_layout()
+
+        if save_path:
+            fig.savefig(save_path, dpi=180)
+            tf.print(f"[DEBUG] Saved visualization to {save_path}")
+        if log_to_tb:
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png", dpi=120)
+            buf.seek(0)
+            image = tf.image.decode_png(buf.getvalue(), channels=4)
+            image = tf.expand_dims(image, 0)
+            with self.tb_writer.as_default():
+                tf.summary.image("debug/sample_panel", image, step=int(self.global_step.numpy()))
+            self.tb_writer.flush()
+            tf.print("[DEBUG] Logged sample panel to TensorBoard.")
+        if not save_path:
+            plt.show()
+            plt.close(fig)
+            tf.print(f"[DEBUG] Saved visualization to {save_path}")
+        else:
+            plt.show()
+
+    def debug_save(self, step: int):
+        import traceback, pathlib
+        base = pathlib.Path(self.ckpt_manager.directory)
+        before = set(base.iterdir())
+        print(f"[DEBUG] Pre-save entries ({len(before)}): {[p.name for p in before]}")
+        try:
+            path = self.ckpt_manager.save(checkpoint_number=step)
+            print(f"[DEBUG] manager.save returned: {path}")
+        except Exception as e:
+            print("[DEBUG] manager.save raised:", repr(e))
+            traceback.print_exc()
+        after = set(base.iterdir())
+        new = [p for p in after - before]
+        print(f"[DEBUG] New entries after attempt: {[p.name for p in new]}")
+        temp_dirs = [p for p in after if p.is_dir() and p.name.endswith('_temp')]
+        print(f"[DEBUG] Temp dirs currently present: {[d.name for d in temp_dirs]}")
+
+    def robust_save(self, step, retries=3, delay=1.0):
+        for a in range(1, retries + 1):
+            try:
+                return self.ckpt_manager.save(checkpoint_number=step)
+            except tf.errors.NotFoundError as e:
+                if a == retries:
+                    raise
+                time.sleep(delay)
+                print(f"[WARN] Retry save attempt {a}/{retries} after NotFoundError: {e}")
+
+    @staticmethod
+    def cleanup_stale_ckpt_temps(root: Path):
+        removed = []
+        for d in root.glob("ckpt-*_*temp"):
+            # Only remove if corresponding final checkpoint exists
+            base = d.name.replace("_temp", "")
+            data = root / f"{base}.data-00000-of-00001"
+            index = root / f"{base}.index"
+            if data.exists() and index.exists():
+                shutil.rmtree(d, ignore_errors=True)
+                removed.append(d.name)
+        if removed:
+            print("[INFO] Removed stale temp dirs:", removed)
 
 
 # ────────────────────────────────────────────────────────────────────────────────
@@ -329,21 +504,22 @@ class Trainer:
 # ────────────────────────────────────────────────────────────────────────────────
 
 def parse_args(argv: Sequence[str] | None = None) -> Config:
-    parser = argparse.ArgumentParser(description="Mixed‑precision fine‑tuning script (improved logging)")
+    parser = argparse.ArgumentParser(description="Mixed-precision fine-tuning script")
     parser.add_argument("--labels_json", type=Path, required=True, help="Annotation JSON file")
     parser.add_argument("--images_dir", type=Path, required=True, help="Directory with image patches")
     parser.add_argument("--initial_weights", type=Path, required=True, help="Initial model .h5")
-    parser.add_argument("--model_dir", type=Path, default=Path("models"), help="Directory to store checkpoints")
+    parser.add_argument("--model_dir", type=Path, default=Path("fine_tuned_models"), help="Directory to store "
+                                                                                          "checkpoints")
     parser.add_argument("--model_name", type=str, required=True, help="Base checkpoint name")
     parser.add_argument("--num_classes", type=int, default=9)
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--num_patches", type=int, default=400)
     parser.add_argument("--shuffle_seed", type=int, default=42)
-    parser.add_argument("--shuffle_buffer_size", type=int, default=64)
+    parser.add_argument("--shuffle_buffer_size", type=int, default=8)
     parser.add_argument("--epochs", type=int, default=100)
-    parser.add_argument("--learning_rate", type=float, default=1.0e-7)
-    # Clear semantics: use XLA by default; pass --no_xla to disable.
-    parser.add_argument("--no_xla", action="store_false", dest="use_xla", help="Disable XLA JIT compilation")
+    parser.add_argument("--learning_rate", type=float, default=1e-6)
+    parser.add_argument("--no_xla", action="store_false", dest="use_xla", help="Disable XLA JIT.")
+    parser.add_argument("--log_every_n_batches", type=int, default=1, help="Scalar logging frequency (in batches)")
     args = parser.parse_args(argv)
     return Config(**vars(args))
 
@@ -354,5 +530,5 @@ def main(argv: Sequence[str] | None = None):
     trainer.fit()
 
 
-if __name__ == "__main__":  # pragma: no cover
-    main(sys.argv[1:])
+if __name__ == "__main__":
+    main()
