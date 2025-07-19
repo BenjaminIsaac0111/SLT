@@ -29,7 +29,6 @@ class Transforms(tf.keras.layers.Layer):
             ]
         )
 
-    @tf.function
     def call(self, x, y, **kwargs):
         """
         Applies the defined transforms to the input data.
@@ -70,7 +69,6 @@ class Augmentation(tf.keras.layers.Layer):
         super().__init__()
         self.seed = seed
 
-    @tf.function
     def random_execute(self, prob: float) -> bool:
         """
         random_execute function.
@@ -114,7 +112,6 @@ class DestructiveAugmentor(tf.keras.Model):
         self.random_color_jitter = RandomColorJitter(seed=self.seed)
         self.random_greyscale = RandomGreyScale(seed=self.seed)
 
-    @tf.function
     def call(self, inputs: tf.Tensor) -> tf.Tensor:
         """
         Applies the defined augmentation operations to the input tensor.
@@ -145,7 +142,6 @@ class RandomColorJitter(Augmentation):
           the time.
     """
 
-    @tf.function
     def call(self, x: tf.Tensor) -> tf.Tensor:
         """
         call function.
@@ -187,7 +183,6 @@ class RandomGreyScale(Augmentation):
         call: method that does random Grey Scaling 20% of the time.
     """
 
-    @tf.function
     def call(self, x: tf.Tensor) -> tf.Tensor:
         """call function.
 

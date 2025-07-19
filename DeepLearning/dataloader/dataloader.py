@@ -128,7 +128,7 @@ def get_dataset_v2(
 
     if shuffle:
         # Shuffle using the provided buffer size
-        ds = ds.shuffle(buffer_size=shuffle_buffer_size)
+        ds = ds.shuffle(buffer_size=shuffle_buffer_size, reshuffle_each_iteration=True)
 
     if repeat:
         ds = ds.repeat(-1)  # Repeat the dataset indefinitely
@@ -140,7 +140,7 @@ def get_dataset_v2(
         return filename, image, label
 
     # Apply processing function to each element in the dataset
-    ds = ds.map(process_file, num_parallel_calls=tf.data.experimental.AUTOTUNE)
+    ds = ds.map(process_file, num_parallel_calls=AUTOTUNE)
 
     # Batch the dataset
     ds = ds.batch(batch_size=batch_size, drop_remainder=True)
@@ -152,10 +152,10 @@ def get_dataset_v2(
             return filename, image, label
 
         # Apply additional transformations if provided
-        ds = ds.map(transform_with_filename, num_parallel_calls=tf.data.experimental.AUTOTUNE)
+        ds = ds.map(transform_with_filename, num_parallel_calls=AUTOTUNE)
 
     # Prefetch data for optimized data loading
-    ds = ds.prefetch(tf.data.experimental.AUTOTUNE)
+    ds = ds.prefetch(AUTOTUNE)
 
     return ds
 
@@ -207,125 +207,139 @@ def get_dataset_from_dir(
     return ds
 
 
+def get_dataset_from_dir_v2(
+        repeat=True,
+        transforms=None,
+        shuffle_buffer_size=True,
+        batch_size=None,
+        images_dir=None
+):
+    filelist = [os.path.join(images_dir, f) for f in os.listdir(images_dir) if f.endswith('.png')]
+
+    # Create a dataset from the aggregated list of file paths
+    ds = tf.data.Dataset.from_tensor_slices(filelist)
+
+    if shuffle_buffer_size:
+        # Shuffle using the provided buffer size in cfg
+        ds = ds.shuffle(shuffle_buffer_size)
+
+    if repeat:
+        ds = ds.repeat(-1)  # Repeat the dataset indefinitely
+
+    def process_file(filepath):
+        # Process each file path (loading, preprocessing, etc.)
+        image, label = process_path_value_per_class(filepath, 9)
+        filename = tf.strings.split(filepath, os.sep)[-1]
+        return filename, image, label
+
+    # Apply processing function to each element in the dataset
+    ds = ds.map(process_file, num_parallel_calls=tf.data.experimental.AUTOTUNE)
+
+    # Batch the dataset
+    ds = ds.batch(batch_size=batch_size, drop_remainder=True)
+
+    if transforms:
+        # Wrap the transforms to ignore the filename
+        def transform_with_filename(filename, image, label):
+            image, label = transforms(image, label)
+            return filename, image, label
+
+        # Apply additional transformations if provided
+        ds = ds.map(transform_with_filename, num_parallel_calls=tf.data.experimental.AUTOTUNE)
+
+    # Prefetch data for optimized data loading
+    ds = ds.prefetch(tf.data.experimental.AUTOTUNE)
+
+    return ds
+
+
 def get_label_for_file(file_path):
     filename = os.path.basename(file_path)
     label = int(filename[-5])
     return label
 
 
-# ------------------------------------------------------------------
-# Helper: pure‑NumPy circle rasteriser (fast, avoids TF control‑flow)
-# ------------------------------------------------------------------
-def _draw_mask_np(coords, class_ids, height, width,
-                  radius: int, out_channels: int):
-    """
-    Args
-    ----
-    coords       : (N, 2)  integer  [[x0, y0], …]  -- x ≡ cols, y ≡ rows
-    class_ids    : (N,)    integer  class index *starting at 0*
-    height, width: int
-    radius       : int      circle radius in pixels
-    out_channels : int      number of semantic classes
+def _draw_mask_tf(coords, class_ids, height, width, radius, out_channels):
+    ys = tf.cast(coords[:, 0], tf.int32)
+    xs = tf.cast(coords[:, 1], tf.int32)
 
-    Returns
-    -------
-    mask         : uint8  shape (H, W, C)   one‑hot (0/1)
-    """
-    yy, xx = np.ogrid[:height, :width]  # broadcasting grids
-    mask = np.zeros((height, width, out_channels),
-                    dtype=np.uint8)
+    yy = tf.range(height)[:, None]  # [H,1]
+    xx = tf.range(width)[None, :]  # [1,W]
 
-    r2 = radius * radius
-    for (x, y), cls in zip(coords, class_ids):
-        d2 = (yy - y) ** 2 + (xx - x) ** 2  # squared distance
-        circle = d2 <= r2
-        mask[circle, cls] = 1  # write class plane
+    dy = yy[None, :, :] - ys[:, None, None]  # [P,H,W]
+    dx = xx[None, :, :] - xs[:, None, None]  # [P,H,W]
+    circle = (dy * dy + dx * dx) <= radius * radius
+
+    cls_oh = tf.one_hot(class_ids, out_channels, dtype=tf.float32)
+    cls_oh = tf.reshape(cls_oh, [-1, 1, 1, out_channels])
+
+    per_point = tf.cast(circle[..., None], tf.float32) * cls_oh
+
+    mask = tf.reduce_max(per_point, axis=0)
+
     return mask
 
 
-# ------------------------------------------------------------------
-
-
-def get_dataset_from_json(json_path,
-                          images_dir,
-                          *,
-                          radius=8,
-                          out_channels=9,
-                          batch_size=1,
-                          shuffle=True,
-                          repeat=True,
-                          transforms=None,
-                          shuffle_buffer=256):
-    """
-    Parameters marked * are keyword‑only for clarity.
-    -----------------------------------------------------------------
-    json_path     : str   path to the annotation JSON (example you posted)
-    images_dir    : str   directory that actually contains the *.png files
-    radius        : int   circle radius for each point annotation
-    out_channels  : int   number of semantic classes
-    batch_size    : int
-    shuffle       : bool  shuffle entire file list?
-    repeat        : bool  repeat indefinitely?
-    transforms    : callable(image, label) -> (image, label)  (optional)
-    shuffle_buffer: int   TF shuffle buffer size
-    """
-    # 1) ----------------------------------------------------------------
-    #    Load annotations once, keep a lightweight Python list of tuples
-    # -------------------------------------------------------------------
+def get_dataset_from_json_v2(
+        json_path,
+        images_dir,
+        *,
+        radius=8,
+        out_channels=9,
+        batch_size=1,
+        shuffle=True,
+        repeat=True,
+        transforms=None,
+        shuffle_buffer=128
+):
+    # 1) Load annotations
     with open(json_path, "r") as f:
         ann = json.load(f)
 
-    records = []  # [(filepath, coords[n,2], cls[n]), …]
+    records = []
     for fname, marks in ann.items():
         coords = np.array([m["coord"] for m in marks], dtype=np.int32)
         class_ids = np.array([m["class_id"] for m in marks], dtype=np.int32)
-        # If class_id in JSON starts at 1, shift to 0‑based indexing:
-        # class_ids -= 1
-        records.append((os.path.join(images_dir, fname),
-                        coords,
-                        class_ids))
+        records.append((os.path.join(images_dir, fname), coords, class_ids))
 
-    # 2) ----------------------------------------------------------------
-    #    Build a tf.data.Dataset whose *source* is the Python list above
-    # -------------------------------------------------------------------
+    # 2) Create dataset of raw records
     ds = tf.data.Dataset.from_generator(
         lambda: records,
         output_signature=(
-            tf.TensorSpec(shape=(), dtype=tf.string),  # file path
-            tf.TensorSpec(shape=(None, 2), dtype=tf.int32),  # coords
-            tf.TensorSpec(shape=(None,), dtype=tf.int32)))  # class_ids
-
+            tf.TensorSpec(shape=(), dtype=tf.string),
+            tf.TensorSpec(shape=(None, 2), dtype=tf.int32),
+            tf.TensorSpec(shape=(None,), dtype=tf.int32),
+        )
+    )
     if shuffle:
-        ds = ds.shuffle(shuffle_buffer)
+        ds = ds.shuffle(shuffle_buffer, reshuffle_each_iteration=True)
     if repeat:
         ds = ds.repeat(-1)
 
-    # 3) ----------------------------------------------------------------
-    #    Map: read image → build mask → optional augment → return sample
-    # -------------------------------------------------------------------
+    @tf.function
     def _process(filepath, coords, class_ids):
-        img_bin = tf.io.read_file(filepath)
-        img = tf.image.decode_png(img_bin, channels=3)  # float32 later
-        h, w = tf.shape(img)[0], tf.shape(img)[1]
+        with tf.device('/CPU:0'):
+            # decode, draw mask, cast to float
+            img = tf.image.decode_png(tf.io.read_file(filepath), channels=3)
+            h, w = tf.shape(img)[0], tf.shape(img)[1]
+            mask = _draw_mask_tf(coords, class_ids, h, w, radius, out_channels)
+            half_w = w // 2
+            img = img[:, :half_w, :]
+            mask = mask[:, :half_w, :]
 
-        # py_function: runs NumPy code above, avoids TF while‑loops
-        mask = tf.py_function(
-            func=lambda c, ids, H, W: _draw_mask_np(c, ids, H, W,
-                                                    radius, out_channels),
-            inp=[coords, class_ids, h, w],
-            Tout=tf.uint8)
-        mask.set_shape([None, None, out_channels])
-        mask = tf.cast(mask, tf.float32)
+            img = tf.image.convert_image_dtype(img, tf.float32)
+        return img, mask
 
-        img = tf.image.convert_image_dtype(img, tf.float32)  # 0‑1 float
+    ds = ds.map(_process, num_parallel_calls=tf.data.experimental.AUTOTUNE)
 
-        if transforms is not None:
-            img, mask = transforms(img, mask)
-
-        filename = tf.strings.split(filepath, os.sep)[-1]
-        return filename, img, mask
-
-    ds = ds.map(_process, num_parallel_calls=tf.data.AUTOTUNE)
     ds = ds.batch(batch_size, drop_remainder=True)
-    ds = ds.prefetch(tf.data.AUTOTUNE)
+
+    if transforms:
+        def _transform_fn(imgs, masks):
+            imgs, masks = transforms(imgs, masks)
+            return imgs, masks
+
+        ds = ds.map(_transform_fn, num_parallel_calls=tf.data.experimental.AUTOTUNE)
+
+    ds = ds.prefetch(tf.data.experimental.AUTOTUNE)
     return ds
