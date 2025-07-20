@@ -92,7 +92,8 @@ class ClickablePixmapItem(QGraphicsObject):
                 centre_r = max(1, r // 6)  # keep it visible but small    # <<<
                 painter.save()  # <<<
                 painter.setPen(Qt.NoPen)  # <<<
-                painter.setBrush(Qt.black)  # solid fill, matches outline   # <<<
+                if hasattr(painter, "setBrush"):
+                    painter.setBrush(Qt.black)  # solid fill, matches outline
                 painter.drawEllipse(QPointF(x0, y0), centre_r, centre_r)  # <<<
                 painter.restore()
 

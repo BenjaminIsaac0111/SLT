@@ -122,6 +122,10 @@ class Config:
     use_xla: bool = True
     log_every_n_batches: int = 1
 
+    val_labels_json: Path | None = None
+    val_images_dir: Path | None = None
+    num_val_patches: int = 100
+
     # Derived fields (set in __post_init__)
     ckpt_dir: Path | None = None
     h5_ckpt_path: Path | None = None  # optional H5 export per epoch
@@ -130,6 +134,8 @@ class Config:
         self.ckpt_dir = self.model_dir / f"tuned_{self.model_name}"
         self.ckpt_dir.mkdir(parents=True, exist_ok=True)
         self.h5_ckpt_path = self.ckpt_dir / f"tuned_ckpt_{self.model_name}.h5"
+        if self.val_images_dir is None:
+            self.val_images_dir = self.images_dir
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -370,6 +376,16 @@ class Trainer:
         self.dataset = self._build_training_dataset()
         self.steps_per_epoch = max(1, self.cfg.num_patches // self.cfg.batch_size)
 
+        # Validation dataset and helper
+        self.val_dataset = self._build_validation_dataset()
+        self.val_steps = max(1, self.cfg.num_val_patches // self.cfg.batch_size) if self.val_dataset else 0
+        self.validator = Validator(
+            self.model,
+            self.cfg.num_classes,
+            self.strategy,
+            use_xla=self.cfg.use_xla,
+        )
+
         # TensorBoard writer
         logdir = self.cfg.ckpt_dir / "logs"
         logdir.mkdir(exist_ok=True, parents=True)
@@ -442,6 +458,36 @@ class Trainer:
             )
         return ds
 
+    def _build_validation_dataset(self) -> tf.data.Dataset | None:
+        if not self.cfg.val_labels_json:
+            return None
+        if self.cfg.val_labels_json:
+            ds = (
+                get_dataset_from_json_v2(
+                    json_path=self.cfg.val_labels_json,
+                    images_dir=str(self.cfg.val_images_dir),
+                    batch_size=self.cfg.batch_size,
+                    repeat=False,
+                    shuffle=False,
+                    transforms=None,
+                )
+                .map(self._extract_xy, num_parallel_calls=tf.data.AUTOTUNE)
+                .prefetch(tf.data.AUTOTUNE)
+            )
+        else:
+            ds = (
+                get_dataset_from_dir_v2(
+                    images_dir=str(self.cfg.val_images_dir),
+                    batch_size=self.cfg.batch_size,
+                    repeat=False,
+                    transforms=None,
+                    shuffle_buffer_size=False,
+                )
+                .map(self._extract_xy, num_parallel_calls=tf.data.AUTOTUNE)
+                .prefetch(tf.data.AUTOTUNE)
+            )
+        return ds
+
     def _build_train_step(self):
         @xla_optional(self.cfg.use_xla)
         def _train_step(batch):
@@ -467,6 +513,7 @@ class Trainer:
             if self._stop_training:
                 break
             self._train_one_epoch(epoch)
+            self._validate_one_epoch(epoch)
             self._checkpoint(epoch)
         tf.print("[INFO] Training completed.")
 
@@ -501,6 +548,27 @@ class Trainer:
             )
         self.tb_writer.flush()
         tf.print(f"[Epoch {epoch}] avg_loss = {avg_loss:.6f} (global_step={int(self.global_step.numpy())})")
+
+    def _validate_one_epoch(self, epoch: int):
+        if self.val_dataset is None:
+            return
+        self.validator.reset()
+        prog = Progbar(self.val_steps, stateful_metrics=None, verbose=1, unit_name="val_step")
+        for step, batch in enumerate(self.val_dataset.take(self.val_steps), start=1):
+            x, y = batch
+            self.validator.update(x, y)
+            prog.update(step)
+
+        metrics = self.validator.result()
+        gstep = int(self.global_step.numpy())
+        with self.tb_writer.as_default():
+            tf.summary.scalar("val/accuracy", metrics["accuracy"], step=gstep)
+            tf.summary.scalar("val/macro_f1", metrics["macro_f1"], step=gstep)
+            tf.summary.scalar("val/weighted_f1", metrics["weighted_f1"], step=gstep)
+        self.tb_writer.flush()
+        tf.print(
+            f"[Epoch {epoch}] val_accuracy = {metrics['accuracy']:.4f} val_macro_f1 = {metrics['macro_f1']:.4f}"
+        )
 
     def _checkpoint(self, epoch: int):
         # Object-based checkpoint (persists global_step)
@@ -699,6 +767,9 @@ def parse_args(argv: Sequence[str] | None = None) -> Config:
     parser.add_argument("--learning_rate", type=float, default=1e-6)
     parser.add_argument("--no_xla", action="store_false", dest="use_xla", help="Disable XLA JIT.")
     parser.add_argument("--log_every_n_batches", type=int, default=1, help="Scalar logging frequency (in batches)")
+    parser.add_argument("--val_labels_json", type=Path, help="Validation annotation JSON file")
+    parser.add_argument("--val_images_dir", type=Path, help="Directory with validation image patches")
+    parser.add_argument("--num_val_patches", type=int, default=100, help="Number of validation patches per epoch")
     args = parser.parse_args(argv)
     return Config(**vars(args))
 
