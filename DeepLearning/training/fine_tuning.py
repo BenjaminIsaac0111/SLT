@@ -132,6 +132,185 @@ class Config:
         self.h5_ckpt_path = self.ckpt_dir / f"tuned_ckpt_{self.model_name}.h5"
 
 
+# ────────────────────────────────────────────────────────────────────
+# Validation subsystem
+# ────────────────────────────────────────────────────────────────────
+
+class Validator:
+    """
+    Stateful validator accumulating a confusion matrix and computing
+    derived metrics. Supports XLA for the per-batch update step.
+    """
+
+    def __init__(self,
+                 model: tf.keras.Model,
+                 num_classes: int,
+                 strategy: tf.distribute.Strategy,
+                 use_xla: bool = True,
+                 window_size: int = 3,
+                 label_policy: str = "window_majority",  # options: center_pixel, window_majority, window_mean_argmax
+                 skip_empty: bool = True):
+        self.model = model
+        self.C = num_classes
+        self.strategy = strategy
+        self.use_xla = use_xla
+        self.window_size = window_size
+        self.label_policy = label_policy
+        self.skip_empty = skip_empty
+        # confusion matrix variable
+        with self.strategy.scope():
+            self.cm_var = tf.Variable(
+                tf.zeros((self.C, self.C), dtype=tf.int64),
+                trainable=False,
+                name="val_confusion_matrix"
+            )
+        self._build_batch_fn()
+
+    def reset(self):
+        self.cm_var.assign(tf.zeros_like(self.cm_var))
+
+    def _build_batch_fn(self):
+        ws = self.window_size
+
+        def extract_labels(one_hot):
+            """
+            Return (labels, valid_mask)
+            labels shape: (B,), int32
+            valid_mask: (B,), bool
+            """
+            # one_hot: (B,H,W,C)
+            if self.label_policy == "center_pixel":
+                h = tf.shape(one_hot)[1] // 2
+                w = tf.shape(one_hot)[2] // 2
+                center = one_hot[:, h:h + 1, w:w + 1, :]  # (B,1,1,C)
+                labels = tf.argmax(center, axis=-1, output_type=tf.int32)[:, 0, 0]
+                if self.skip_empty:
+                    valid = tf.reduce_max(center, axis=-1)[:, 0, 0] > 0.5
+                else:
+                    valid = tf.ones_like(labels, dtype=tf.bool)
+                return labels, valid
+
+            # window extraction
+            h = tf.shape(one_hot)[1] // 2
+            w = tf.shape(one_hot)[2] // 2
+            half = ws // 2
+            win = one_hot[:, h - half:h + half + 1, w - half:w + half + 1, :]  # (B,ws,ws,C)
+
+            if self.label_policy == "window_mean_argmax":
+                # Mean over window then argmax
+                win_mean = tf.reduce_mean(win, axis=(1, 2))  # (B,C)
+                labels = tf.argmax(win_mean, axis=-1, output_type=tf.int32)
+                if self.skip_empty:
+                    valid = tf.reduce_max(win_mean, axis=-1) > 0.5
+                else:
+                    valid = tf.ones_like(labels, dtype=tf.bool)
+                return labels, valid
+
+            # default: majority (mode) over discrete one-hot pixels
+            # Convert to int class indices for all fg pixels
+            pix_labels = tf.argmax(win, axis=-1, output_type=tf.int32)  # (B,ws,ws)
+            fg_mask = tf.reduce_max(win, axis=-1) > 0.5  # (B,ws,ws)
+            # Flatten
+            pix_labels_flat = tf.reshape(pix_labels, (tf.shape(pix_labels)[0], -1))
+            fg_flat = tf.reshape(fg_mask, (tf.shape(fg_mask)[0], -1))
+            # We will compute bincount per sample using segment_ids trick
+            B = tf.shape(pix_labels_flat)[0]
+            K = tf.shape(pix_labels_flat)[1]
+
+            # Masked values: set background class 0 where not fg (or optionally mark invalid)
+            # We'll gather only fg indices; if none fg -> invalid
+            # Gather all fg positions
+            # To avoid ragged loops: use boolean_mask then compute counts via unsorted segment sum.
+            idx = tf.where(fg_flat)  # (M,2) pairs (sample,row)
+            sample_ids = idx[:, 0]
+            label_vals = tf.gather_nd(pix_labels_flat, idx)  # (M,)
+            # One-hot those labels and segment-sum
+            one_hot_counts = tf.one_hot(label_vals, depth=self.C, dtype=tf.int32)  # (M,C)
+            counts = tf.math.unsorted_segment_sum(one_hot_counts, sample_ids, B)  # (B,C)
+            # Determine if a sample had any fg
+            had_fg = tf.reduce_any(fg_flat, axis=1)
+            # Mode
+            labels = tf.argmax(counts, axis=-1, output_type=tf.int32)
+            return labels, had_fg if self.skip_empty else tf.ones_like(labels, tf.bool)
+
+        def batch_confusion(y_true_onehot, images):
+            # images used only for forward pass
+            logits = self.model(images, training=False)  # (B,H,W,C)
+            # Prediction window match training window logic: same center window
+            h = tf.shape(logits)[1] // 2
+            w = tf.shape(logits)[2] // 2
+            half = ws // 2
+            win_pred = logits[:, h - half:h + half + 1, w - half:w + half + 1, :]  # (B,ws,ws,C)
+            win_pred_mean = tf.reduce_mean(win_pred, axis=(1, 2))  # (B,C)
+            pred_labels = tf.argmax(win_pred_mean, axis=-1, output_type=tf.int32)  # (B,)
+
+            true_labels, valid_mask = extract_labels(y_true_onehot)
+            true_labels = tf.boolean_mask(true_labels, valid_mask)
+            pred_labels = tf.boolean_mask(pred_labels, valid_mask)
+
+            # If after masking empty
+            def empty_case():
+                return tf.zeros((self.C, self.C), dtype=tf.int64)
+
+            def non_empty_case():
+                # Confusion matrix via bincount of (true * C + pred)
+                combined = true_labels * self.C + pred_labels
+                flat_counts = tf.math.bincount(
+                    combined,
+                    minlength=self.C * self.C,
+                    maxlength=self.C * self.C,
+                    dtype=tf.int64
+                )
+                return tf.reshape(flat_counts, (self.C, self.C))
+
+            return tf.cond(tf.size(true_labels) > 0, non_empty_case, empty_case)
+
+        # Compile per-batch update
+        @tf.function(jit_compile=self.use_xla)
+        def update_step(images, one_hot):
+            batch_cm = batch_confusion(one_hot, images)
+            self.cm_var.assign_add(batch_cm)
+
+        self._update_step = update_step
+
+    def update(self, images, one_hot):
+        """
+        Accumulate confusion matrix for a batch. Handles distribution.
+        """
+        # If distributed, run on replicas
+        if isinstance(self.strategy, tf.distribute.Strategy) and \
+                not isinstance(self.strategy, tf.distribute.OneDeviceStrategy):
+            def replica_fn(imgs, y):
+                self._update_step(imgs, y)
+
+            self.strategy.run(replica_fn, args=(images, one_hot))
+        else:
+            self._update_step(images, one_hot)
+
+    def result(self):
+        cm = tf.cast(self.cm_var.read_value(), tf.float32)  # (C,C)
+        tp = tf.linalg.tensor_diag_part(cm)
+        pred_pos = tf.reduce_sum(cm, axis=0)
+        actual_pos = tf.reduce_sum(cm, axis=1)
+        precision = tf.math.divide_no_nan(tp, pred_pos)
+        recall = tf.math.divide_no_nan(tp, actual_pos)
+        f1 = tf.math.divide_no_nan(2.0 * precision * recall, precision + recall)
+        accuracy = tf.math.divide_no_nan(tf.reduce_sum(tp), tf.reduce_sum(cm))
+        support = actual_pos
+        macro_f1 = tf.reduce_mean(f1)
+        weighted_f1 = tf.math.divide_no_nan(tf.reduce_sum(f1 * support), tf.reduce_sum(support))
+        return {
+            "confusion_matrix": tf.cast(cm, tf.int32),
+            "precision": precision,
+            "recall": recall,
+            "f1": f1,
+            "accuracy": accuracy,
+            "macro_f1": macro_f1,
+            "weighted_f1": weighted_f1,
+            "support": support,
+        }
+
+
 # ────────────────────────────────────────────────────────────────────────────────
 # Trainer encapsulating workflow
 # ────────────────────────────────────────────────────────────────────────────────
@@ -188,7 +367,7 @@ class Trainer:
                     f"[INFO] Restored checkpoint state from {latest} (global_step={int(self.global_step.numpy())})")
 
         # Dataset (outside strategy is acceptable if it returns per-replica elements; adjust if using distribute)
-        self.dataset = self._build_dataset()
+        self.dataset = self._build_training_dataset()
         self.steps_per_epoch = max(1, self.cfg.num_patches // self.cfg.batch_size)
 
         # TensorBoard writer
@@ -235,7 +414,7 @@ class Trainer:
                 return batch[1], batch[2]
         raise ValueError("Unexpected batch structure — expected (x,y) or (id,x,y).")
 
-    def _build_dataset(self) -> tf.data.Dataset:
+    def _build_training_dataset(self) -> tf.data.Dataset:
         if self.cfg.labels_json:
             ds = (
                 get_dataset_from_json_v2(
@@ -513,7 +692,7 @@ def parse_args(argv: Sequence[str] | None = None) -> Config:
     parser.add_argument("--model_name", type=str, required=True, help="Base checkpoint name")
     parser.add_argument("--num_classes", type=int, default=9)
     parser.add_argument("--batch_size", type=int, default=1)
-    parser.add_argument("--num_patches", type=int, default=400)
+    parser.add_argument("--num_patches", type=int, default=10)
     parser.add_argument("--shuffle_seed", type=int, default=42)
     parser.add_argument("--shuffle_buffer_size", type=int, default=8)
     parser.add_argument("--epochs", type=int, default=100)

@@ -284,7 +284,7 @@ def get_dataset_from_json_v2(
         json_path,
         images_dir,
         *,
-        radius=8,
+        radius=4,
         out_channels=9,
         batch_size=1,
         shuffle=True,
