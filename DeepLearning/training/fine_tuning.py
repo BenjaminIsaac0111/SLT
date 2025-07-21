@@ -59,7 +59,7 @@ def set_memory_growth() -> None:
     for gpu in tf.config.experimental.list_physical_devices("GPU"):
         try:
             tf.config.experimental.set_memory_growth(gpu, True)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             tf.print(f"[WARN] Could not set memory growth on {gpu}: {exc}")
 
 
@@ -156,11 +156,24 @@ class Validator:
                  window_size: int = 3,
                  label_policy: str = "window_majority",  # options: center_pixel, window_majority, window_mean_argmax
                  skip_empty: bool = True):
+        self.use_xla = use_xla
         self.model = model
+        # 1) Create a small XLA‑compiled fn for model inference
+        if self.use_xla:
+            self._infer = tf.function(
+                lambda images: self.model(images, training=False),
+                jit_compile=True
+            )
+        else:
+            # fallback to normal graph or even eager if you like
+            self._infer = tf.function(
+                lambda images: self.model(images, training=False),
+                jit_compile=False
+            )
+
+        self.window_size = window_size
         self.C = num_classes
         self.strategy = strategy
-        self.use_xla = use_xla
-        self.window_size = window_size
         self.label_policy = label_policy
         self.skip_empty = skip_empty
         # confusion matrix variable
@@ -224,7 +237,7 @@ class Validator:
             K = tf.shape(pix_labels_flat)[1]
 
             # Masked values: set background class 0 where not fg (or optionally mark invalid)
-            # We'll gather only fg indices; if none fg -> invalid
+            # Gather only fg indices; if none fg -> invalid
             # Gather all fg positions
             # To avoid ragged loops: use boolean_mask then compute counts via unsorted segment sum.
             idx = tf.where(fg_flat)  # (M,2) pairs (sample,row)
@@ -241,7 +254,7 @@ class Validator:
 
         def batch_confusion(y_true_onehot, images):
             # images used only for forward pass
-            logits = self.model(images, training=False)  # (B,H,W,C)
+            logits = self._infer(images)  # (B,H,W,C)
             # Prediction window match training window logic: same center window
             h = tf.shape(logits)[1] // 2
             w = tf.shape(logits)[2] // 2
@@ -272,7 +285,7 @@ class Validator:
             return tf.cond(tf.size(true_labels) > 0, non_empty_case, empty_case)
 
         # Compile per-batch update
-        @tf.function(jit_compile=self.use_xla)
+        @tf.function(jit_compile=False)
         def update_step(images, one_hot):
             batch_cm = batch_confusion(one_hot, images)
             self.cm_var.assign_add(batch_cm)
@@ -354,23 +367,40 @@ class Trainer:
             self.global_step = tf.Variable(0, trainable=False, dtype=tf.int64, name="global_step")
             self.compiled_train_step = self._build_train_step()
 
-            # Set up object-based checkpointing
+            # Persisted best‐so‐far metrics:
+            self.best_val_accuracy = tf.Variable(
+                -1.0, trainable=False, dtype=tf.float32, name="best_val_accuracy"
+            )
+            self.best_val_macro_f1 = tf.Variable(
+                -1.0, trainable=False, dtype=tf.float32, name="best_val_macro_f1"
+            )
+
+            # Include them in the checkpoint
             self.ckpt = tf.train.Checkpoint(
                 model=self.model,
                 optimizer=self.optimizer,
                 global_step=self.global_step,
+                best_val_accuracy=self.best_val_accuracy,
+                best_val_macro_f1=self.best_val_macro_f1,
             )
             self.ckpt_manager = tf.train.CheckpointManager(
                 self.ckpt,
                 directory=str(self.cfg.ckpt_dir / "ckpts"),
                 max_to_keep=5,
             )
-            self.cleanup_stale_ckpt_temps(Path(self.ckpt_manager.directory))
+
+            # Restore (if any) – this will also restore best_val_accuracy & best_val_macro_f1
             latest = self.ckpt_manager.latest_checkpoint
             if latest:
                 self.ckpt.restore(latest).expect_partial()
                 tf.print(
-                    f"[INFO] Restored checkpoint state from {latest} (global_step={int(self.global_step.numpy())})")
+                    f"[INFO] Restored checkpoint from {latest} "
+                    f"(global_step={int(self.global_step.numpy())}, "
+                    f"best_acc={self.best_val_accuracy.numpy():.4f}, "
+                    f"best_macro_f1={self.best_val_macro_f1.numpy():.4f})"
+                )
+            # remember whether we resumed
+            self._did_restore = latest is not None
 
         # Dataset (outside strategy is acceptable if it returns per-replica elements; adjust if using distribute)
         self.dataset = self._build_training_dataset()
@@ -509,12 +539,21 @@ class Trainer:
 
     def fit(self):
         tf.print("[INFO] Starting training…")
+
+        if not self._did_restore:
+            # only on a fresh start
+            self._evaluate_baseline()
+        else:
+            tf.print(f"[INFO] Resuming at step {int(self.global_step.numpy())} ‒ skipping baseline.")
+
+        # 2. Standard training loop
         for epoch in range(1, self.cfg.epochs + 1):
             if self._stop_training:
                 break
             self._train_one_epoch(epoch)
             self._validate_one_epoch(epoch)
             self._checkpoint(epoch)
+
         tf.print("[INFO] Training completed.")
 
     # ────────────────────────────────────────────────────────────────────
@@ -559,6 +598,52 @@ class Trainer:
             self.validator.update(x, y)
             prog.update(step)
 
+        # --- BEGIN INSERTION ---
+        metrics = self.validator.result()
+        gstep = int(self.global_step.numpy())
+
+        # 1. Grab raw counts and cast to float
+        cm = tf.cast(metrics["confusion_matrix"], tf.float32)  # shape (C, C)
+        # reshape raw counts into a single‐image batch with 1 channel
+        cm_raw_img = tf.reshape(cm, [1, self.cfg.num_classes, self.cfg.num_classes, 1])
+        with self.tb_writer.as_default():
+            tf.summary.image("val/confusion_matrix_raw", cm_raw_img, step=gstep)
+            self.tb_writer.flush()
+
+        # 2. Normalize by the maximum entry (so values lie in [0,1])
+        cm_max = tf.reduce_max(cm)
+        cm_norm = tf.math.divide_no_nan(cm, cm_max)
+
+        # 3. Reshape to [1, height, width, 1] for tf.summary.image
+        cm_img = tf.reshape(cm_norm, [1, self.cfg.num_classes, self.cfg.num_classes, 1])
+
+        # 4. Write to TB and flush
+        with self.tb_writer.as_default():
+            tf.summary.image("val/confusion_matrix_normalized", cm_img, step=gstep)
+            self.tb_writer.flush()
+        # --- END INSERTION ---
+
+        current_acc = float(metrics["accuracy"].numpy())
+        current_f1 = float(metrics["macro_f1"].numpy())
+
+        if current_acc > self.best_val_accuracy:
+            self.best_val_accuracy = current_acc
+            best_acc_path = self.cfg.ckpt_dir / "best_accuracy_model.h5"
+            self.model.save(best_acc_path)
+            tf.print(f"[INFO] New best accuracy {current_acc:.4f} → {best_acc_path}")
+
+        if current_f1 > self.best_val_macro_f1:
+            self.best_val_macro_f1 = current_f1
+            best_f1_path = self.cfg.ckpt_dir / "best_f1_model.h5"
+            self.model.save(best_f1_path)
+            tf.print(f"[INFO] New best macro_f1 {current_f1:.4f} → {best_f1_path}")
+
+        gstep = int(self.global_step.numpy())
+        with self.tb_writer.as_default():
+            tf.summary.scalar("val/best_accuracy", self.best_val_accuracy, step=gstep)
+            tf.summary.scalar("val/best_macro_f1", self.best_val_macro_f1, step=gstep)
+            self.tb_writer.flush()
+
         metrics = self.validator.result()
         gstep = int(self.global_step.numpy())
         with self.tb_writer.as_default():
@@ -569,6 +654,45 @@ class Trainer:
         tf.print(
             f"[Epoch {epoch}] val_accuracy = {metrics['accuracy']:.4f} val_macro_f1 = {metrics['macro_f1']:.4f}"
         )
+
+    def _evaluate_baseline(self):
+        """Run validation once on the freshly loaded model to get pre‑training metrics."""
+        if self.val_dataset is None:
+            tf.print("[WARN] No validation dataset; skipping baseline evaluation.")
+            return
+
+        tf.print("[INFO] Evaluating baseline (pre‑training) model…")
+        self.validator.reset()
+        prog = Progbar(self.val_steps, stateful_metrics=None, verbose=1, unit_name="val_step")
+        for step, batch in enumerate(self.val_dataset.take(self.val_steps), start=1):
+            x, y = batch
+            self.validator.update(x, y)
+            prog.update(step)
+
+        metrics = self.validator.result()
+        gstep = int(self.global_step.numpy())  # should be 0 at this point
+
+        # Log scalars (accuracy, f1) for baseline
+        with self.tb_writer.as_default():
+            tf.summary.scalar("baseline/accuracy", metrics["accuracy"], step=gstep)
+            tf.summary.scalar("baseline/macro_f1", metrics["macro_f1"], step=gstep)
+            tf.summary.scalar("baseline/weighted_f1", metrics["weighted_f1"], step=gstep)
+            self.tb_writer.flush()
+
+        tf.print(
+            f"[BASELINE] accuracy={metrics['accuracy']:.4f} "
+            f"macro_f1={metrics['macro_f1']:.4f} "
+            f"weighted_f1={metrics['weighted_f1']:.4f}"
+        )
+
+        # Initialize your “best so far” to baseline
+        self.best_val_accuracy.assign(metrics["accuracy"])
+        self.best_val_macro_f1.assign(metrics["macro_f1"])
+
+        # (Optional) Save this baseline snapshot as a reference
+        baseline_path = self.cfg.ckpt_dir / "baseline_model.h5"
+        self.model.save(baseline_path)
+        tf.print(f"[INFO] Saved baseline model to {baseline_path}")
 
     def _checkpoint(self, epoch: int):
         # Object-based checkpoint (persists global_step)
@@ -755,21 +879,21 @@ def parse_args(argv: Sequence[str] | None = None) -> Config:
     parser.add_argument("--labels_json", type=Path, required=True, help="Annotation JSON file")
     parser.add_argument("--images_dir", type=Path, required=True, help="Directory with image patches")
     parser.add_argument("--initial_weights", type=Path, required=True, help="Initial model .h5")
-    parser.add_argument("--model_dir", type=Path, default=Path("fine_tuned_models"), help="Directory to store "
+    parser.add_argument("--model_dir", type=Path, default=Path("fine_tuned_models_2"), help="Directory to store "
                                                                                           "checkpoints")
     parser.add_argument("--model_name", type=str, required=True, help="Base checkpoint name")
     parser.add_argument("--num_classes", type=int, default=9)
     parser.add_argument("--batch_size", type=int, default=1)
-    parser.add_argument("--num_patches", type=int, default=10)
+    parser.add_argument("--num_patches", type=int, default=400)
     parser.add_argument("--shuffle_seed", type=int, default=42)
-    parser.add_argument("--shuffle_buffer_size", type=int, default=8)
+    parser.add_argument("--shuffle_buffer_size", type=int, default=128)
     parser.add_argument("--epochs", type=int, default=100)
-    parser.add_argument("--learning_rate", type=float, default=1e-6)
+    parser.add_argument("--learning_rate", type=float, default=1e-5)
     parser.add_argument("--no_xla", action="store_false", dest="use_xla", help="Disable XLA JIT.")
     parser.add_argument("--log_every_n_batches", type=int, default=1, help="Scalar logging frequency (in batches)")
     parser.add_argument("--val_labels_json", type=Path, help="Validation annotation JSON file")
     parser.add_argument("--val_images_dir", type=Path, help="Directory with validation image patches")
-    parser.add_argument("--num_val_patches", type=int, default=100, help="Number of validation patches per epoch")
+    parser.add_argument("--num_val_patches", type=int, default=2048, help="Number of validation patches per epoch")
     args = parser.parse_args(argv)
     return Config(**vars(args))
 
