@@ -674,6 +674,9 @@ class Trainer:
 
         # Log scalars (accuracy, f1) for baseline
         with self.tb_writer.as_default():
+            tf.summary.scalar("val/accuracy", metrics["accuracy"], step=gstep)
+            tf.summary.scalar("val/macro_f1", metrics["macro_f1"], step=gstep)
+            tf.summary.scalar("val/weighted_f1", metrics["weighted_f1"], step=gstep)
             tf.summary.scalar("baseline/accuracy", metrics["accuracy"], step=gstep)
             tf.summary.scalar("baseline/macro_f1", metrics["macro_f1"], step=gstep)
             tf.summary.scalar("baseline/weighted_f1", metrics["weighted_f1"], step=gstep)
@@ -879,7 +882,7 @@ def parse_args(argv: Sequence[str] | None = None) -> Config:
     parser.add_argument("--labels_json", type=Path, required=True, help="Annotation JSON file")
     parser.add_argument("--images_dir", type=Path, required=True, help="Directory with image patches")
     parser.add_argument("--initial_weights", type=Path, required=True, help="Initial model .h5")
-    parser.add_argument("--model_dir", type=Path, default=Path("fine_tuned_models_2"), help="Directory to store "
+    parser.add_argument("--model_dir", type=Path, default=Path("fine_tuned_models"), help="Directory to store "
                                                                                           "checkpoints")
     parser.add_argument("--model_name", type=str, required=True, help="Base checkpoint name")
     parser.add_argument("--num_classes", type=int, default=9)
@@ -888,7 +891,7 @@ def parse_args(argv: Sequence[str] | None = None) -> Config:
     parser.add_argument("--shuffle_seed", type=int, default=42)
     parser.add_argument("--shuffle_buffer_size", type=int, default=128)
     parser.add_argument("--epochs", type=int, default=100)
-    parser.add_argument("--learning_rate", type=float, default=1e-5)
+    parser.add_argument("--learning_rate", type=float, default=1e-7)
     parser.add_argument("--no_xla", action="store_false", dest="use_xla", help="Disable XLA JIT.")
     parser.add_argument("--log_every_n_batches", type=int, default=1, help="Scalar logging frequency (in batches)")
     parser.add_argument("--val_labels_json", type=Path, help="Validation annotation JSON file")
