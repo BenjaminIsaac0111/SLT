@@ -334,7 +334,8 @@ def main(config):
             # Calculate confidence, accuracy, and probabilities
             confidence, accuracies, ground_truth_class, predicted_class, probabilities =
             calculate_confidence_and_accuracy(
-                batch_logits, batch_y)
+                batch_logits, batch_y
+            )
 
             # Collect results
             all_confidences[batch_start:batch_end] = confidence

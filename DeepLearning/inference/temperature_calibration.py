@@ -7,11 +7,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 import tensorflow as tf
 import yaml
-from Dataloader.dataloader import get_dataset_v2
-from Model.custom_layers import GroupNormalization, SpatialConcreteDropout, DropoutAttentionBlock
 from keras import Model
 from tensorflow.keras import mixed_precision
 from tensorflow.keras.models import load_model
+
+from DeepLearning.dataloader.dataloader import get_dataset_v2
+from DeepLearning.models.custom_layers import GroupNormalization, SpatialConcreteDropout, DropoutAttentionBlock
 
 # Suppress TensorFlow's INFO and WARNING logs.
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'

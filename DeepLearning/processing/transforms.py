@@ -18,8 +18,9 @@ class Transforms(tf.keras.layers.Layer):
         self.transforms = tf.keras.Sequential(
             [
                 preprocessing.RandomFlip(seed=seed),
-                preprocessing.RandomRotation(factor=10, seed=seed),
-                preprocessing.RandomTranslation(height_factor=(-1, 1), width_factor=(-1, 1))
+                preprocessing.RandomRotation(factor=(-0.25, -0.25), fill_mode="reflect", interpolation="nearest"),
+                preprocessing.RandomTranslation(height_factor=0.1, width_factor=0.1,
+                                                fill_mode="reflect", interpolation="nearest")
             ]
         )
         # Transforms that should not affect the ground truth mask.
