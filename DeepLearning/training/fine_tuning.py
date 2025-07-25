@@ -125,6 +125,8 @@ class Config:
     val_labels_json: Path | None = None
     val_images_dir: Path | None = None
     num_val_patches: int = 100
+    validate_every: int = 1
+    calibrate_every: int = 0
 
     # Derived fields (set in __post_init__)
     ckpt_dir: Path | None = None
@@ -318,6 +320,11 @@ class Validator:
         support = actual_pos
         macro_f1 = tf.reduce_mean(f1)
         weighted_f1 = tf.math.divide_no_nan(tf.reduce_sum(f1 * support), tf.reduce_sum(support))
+        balanced_accuracy = tf.reduce_mean(recall)
+        total = tf.reduce_sum(cm)
+        pe = tf.reduce_sum(pred_pos * actual_pos) / (total * total)
+        po = tf.reduce_sum(tp) / total
+        kappa = tf.math.divide_no_nan(po - pe, 1.0 - pe)
         return {
             "confusion_matrix": tf.cast(cm, tf.int32),
             "precision": precision,
@@ -326,6 +333,8 @@ class Validator:
             "accuracy": accuracy,
             "macro_f1": macro_f1,
             "weighted_f1": weighted_f1,
+            "balanced_accuracy": balanced_accuracy,
+            "kappa": kappa,
             "support": support,
         }
 
@@ -374,6 +383,15 @@ class Trainer:
             self.best_val_macro_f1 = tf.Variable(
                 -1.0, trainable=False, dtype=tf.float32, name="best_val_macro_f1"
             )
+            self.best_val_balanced_acc = tf.Variable(
+                -1.0, trainable=False, dtype=tf.float32, name="best_val_balanced_acc"
+            )
+            self.best_val_weighted_f1 = tf.Variable(
+                -1.0, trainable=False, dtype=tf.float32, name="best_val_weighted_f1"
+            )
+            self.best_val_kappa = tf.Variable(
+                -1.0, trainable=False, dtype=tf.float32, name="best_val_kappa"
+            )
 
             # Include them in the checkpoint
             self.ckpt = tf.train.Checkpoint(
@@ -382,6 +400,9 @@ class Trainer:
                 global_step=self.global_step,
                 best_val_accuracy=self.best_val_accuracy,
                 best_val_macro_f1=self.best_val_macro_f1,
+                best_val_balanced_acc=self.best_val_balanced_acc,
+                best_val_weighted_f1=self.best_val_weighted_f1,
+                best_val_kappa=self.best_val_kappa,
             )
             self.ckpt_manager = tf.train.CheckpointManager(
                 self.ckpt,
@@ -397,7 +418,10 @@ class Trainer:
                     f"[INFO] Restored checkpoint from {latest} "
                     f"(global_step={int(self.global_step.numpy())}, "
                     f"best_acc={self.best_val_accuracy.numpy():.4f}, "
-                    f"best_macro_f1={self.best_val_macro_f1.numpy():.4f})"
+                    f"best_macro_f1={self.best_val_macro_f1.numpy():.4f}, "
+                    f"best_bal_acc={self.best_val_balanced_acc.numpy():.4f}, "
+                    f"best_weighted_f1={self.best_val_weighted_f1.numpy():.4f}, "
+                    f"best_kappa={self.best_val_kappa.numpy():.4f})"
                 )
             # remember whether we resumed
             self._did_restore = latest is not None
@@ -533,6 +557,40 @@ class Trainer:
 
         return _train_step
 
+    def _extract_labels_for_calibration(self, one_hot):
+        ws = self.validator.window_size
+        if self.validator.label_policy == "center_pixel":
+            h = tf.shape(one_hot)[1] // 2
+            w = tf.shape(one_hot)[2] // 2
+            center = one_hot[:, h:h + 1, w:w + 1, :]
+            labels = tf.argmax(center, axis=-1, output_type=tf.int32)[:, 0, 0]
+            valid = tf.reduce_max(center, axis=-1)[:, 0, 0] > 0.5 if self.validator.skip_empty else tf.ones_like(labels, dtype=tf.bool)
+            return labels, valid
+
+        h = tf.shape(one_hot)[1] // 2
+        w = tf.shape(one_hot)[2] // 2
+        half = ws // 2
+        win = one_hot[:, h - half:h + half + 1, w - half:w + half + 1, :]
+        if self.validator.label_policy == "window_mean_argmax":
+            win_mean = tf.reduce_mean(win, axis=(1, 2))
+            labels = tf.argmax(win_mean, axis=-1, output_type=tf.int32)
+            valid = tf.reduce_max(win_mean, axis=-1) > 0.5 if self.validator.skip_empty else tf.ones_like(labels, dtype=tf.bool)
+            return labels, valid
+
+        pix_labels = tf.argmax(win, axis=-1, output_type=tf.int32)
+        fg_mask = tf.reduce_max(win, axis=-1) > 0.5
+        pix_labels_flat = tf.reshape(pix_labels, (tf.shape(pix_labels)[0], -1))
+        fg_flat = tf.reshape(fg_mask, (tf.shape(fg_mask)[0], -1))
+        idx = tf.where(fg_flat)
+        sample_ids = idx[:, 0]
+        label_vals = tf.gather_nd(pix_labels_flat, idx)
+        one_hot_counts = tf.one_hot(label_vals, depth=self.cfg.num_classes, dtype=tf.int32)
+        counts = tf.math.unsorted_segment_sum(one_hot_counts, sample_ids, tf.shape(pix_labels_flat)[0])
+        had_fg = tf.reduce_any(fg_flat, axis=1)
+        labels = tf.argmax(counts, axis=-1, output_type=tf.int32)
+        valid = had_fg if self.validator.skip_empty else tf.ones_like(labels, dtype=tf.bool)
+        return labels, valid
+
     # ────────────────────────────────────────────────────────────────────
     # Public API
     # ────────────────────────────────────────────────────────────────────
@@ -551,7 +609,8 @@ class Trainer:
             if self._stop_training:
                 break
             self._train_one_epoch(epoch)
-            self._validate_one_epoch(epoch)
+            if epoch % self.cfg.validate_every == 0:
+                self._validate_one_epoch(epoch)
             self._checkpoint(epoch)
 
         tf.print("[INFO] Training completed.")
@@ -623,8 +682,47 @@ class Trainer:
             self.tb_writer.flush()
         # --- END INSERTION ---
 
+        ece = None
+        if self.cfg.calibrate_every > 0 and epoch % self.cfg.calibrate_every == 0:
+            import numpy as np
+            from DeepLearning.inference.temperature_calibration import compute_reliability_curve
+
+            confs = []
+            correct = []
+            for step, batch in enumerate(self.val_dataset.take(self.val_steps), start=1):
+                x, y = batch
+                logits = self.model(x, training=False)
+                h = tf.shape(logits)[1] // 2
+                w = tf.shape(logits)[2] // 2
+                half = self.validator.window_size // 2
+                win_pred = logits[:, h - half:h + half + 1, w - half:w + half + 1, :]
+                win_mean = tf.reduce_mean(win_pred, axis=(1, 2))
+                probs = tf.nn.softmax(win_mean, axis=-1)
+                pred_labels = tf.argmax(probs, axis=-1, output_type=tf.int32)
+                conf = tf.reduce_max(probs, axis=-1)
+
+                # extract true labels using same policy
+                labels, valid = self._extract_labels_for_calibration(y)
+                labels = tf.boolean_mask(labels, valid)
+                pred_labels = tf.boolean_mask(pred_labels, valid)
+                conf = tf.boolean_mask(conf, valid)
+                confs.append(conf.numpy())
+                correct.append(tf.cast(tf.equal(pred_labels, labels), tf.float32).numpy())
+
+            if confs:
+                confs_np = np.concatenate(confs)
+                corr_np = np.concatenate(correct)
+                _, _, _, ece_val = compute_reliability_curve(confs_np, corr_np)
+                ece = float(ece_val)
+                with self.tb_writer.as_default():
+                    tf.summary.scalar("val/ece", ece, step=gstep)
+                self.tb_writer.flush()
+
         current_acc = float(metrics["accuracy"].numpy())
         current_f1 = float(metrics["macro_f1"].numpy())
+        current_bal_acc = float(metrics["balanced_accuracy"].numpy())
+        current_weighted_f1 = float(metrics["weighted_f1"].numpy())
+        current_kappa = float(metrics["kappa"].numpy())
 
         if current_acc > self.best_val_accuracy:
             self.best_val_accuracy = current_acc
@@ -638,10 +736,31 @@ class Trainer:
             self.model.save(best_f1_path)
             tf.print(f"[INFO] New best macro_f1 {current_f1:.4f} → {best_f1_path}")
 
+        if current_bal_acc > self.best_val_balanced_acc:
+            self.best_val_balanced_acc = current_bal_acc
+            best_bal_path = self.cfg.ckpt_dir / "best_balanced_accuracy_model.h5"
+            self.model.save(best_bal_path)
+            tf.print(f"[INFO] New best balanced_accuracy {current_bal_acc:.4f} → {best_bal_path}")
+
+        if current_weighted_f1 > self.best_val_weighted_f1:
+            self.best_val_weighted_f1 = current_weighted_f1
+            best_wf1_path = self.cfg.ckpt_dir / "best_weighted_f1_model.h5"
+            self.model.save(best_wf1_path)
+            tf.print(f"[INFO] New best weighted_f1 {current_weighted_f1:.4f} → {best_wf1_path}")
+
+        if current_kappa > self.best_val_kappa:
+            self.best_val_kappa = current_kappa
+            best_kappa_path = self.cfg.ckpt_dir / "best_kappa_model.h5"
+            self.model.save(best_kappa_path)
+            tf.print(f"[INFO] New best kappa {current_kappa:.4f} → {best_kappa_path}")
+
         gstep = int(self.global_step.numpy())
         with self.tb_writer.as_default():
             tf.summary.scalar("val/best_accuracy", self.best_val_accuracy, step=gstep)
             tf.summary.scalar("val/best_macro_f1", self.best_val_macro_f1, step=gstep)
+            tf.summary.scalar("val/best_balanced_accuracy", self.best_val_balanced_acc, step=gstep)
+            tf.summary.scalar("val/best_weighted_f1", self.best_val_weighted_f1, step=gstep)
+            tf.summary.scalar("val/best_kappa", self.best_val_kappa, step=gstep)
             self.tb_writer.flush()
 
         metrics = self.validator.result()
@@ -650,9 +769,15 @@ class Trainer:
             tf.summary.scalar("val/accuracy", metrics["accuracy"], step=gstep)
             tf.summary.scalar("val/macro_f1", metrics["macro_f1"], step=gstep)
             tf.summary.scalar("val/weighted_f1", metrics["weighted_f1"], step=gstep)
+            tf.summary.scalar("val/balanced_accuracy", metrics["balanced_accuracy"], step=gstep)
+            tf.summary.scalar("val/kappa", metrics["kappa"], step=gstep)
         self.tb_writer.flush()
         tf.print(
-            f"[Epoch {epoch}] val_accuracy = {metrics['accuracy']:.4f} val_macro_f1 = {metrics['macro_f1']:.4f}"
+            f"[Epoch {epoch}] val_accuracy={metrics['accuracy']:.4f} "
+            f"macro_f1={metrics['macro_f1']:.4f} "
+            f"balanced_acc={metrics['balanced_accuracy']:.4f} "
+            f"weighted_f1={metrics['weighted_f1']:.4f} "
+            f"kappa={metrics['kappa']:.4f}"
         )
 
     def _evaluate_baseline(self):
@@ -677,20 +802,29 @@ class Trainer:
             tf.summary.scalar("val/accuracy", metrics["accuracy"], step=gstep)
             tf.summary.scalar("val/macro_f1", metrics["macro_f1"], step=gstep)
             tf.summary.scalar("val/weighted_f1", metrics["weighted_f1"], step=gstep)
+            tf.summary.scalar("val/balanced_accuracy", metrics["balanced_accuracy"], step=gstep)
+            tf.summary.scalar("val/kappa", metrics["kappa"], step=gstep)
             tf.summary.scalar("baseline/accuracy", metrics["accuracy"], step=gstep)
             tf.summary.scalar("baseline/macro_f1", metrics["macro_f1"], step=gstep)
             tf.summary.scalar("baseline/weighted_f1", metrics["weighted_f1"], step=gstep)
+            tf.summary.scalar("baseline/balanced_accuracy", metrics["balanced_accuracy"], step=gstep)
+            tf.summary.scalar("baseline/kappa", metrics["kappa"], step=gstep)
             self.tb_writer.flush()
 
         tf.print(
             f"[BASELINE] accuracy={metrics['accuracy']:.4f} "
             f"macro_f1={metrics['macro_f1']:.4f} "
-            f"weighted_f1={metrics['weighted_f1']:.4f}"
+            f"balanced_acc={metrics['balanced_accuracy']:.4f} "
+            f"weighted_f1={metrics['weighted_f1']:.4f} "
+            f"kappa={metrics['kappa']:.4f}"
         )
 
         # Initialize your “best so far” to baseline
         self.best_val_accuracy.assign(metrics["accuracy"])
         self.best_val_macro_f1.assign(metrics["macro_f1"])
+        self.best_val_balanced_acc.assign(metrics["balanced_accuracy"])
+        self.best_val_weighted_f1.assign(metrics["weighted_f1"])
+        self.best_val_kappa.assign(metrics["kappa"])
 
         # (Optional) Save this baseline snapshot as a reference
         baseline_path = self.cfg.ckpt_dir / "baseline_model.h5"
@@ -897,6 +1031,8 @@ def parse_args(argv: Sequence[str] | None = None) -> Config:
     parser.add_argument("--val_labels_json", type=Path, help="Validation annotation JSON file")
     parser.add_argument("--val_images_dir", type=Path, help="Directory with validation image patches")
     parser.add_argument("--num_val_patches", type=int, default=2048, help="Number of validation patches per epoch")
+    parser.add_argument("--validate_every", type=int, default=1, help="Run validation every N epochs")
+    parser.add_argument("--calibrate_every", type=int, default=0, help="Compute calibration every N epochs (0=disable)")
     args = parser.parse_args(argv)
     return Config(**vars(args))
 
