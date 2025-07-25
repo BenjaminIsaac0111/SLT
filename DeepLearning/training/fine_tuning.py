@@ -656,31 +656,26 @@ class Trainer:
             x, y = batch
             self.validator.update(x, y)
             prog.update(step)
-
-        # --- BEGIN INSERTION ---
         metrics = self.validator.result()
         gstep = int(self.global_step.numpy())
 
         # 1. Grab raw counts and cast to float
         cm = tf.cast(metrics["confusion_matrix"], tf.float32)  # shape (C, C)
-        # reshape raw counts into a single‐image batch with 1 channel
         cm_raw_img = tf.reshape(cm, [1, self.cfg.num_classes, self.cfg.num_classes, 1])
         with self.tb_writer.as_default():
             tf.summary.image("val/confusion_matrix_raw", cm_raw_img, step=gstep)
             self.tb_writer.flush()
 
-        # 2. Normalize by the maximum entry (so values lie in [0,1])
-        cm_max = tf.reduce_max(cm)
-        cm_norm = tf.math.divide_no_nan(cm, cm_max)
+        # 2. Convert to row percentages for better interpretability
+        row_totals = tf.reduce_sum(cm, axis=1, keepdims=True)
+        cm_percent = tf.math.divide_no_nan(cm * 100.0, row_totals)
+        cm_img = tf.reshape(cm_percent / 100.0, [1, self.cfg.num_classes, self.cfg.num_classes, 1])
 
-        # 3. Reshape to [1, height, width, 1] for tf.summary.image
-        cm_img = tf.reshape(cm_norm, [1, self.cfg.num_classes, self.cfg.num_classes, 1])
-
-        # 4. Write to TB and flush
+        # 3. Write to TensorBoard and flush
         with self.tb_writer.as_default():
-            tf.summary.image("val/confusion_matrix_normalized", cm_img, step=gstep)
+            tf.summary.image("val/confusion_matrix_percent", cm_img, step=gstep)
             self.tb_writer.flush()
-        # --- END INSERTION ---
+
 
         ece = None
         if self.cfg.calibrate_every > 0 and epoch % self.cfg.calibrate_every == 0:
