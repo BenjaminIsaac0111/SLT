@@ -103,6 +103,11 @@ def xla_optional(jit: bool = True):
     return decorator
 
 
+def count_samples_from_json(json_path: Path) -> int:
+    with open(json_path, "r") as f:
+        ann = json.load(f)
+    return len(ann)
+
 @dataclass
 class Config:
     """Aggregated hyper‑parameters and paths."""
@@ -428,11 +433,21 @@ class Trainer:
 
         # Dataset (outside strategy is acceptable if it returns per-replica elements; adjust if using distribute)
         self.dataset = self._build_training_dataset()
-        self.steps_per_epoch = max(1, self.cfg.num_patches // self.cfg.batch_size)
+        if self.cfg.num_patches == -1:
+            total_samples = count_samples_from_json(self.cfg.labels_json)
+            self.steps_per_epoch = max(1, (total_samples + self.cfg.batch_size - 1) // self.cfg.batch_size)
+        else:
+            self.steps_per_epoch = max(1, self.cfg.num_patches // self.cfg.batch_size)
 
         # Validation dataset and helper
         self.val_dataset = self._build_validation_dataset()
-        self.val_steps = max(1, self.cfg.num_val_patches // self.cfg.batch_size) if self.val_dataset else 0
+
+        if self.cfg.num_val_patches == -1:
+            total_val_samples = count_samples_from_json(self.cfg.val_labels_json)
+            self.val_steps = max(1, (total_val_samples + self.cfg.batch_size - 1) // self.cfg.batch_size)
+        else:
+            self.val_steps = max(1, self.cfg.num_val_patches // self.cfg.batch_size) if self.val_dataset else 0
+
         self.validator = Validator(
             self.model,
             self.cfg.num_classes,
@@ -1016,7 +1031,7 @@ def parse_args(argv: Sequence[str] | None = None) -> Config:
     parser.add_argument("--model_name", type=str, required=True, help="Base checkpoint name")
     parser.add_argument("--num_classes", type=int, default=9)
     parser.add_argument("--batch_size", type=int, default=1)
-    parser.add_argument("--num_patches", type=int, default=400)
+    parser.add_argument("--num_patches", type=int, default=-1)
     parser.add_argument("--shuffle_seed", type=int, default=42)
     parser.add_argument("--shuffle_buffer_size", type=int, default=128)
     parser.add_argument("--epochs", type=int, default=100)
@@ -1025,7 +1040,7 @@ def parse_args(argv: Sequence[str] | None = None) -> Config:
     parser.add_argument("--log_every_n_batches", type=int, default=1, help="Scalar logging frequency (in batches)")
     parser.add_argument("--val_labels_json", type=Path, help="Validation annotation JSON file")
     parser.add_argument("--val_images_dir", type=Path, help="Directory with validation image patches")
-    parser.add_argument("--num_val_patches", type=int, default=2048, help="Number of validation patches per epoch")
+    parser.add_argument("--num_val_patches", type=int, default=-1, help="Number of validation patches per epoch")
     parser.add_argument("--validate_every", type=int, default=1, help="Run validation every N epochs")
     parser.add_argument("--calibrate_every", type=int, default=0, help="Compute calibration every N epochs (0=disable)")
     args = parser.parse_args(argv)
