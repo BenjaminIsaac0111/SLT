@@ -8,6 +8,7 @@ TensorBoard logging and checkpointing compared to the earlier script.
 Key Improvements Over Previous Version
 --------------------------------------
 * **Monotonically increasing global step** persisted in `tf.train.Checkpoint`.
+* **Epoch counter persisted** so training resumes from the last completed epoch.
 * **Per‑batch and per‑epoch scalars** (`loss/batch`, `loss/epoch_avg`).
 * **No duplicate steps after resume** – avoids out‑of‑order TensorBoard plots.
 * **CheckpointManager** handles rotating checkpoints.
@@ -23,9 +24,9 @@ import argparse
 import json
 import shutil
 import signal
+import time
 from collections import Counter
 from dataclasses import dataclass
-from datetime import time
 from pathlib import Path
 from typing import Sequence
 
@@ -377,8 +378,13 @@ class Trainer:
         with self.strategy.scope():
             self.model = self._load_or_init_model()
             self.optimizer = self._build_optimizer()
-            # Global step persisted in checkpoint (int64 to be safe for large counts)
-            self.global_step = tf.Variable(0, trainable=False, dtype=tf.int64, name="global_step")
+            # Training progress variables persisted in the checkpoint
+            self.global_step = tf.Variable(
+                0, trainable=False, dtype=tf.int64, name="global_step"
+            )
+            self.epoch = tf.Variable(
+                0, trainable=False, dtype=tf.int64, name="epoch"
+            )
             self.compiled_train_step = self._build_train_step()
 
             # Persisted best‐so‐far metrics:
@@ -398,16 +404,39 @@ class Trainer:
                 -1.0, trainable=False, dtype=tf.float32, name="best_val_kappa"
             )
 
+            # Baseline metrics (pre-training evaluation)
+            self.baseline_val_accuracy = tf.Variable(
+                -1.0, trainable=False, dtype=tf.float32, name="baseline_val_accuracy"
+            )
+            self.baseline_val_macro_f1 = tf.Variable(
+                -1.0, trainable=False, dtype=tf.float32, name="baseline_val_macro_f1"
+            )
+            self.baseline_val_balanced_acc = tf.Variable(
+                -1.0, trainable=False, dtype=tf.float32, name="baseline_val_balanced_acc"
+            )
+            self.baseline_val_weighted_f1 = tf.Variable(
+                -1.0, trainable=False, dtype=tf.float32, name="baseline_val_weighted_f1"
+            )
+            self.baseline_val_kappa = tf.Variable(
+                -1.0, trainable=False, dtype=tf.float32, name="baseline_val_kappa"
+            )
+
             # Include them in the checkpoint
             self.ckpt = tf.train.Checkpoint(
                 model=self.model,
                 optimizer=self.optimizer,
                 global_step=self.global_step,
+                epoch=self.epoch,
                 best_val_accuracy=self.best_val_accuracy,
                 best_val_macro_f1=self.best_val_macro_f1,
                 best_val_balanced_acc=self.best_val_balanced_acc,
                 best_val_weighted_f1=self.best_val_weighted_f1,
                 best_val_kappa=self.best_val_kappa,
+                baseline_val_accuracy=self.baseline_val_accuracy,
+                baseline_val_macro_f1=self.baseline_val_macro_f1,
+                baseline_val_balanced_acc=self.baseline_val_balanced_acc,
+                baseline_val_weighted_f1=self.baseline_val_weighted_f1,
+                baseline_val_kappa=self.baseline_val_kappa,
             )
             self.ckpt_manager = tf.train.CheckpointManager(
                 self.ckpt,
@@ -421,12 +450,18 @@ class Trainer:
                 self.ckpt.restore(latest).expect_partial()
                 tf.print(
                     f"[INFO] Restored checkpoint from {latest} "
-                    f"(global_step={int(self.global_step.numpy())}, "
+                    f"(epoch={int(self.epoch.numpy())}, "
+                    f"global_step={int(self.global_step.numpy())}, "
                     f"best_acc={self.best_val_accuracy.numpy():.4f}, "
                     f"best_macro_f1={self.best_val_macro_f1.numpy():.4f}, "
                     f"best_bal_acc={self.best_val_balanced_acc.numpy():.4f}, "
                     f"best_weighted_f1={self.best_val_weighted_f1.numpy():.4f}, "
-                    f"best_kappa={self.best_val_kappa.numpy():.4f})"
+                    f"best_kappa={self.best_val_kappa.numpy():.4f}, "
+                    f"baseline_acc={self.baseline_val_accuracy.numpy():.4f}, "
+                    f"baseline_macro_f1={self.baseline_val_macro_f1.numpy():.4f}, "
+                    f"baseline_bal_acc={self.baseline_val_balanced_acc.numpy():.4f}, "
+                    f"baseline_weighted_f1={self.baseline_val_weighted_f1.numpy():.4f}, "
+                    f"baseline_kappa={self.baseline_val_kappa.numpy():.4f})"
                 )
             # remember whether we resumed
             self._did_restore = latest is not None
@@ -617,15 +652,21 @@ class Trainer:
             # only on a fresh start
             self._evaluate_baseline()
         else:
-            tf.print(f"[INFO] Resuming at step {int(self.global_step.numpy())} ‒ skipping baseline.")
+            tf.print(
+                f"[INFO] Resuming at epoch {int(self.epoch.numpy())}, "
+                f"step {int(self.global_step.numpy())} – skipping baseline."
+            )
 
         # 2. Standard training loop
-        for epoch in range(1, self.cfg.epochs + 1):
+        start_epoch = int(self.epoch.numpy())
+        for e in range(start_epoch, self.cfg.epochs):
             if self._stop_training:
                 break
+            epoch = e + 1
             self._train_one_epoch(epoch)
             if epoch % self.cfg.validate_every == 0:
                 self._validate_one_epoch(epoch)
+            self.epoch.assign(epoch)
             self._checkpoint(epoch)
 
         tf.print("[INFO] Training completed.")
@@ -734,32 +775,32 @@ class Trainer:
         current_weighted_f1 = float(metrics["weighted_f1"].numpy())
         current_kappa = float(metrics["kappa"].numpy())
 
-        if current_acc > self.best_val_accuracy:
-            self.best_val_accuracy = current_acc
+        if current_acc > float(self.best_val_accuracy):
+            self.best_val_accuracy.assign(current_acc)
             best_acc_path = self.cfg.ckpt_dir / "best_accuracy_model.h5"
             self.model.save(best_acc_path)
             tf.print(f"[INFO] New best accuracy {current_acc:.4f} → {best_acc_path}")
 
-        if current_f1 > self.best_val_macro_f1:
-            self.best_val_macro_f1 = current_f1
+        if current_f1 > float(self.best_val_macro_f1):
+            self.best_val_macro_f1.assign(current_f1)
             best_f1_path = self.cfg.ckpt_dir / "best_f1_model.h5"
             self.model.save(best_f1_path)
             tf.print(f"[INFO] New best macro_f1 {current_f1:.4f} → {best_f1_path}")
 
-        if current_bal_acc > self.best_val_balanced_acc:
-            self.best_val_balanced_acc = current_bal_acc
+        if current_bal_acc > float(self.best_val_balanced_acc):
+            self.best_val_balanced_acc.assign(current_bal_acc)
             best_bal_path = self.cfg.ckpt_dir / "best_balanced_accuracy_model.h5"
             self.model.save(best_bal_path)
             tf.print(f"[INFO] New best balanced_accuracy {current_bal_acc:.4f} → {best_bal_path}")
 
-        if current_weighted_f1 > self.best_val_weighted_f1:
-            self.best_val_weighted_f1 = current_weighted_f1
+        if current_weighted_f1 > float(self.best_val_weighted_f1):
+            self.best_val_weighted_f1.assign(current_weighted_f1)
             best_wf1_path = self.cfg.ckpt_dir / "best_weighted_f1_model.h5"
             self.model.save(best_wf1_path)
             tf.print(f"[INFO] New best weighted_f1 {current_weighted_f1:.4f} → {best_wf1_path}")
 
-        if current_kappa > self.best_val_kappa:
-            self.best_val_kappa = current_kappa
+        if current_kappa > float(self.best_val_kappa):
+            self.best_val_kappa.assign(current_kappa)
             best_kappa_path = self.cfg.ckpt_dir / "best_kappa_model.h5"
             self.model.save(best_kappa_path)
             tf.print(f"[INFO] New best kappa {current_kappa:.4f} → {best_kappa_path}")
@@ -829,12 +870,18 @@ class Trainer:
             f"kappa={metrics['kappa']:.4f}"
         )
 
-        # Initialize your “best so far” to baseline
-        self.best_val_accuracy.assign(metrics["accuracy"])
-        self.best_val_macro_f1.assign(metrics["macro_f1"])
-        self.best_val_balanced_acc.assign(metrics["balanced_accuracy"])
-        self.best_val_weighted_f1.assign(metrics["weighted_f1"])
-        self.best_val_kappa.assign(metrics["kappa"])
+        # Persist baseline metrics and initialize "best so far"
+        self.baseline_val_accuracy.assign(metrics["accuracy"])
+        self.baseline_val_macro_f1.assign(metrics["macro_f1"])
+        self.baseline_val_balanced_acc.assign(metrics["balanced_accuracy"])
+        self.baseline_val_weighted_f1.assign(metrics["weighted_f1"])
+        self.baseline_val_kappa.assign(metrics["kappa"])
+
+        self.best_val_accuracy.assign(self.baseline_val_accuracy)
+        self.best_val_macro_f1.assign(self.baseline_val_macro_f1)
+        self.best_val_balanced_acc.assign(self.baseline_val_balanced_acc)
+        self.best_val_weighted_f1.assign(self.baseline_val_weighted_f1)
+        self.best_val_kappa.assign(self.baseline_val_kappa)
 
         # (Optional) Save this baseline snapshot as a reference
         baseline_path = self.cfg.ckpt_dir / "baseline_model.h5"
@@ -842,8 +889,8 @@ class Trainer:
         tf.print(f"[INFO] Saved baseline model to {baseline_path}")
 
     def _checkpoint(self, epoch: int):
-        # Object-based checkpoint (persists global_step)
-        ckpt_path = self.robust_save(step=int(self.global_step.numpy()))
+        # Object-based checkpoint (persists epoch & global_step)
+        ckpt_path = self.robust_save(step=int(self.epoch.numpy()))
         tf.print(f"[INFO] Saved checkpoint: {ckpt_path}")
         # Optional: also export an H5 snapshot of the full model each epoch
         try:
