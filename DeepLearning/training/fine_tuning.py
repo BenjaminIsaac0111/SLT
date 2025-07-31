@@ -775,32 +775,32 @@ class Trainer:
         current_weighted_f1 = float(metrics["weighted_f1"].numpy())
         current_kappa = float(metrics["kappa"].numpy())
 
-        if current_acc > self.best_val_accuracy:
-            self.best_val_accuracy = current_acc
+        if current_acc > float(self.best_val_accuracy):
+            self.best_val_accuracy.assign(current_acc)
             best_acc_path = self.cfg.ckpt_dir / "best_accuracy_model.h5"
             self.model.save(best_acc_path)
             tf.print(f"[INFO] New best accuracy {current_acc:.4f} → {best_acc_path}")
 
-        if current_f1 > self.best_val_macro_f1:
-            self.best_val_macro_f1 = current_f1
+        if current_f1 > float(self.best_val_macro_f1):
+            self.best_val_macro_f1.assign(current_f1)
             best_f1_path = self.cfg.ckpt_dir / "best_f1_model.h5"
             self.model.save(best_f1_path)
             tf.print(f"[INFO] New best macro_f1 {current_f1:.4f} → {best_f1_path}")
 
-        if current_bal_acc > self.best_val_balanced_acc:
-            self.best_val_balanced_acc = current_bal_acc
+        if current_bal_acc > float(self.best_val_balanced_acc):
+            self.best_val_balanced_acc.assign(current_bal_acc)
             best_bal_path = self.cfg.ckpt_dir / "best_balanced_accuracy_model.h5"
             self.model.save(best_bal_path)
             tf.print(f"[INFO] New best balanced_accuracy {current_bal_acc:.4f} → {best_bal_path}")
 
-        if current_weighted_f1 > self.best_val_weighted_f1:
-            self.best_val_weighted_f1 = current_weighted_f1
+        if current_weighted_f1 > float(self.best_val_weighted_f1):
+            self.best_val_weighted_f1.assign(current_weighted_f1)
             best_wf1_path = self.cfg.ckpt_dir / "best_weighted_f1_model.h5"
             self.model.save(best_wf1_path)
             tf.print(f"[INFO] New best weighted_f1 {current_weighted_f1:.4f} → {best_wf1_path}")
 
-        if current_kappa > self.best_val_kappa:
-            self.best_val_kappa = current_kappa
+        if current_kappa > float(self.best_val_kappa):
+            self.best_val_kappa.assign(current_kappa)
             best_kappa_path = self.cfg.ckpt_dir / "best_kappa_model.h5"
             self.model.save(best_kappa_path)
             tf.print(f"[INFO] New best kappa {current_kappa:.4f} → {best_kappa_path}")
