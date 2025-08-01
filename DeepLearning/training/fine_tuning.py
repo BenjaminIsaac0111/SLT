@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import shutil
 import signal
 import time
@@ -38,10 +39,7 @@ from tensorflow.keras.utils import Progbar
 # ────────────────────────────────────────────────────────────────────────────────
 # Project‑specific imports (assumed to exist in your environment)
 # ────────────────────────────────────────────────────────────────────────────────
-from DeepLearning.dataloader.dataloader import (
-    get_dataset_from_json_v2,
-    get_dataset_from_dir_v2,
-)
+from DeepLearning.dataloader.dataloader import get_dataset_from_json_v2
 from DeepLearning.losses.losses import focal_loss
 from DeepLearning.models.custom_layers import (
     SpatialConcreteDropout,
@@ -127,6 +125,12 @@ class Config:
     learning_rate: float = 1e-7
     use_xla: bool = True
     log_every_n_batches: int = 1
+
+    new_labels_json: Path | None = None
+    new_images_dir: Path | None = None
+    warmup_steps: int = 500
+    decay_schedule: str = "half_life"
+    half_life: int = 1000
 
     val_labels_json: Path | None = None
     val_images_dir: Path | None = None
@@ -466,13 +470,32 @@ class Trainer:
             # remember whether we resumed
             self._did_restore = latest is not None
 
-        # Dataset (outside strategy is acceptable if it returns per-replica elements; adjust if using distribute)
-        self.dataset = self._build_training_dataset()
+        # Datasets for old and (optionally) new data
+        self.old_ds = self._make_dataset(self.cfg.labels_json, self.cfg.images_dir)
+        self.new_ds = (
+            self._make_dataset(self.cfg.new_labels_json, self.cfg.new_images_dir)
+            if self.cfg.new_labels_json
+            else None
+        )
+        self.old_iter = iter(self.old_ds.repeat())
+        self.new_iter = iter(self.new_ds.repeat()) if self.new_ds else None
+
+        self.old_size = count_samples_from_json(self.cfg.labels_json)
+        self.new_size = (
+            count_samples_from_json(self.cfg.new_labels_json)
+            if self.cfg.new_labels_json
+            else 0
+        )
+
         if self.cfg.num_patches == -1:
-            total_samples = count_samples_from_json(self.cfg.labels_json)
-            self.steps_per_epoch = max(1, (total_samples + self.cfg.batch_size - 1) // self.cfg.batch_size)
+            total_samples = self.old_size
+            self.steps_per_epoch = max(
+                1, (total_samples + self.cfg.batch_size - 1) // self.cfg.batch_size
+            )
         else:
-            self.steps_per_epoch = max(1, self.cfg.num_patches // self.cfg.batch_size)
+            self.steps_per_epoch = max(
+                1, self.cfg.num_patches // self.cfg.batch_size
+            )
 
         # Validation dataset and helper
         self.val_dataset = self._build_validation_dataset()
@@ -534,33 +557,44 @@ class Trainer:
                 return batch[1], batch[2]
         raise ValueError("Unexpected batch structure — expected (x,y) or (id,x,y).")
 
-    def _build_training_dataset(self) -> tf.data.Dataset:
-        if self.cfg.labels_json:
-            ds = (
-                get_dataset_from_json_v2(
-                    json_path=self.cfg.labels_json,
-                    images_dir=str(self.cfg.images_dir),
-                    batch_size=self.cfg.batch_size,
-                    repeat=True,
-                    transforms=self.transforms,
-                )
-                .shuffle(self.cfg.shuffle_buffer_size, seed=self.cfg.shuffle_seed, reshuffle_each_iteration=True)
-                .map(self._extract_xy, num_parallel_calls=tf.data.AUTOTUNE)
-                .prefetch(tf.data.AUTOTUNE)
+    def _make_dataset(self, labels_json: Path, images_dir: Path, repeat: bool = True) -> tf.data.Dataset:
+        ds = get_dataset_from_json_v2(
+            json_path=labels_json,
+            images_dir=str(images_dir),
+            batch_size=self.cfg.batch_size,
+            repeat=repeat,
+            transforms=self.transforms,
+        )
+        if repeat:
+            ds = ds.shuffle(
+                self.cfg.shuffle_buffer_size,
+                seed=self.cfg.shuffle_seed,
+                reshuffle_each_iteration=True,
             )
-        else:
-            ds = (
-                get_dataset_from_dir_v2(
-                    images_dir=str(self.cfg.images_dir),
-                    batch_size=self.cfg.batch_size,
-                    repeat=True,
-                    transforms=self.transforms,
-                )
-                .shuffle(self.cfg.shuffle_buffer_size, seed=self.cfg.shuffle_seed, reshuffle_each_iteration=True)
-                .map(self._extract_xy, num_parallel_calls=tf.data.AUTOTUNE)
-                .prefetch(tf.data.AUTOTUNE)
-            )
-        return ds
+        return (
+            ds.map(self._extract_xy, num_parallel_calls=tf.data.AUTOTUNE)
+            .prefetch(tf.data.AUTOTUNE)
+        )
+
+    def p_new(self, step: int) -> float:
+        """Probability of sampling from the new data at a given step."""
+        if not self.new_iter:
+            return 0.0
+        if step < self.cfg.warmup_steps:
+            return 1.0
+        r = self.cfg.batch_size * self.new_size / (
+            self.cfg.batch_size * self.old_size + 1e-8
+        )
+        if self.cfg.decay_schedule == "half_life":
+            tau = self.cfg.half_life
+            return max(r, 0.5 ** ((step - self.cfg.warmup_steps) / tau))
+        if self.cfg.decay_schedule == "linear":
+            t = max(0.0, 1 - (step - self.cfg.warmup_steps) / max(1, self.cfg.half_life))
+            return max(r, t)
+        if self.cfg.decay_schedule == "cosine":
+            t = min(1.0, (step - self.cfg.warmup_steps) / max(1, self.cfg.half_life))
+            return max(r, 0.5 * (1 + math.cos(math.pi * t)))
+        return r
 
     def _build_validation_dataset(self) -> tf.data.Dataset | None:
         if not self.cfg.val_labels_json:
@@ -679,20 +713,24 @@ class Trainer:
         prog = Progbar(self.steps_per_epoch, stateful_metrics=None, verbose=1, unit_name="step")
         running_loss = 0.0
 
-        for step, batch in enumerate(self.dataset.take(self.steps_per_epoch), start=1):
+        for idx in range(1, self.steps_per_epoch + 1):
+            step = int(self.global_step.numpy())
+            if tf.random.uniform(()) < self.p_new(step):
+                batch = next(self.new_iter)
+            else:
+                batch = next(self.old_iter)
             loss_tensor = self.compiled_train_step(batch)
             loss_value = float(loss_tensor.numpy())
             running_loss += loss_value
-            avg_loss = running_loss / step
+            avg_loss = running_loss / idx
 
-            # Increment global step (per batch)
             self.global_step.assign_add(1)
             gstep = int(self.global_step.numpy())
 
-            # Per-batch logging
             with self.tb_writer.as_default():
                 tf.summary.scalar("loss/batch", loss_value, step=gstep)
-            prog.update(step, values=[("loss", loss_value), ("avg_loss", avg_loss)])
+                tf.summary.scalar("sampling/p_new", self.p_new(step), step=step)
+            prog.update(idx, values=[("loss", loss_value), ("avg_loss", avg_loss)])
 
         # Epoch average logging using current global step
         with self.tb_writer.as_default():
@@ -910,8 +948,12 @@ class Trainer:
     # Debug / visualization helpers
     # ────────────────────────────────────────────────────────────────────
     def sample_batch(self):
-        """Return a *single* batch (x, y) from the training dataset for ad-hoc inspection."""
-        batch = next(iter(self.dataset))
+        """Return a *single* batch (x, y) sampled from the training streams."""
+        step = int(self.global_step.numpy())
+        if self.new_iter and tf.random.uniform(()) < self.p_new(step):
+            batch = next(self.new_iter)
+        else:
+            batch = next(self.old_iter)
         if isinstance(batch, (list, tuple)) and len(batch) == 3:
             _, x, y = batch
         elif isinstance(batch, (list, tuple)) and len(batch) == 2:
@@ -1085,6 +1127,16 @@ def parse_args(argv: Sequence[str] | None = None) -> Config:
     parser.add_argument("--learning_rate", type=float, default=1e-7)
     parser.add_argument("--no_xla", action="store_false", dest="use_xla", help="Disable XLA JIT.")
     parser.add_argument("--log_every_n_batches", type=int, default=1, help="Scalar logging frequency (in batches)")
+    parser.add_argument("--new_labels_json", type=Path, help="Annotation JSON for new data")
+    parser.add_argument("--new_images_dir", type=Path, help="Directory with new image patches")
+    parser.add_argument("--warmup_steps", type=int, default=500, help="Number of warm-up steps using only new data")
+    parser.add_argument(
+        "--decay_schedule",
+        type=str,
+        default="half_life",
+        help="Decay schedule for sampling probability",
+    )
+    parser.add_argument("--half_life", type=int, default=1000, help="Half-life parameter for exponential schedule")
     parser.add_argument("--val_labels_json", type=Path, help="Validation annotation JSON file")
     parser.add_argument("--val_images_dir", type=Path, help="Directory with validation image patches")
     parser.add_argument("--num_val_patches", type=int, default=-1, help="Number of validation patches per epoch")
