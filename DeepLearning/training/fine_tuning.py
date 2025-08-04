@@ -39,7 +39,7 @@ from tensorflow.keras.utils import Progbar
 # ────────────────────────────────────────────────────────────────────────────────
 # Project‑specific imports (assumed to exist in your environment)
 # ────────────────────────────────────────────────────────────────────────────────
-from DeepLearning.dataloader.dataloader import get_dataset_from_json_v2
+from DeepLearning.dataloader.dataloader import get_dataset_from_json_v2, get_dataset_from_dir_v2
 from DeepLearning.losses.losses import focal_loss
 from DeepLearning.models.custom_layers import (
     SpatialConcreteDropout,
@@ -893,6 +893,11 @@ class Trainer:
             tf.summary.scalar("val/weighted_f1", metrics["weighted_f1"], step=gstep)
             tf.summary.scalar("val/balanced_accuracy", metrics["balanced_accuracy"], step=gstep)
             tf.summary.scalar("val/kappa", metrics["kappa"], step=gstep)
+            tf.summary.scalar("baseline/best_accuracy", metrics["accuracy"], step=gstep)
+            tf.summary.scalar("baseline/best_macro_f1", metrics["macro_f1"], step=gstep)
+            tf.summary.scalar("baseline/best_weighted_f1", metrics["weighted_f1"], step=gstep)
+            tf.summary.scalar("baseline/best_balanced_accuracy", metrics["balanced_accuracy"], step=gstep)
+            tf.summary.scalar("baseline/best_kappa", metrics["kappa"], step=gstep)
             tf.summary.scalar("baseline/accuracy", metrics["accuracy"], step=gstep)
             tf.summary.scalar("baseline/macro_f1", metrics["macro_f1"], step=gstep)
             tf.summary.scalar("baseline/weighted_f1", metrics["weighted_f1"], step=gstep)
@@ -1129,7 +1134,7 @@ def parse_args(argv: Sequence[str] | None = None) -> Config:
     parser.add_argument("--log_every_n_batches", type=int, default=1, help="Scalar logging frequency (in batches)")
     parser.add_argument("--new_labels_json", type=Path, help="Annotation JSON for new data")
     parser.add_argument("--new_images_dir", type=Path, help="Directory with new image patches")
-    parser.add_argument("--warmup_steps", type=int, default=500, help="Number of warm-up steps using only new data")
+    parser.add_argument("--warmup_steps", type=int, default=512, help="Number of warm-up steps using only new data")
     parser.add_argument(
         "--decay_schedule",
         type=str,
