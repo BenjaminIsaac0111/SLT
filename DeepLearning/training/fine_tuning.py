@@ -903,6 +903,11 @@ class Trainer:
             tf.summary.scalar("baseline/weighted_f1", metrics["weighted_f1"], step=gstep)
             tf.summary.scalar("baseline/balanced_accuracy", metrics["balanced_accuracy"], step=gstep)
             tf.summary.scalar("baseline/kappa", metrics["kappa"], step=gstep)
+            tf.summary.scalar("baseline/best_accuracy", metrics["accuracy"], step=gstep)
+            tf.summary.scalar("baseline/best_macro_f1", metrics["macro_f1"], step=gstep)
+            tf.summary.scalar("baseline/best_weighted_f1", metrics["weighted_f1"], step=gstep)
+            tf.summary.scalar("baseline/best_balanced_accuracy", metrics["balanced_accuracy"], step=gstep)
+            tf.summary.scalar("baseline/best_kappa", metrics["kappa"], step=gstep)
             self.tb_writer.flush()
 
         tf.print(
