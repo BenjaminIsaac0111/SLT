@@ -21,12 +21,10 @@ Only public TF 2.10.1 APIs and project modules are used.
 from __future__ import annotations
 
 import argparse
-import json
 import math
 import shutil
 import signal
 import time
-from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -47,65 +45,13 @@ from DeepLearning.models.custom_layers import (
     GroupNormalization,
 )
 from DeepLearning.processing.transforms import Transforms
-
-
-# ────────────────────────────────────────────────────────────────────────────────
-# Helper utilities
-# ────────────────────────────────────────────────────────────────────────────────
-
-def set_memory_growth() -> None:
-    """Enable dynamic memory allocation on all visible GPUs."""
-    for gpu in tf.config.experimental.list_physical_devices("GPU"):
-        try:
-            tf.config.experimental.set_memory_growth(gpu, True)
-        except Exception as exc:
-            tf.print(f"[WARN] Could not set memory growth on {gpu}: {exc}")
-
-
-def compute_class_weights_from_json(json_path: Path, num_classes: int) -> list[float]:
-    """Inverse‑frequency class weights — safe for missing classes."""
-    with json_path.open() as fp:
-        annotations = json.load(fp)
-
-    counts = Counter(
-        m["class_id"]
-        for marks in annotations.values()
-        for m in marks
-        if 0 <= m["class_id"] < num_classes
-    )
-
-    total = sum(counts.values()) or 1  # avoid division by zero
-    return [
-        (total / (num_classes * counts[c])) if counts.get(c) else 0.0
-        for c in range(num_classes)
-    ]
-
-
-def xla_optional(jit: bool = True):
-    """Decorator that enables XLA if possible and logs a warning otherwise."""
-
-    def decorator(fn):  # type: ignore
-        if not jit:
-            tf.print(f"[INFO] JIT disabled for `{fn.__name__}`; using plain graph.")
-            return tf.function(fn, jit_compile=False)
-
-        try:
-            wrapped = tf.function(fn, jit_compile=True)
-            tf.print(f"[INFO] XLA enabled for `{fn.__name__}`")
-            return wrapped
-        except (tf.errors.InvalidArgumentError, ValueError) as exc:
-            tf.print(
-                f"[WARN] XLA failed for `{fn.__name__}` – falling back to eager graph: {exc}"
-            )
-            return tf.function(fn, jit_compile=False)
-
-    return decorator
-
-
-def count_samples_from_json(json_path: Path) -> int:
-    with open(json_path, "r") as f:
-        ann = json.load(f)
-    return len(ann)
+from DeepLearning.training.utils import (
+    compute_class_weights_from_json,
+    count_samples_from_json,
+    set_memory_growth,
+    xla_optional,
+)
+from DeepLearning.training.validator import Validator
 
 @dataclass
 class Config:
@@ -150,205 +96,6 @@ class Config:
             self.val_images_dir = self.images_dir
 
 
-# ────────────────────────────────────────────────────────────────────
-# Validation subsystem
-# ────────────────────────────────────────────────────────────────────
-
-class Validator:
-    """
-    Stateful validator accumulating a confusion matrix and computing
-    derived metrics. Supports XLA for the per-batch update step.
-    """
-
-    def __init__(self,
-                 model: tf.keras.Model,
-                 num_classes: int,
-                 strategy: tf.distribute.Strategy,
-                 use_xla: bool = True,
-                 window_size: int = 3,
-                 label_policy: str = "window_majority",  # options: center_pixel, window_majority, window_mean_argmax
-                 skip_empty: bool = True):
-        self.use_xla = use_xla
-        self.model = model
-        # 1) Create a small XLA‑compiled fn for model inference
-        if self.use_xla:
-            self._infer = tf.function(
-                lambda images: self.model(images, training=False),
-                jit_compile=True
-            )
-        else:
-            # fallback to normal graph or even eager if you like
-            self._infer = tf.function(
-                lambda images: self.model(images, training=False),
-                jit_compile=False
-            )
-
-        self.window_size = window_size
-        self.C = num_classes
-        self.strategy = strategy
-        self.label_policy = label_policy
-        self.skip_empty = skip_empty
-        # confusion matrix variable
-        with self.strategy.scope():
-            self.cm_var = tf.Variable(
-                tf.zeros((self.C, self.C), dtype=tf.int64),
-                trainable=False,
-                name="val_confusion_matrix"
-            )
-        self._build_batch_fn()
-
-    def reset(self):
-        self.cm_var.assign(tf.zeros_like(self.cm_var))
-
-    def _build_batch_fn(self):
-        ws = self.window_size
-
-        def extract_labels(one_hot):
-            """
-            Return (labels, valid_mask)
-            labels shape: (B,), int32
-            valid_mask: (B,), bool
-            """
-            # one_hot: (B,H,W,C)
-            if self.label_policy == "center_pixel":
-                h = tf.shape(one_hot)[1] // 2
-                w = tf.shape(one_hot)[2] // 2
-                center = one_hot[:, h:h + 1, w:w + 1, :]  # (B,1,1,C)
-                labels = tf.argmax(center, axis=-1, output_type=tf.int32)[:, 0, 0]
-                if self.skip_empty:
-                    valid = tf.reduce_max(center, axis=-1)[:, 0, 0] > 0.5
-                else:
-                    valid = tf.ones_like(labels, dtype=tf.bool)
-                return labels, valid
-
-            # window extraction
-            h = tf.shape(one_hot)[1] // 2
-            w = tf.shape(one_hot)[2] // 2
-            half = ws // 2
-            win = one_hot[:, h - half:h + half + 1, w - half:w + half + 1, :]  # (B,ws,ws,C)
-
-            if self.label_policy == "window_mean_argmax":
-                # Mean over window then argmax
-                win_mean = tf.reduce_mean(win, axis=(1, 2))  # (B,C)
-                labels = tf.argmax(win_mean, axis=-1, output_type=tf.int32)
-                if self.skip_empty:
-                    valid = tf.reduce_max(win_mean, axis=-1) > 0.5
-                else:
-                    valid = tf.ones_like(labels, dtype=tf.bool)
-                return labels, valid
-
-            # default: majority (mode) over discrete one-hot pixels
-            # Convert to int class indices for all fg pixels
-            pix_labels = tf.argmax(win, axis=-1, output_type=tf.int32)  # (B,ws,ws)
-            fg_mask = tf.reduce_max(win, axis=-1) > 0.5  # (B,ws,ws)
-            # Flatten
-            pix_labels_flat = tf.reshape(pix_labels, (tf.shape(pix_labels)[0], -1))
-            fg_flat = tf.reshape(fg_mask, (tf.shape(fg_mask)[0], -1))
-            # We will compute bincount per sample using segment_ids trick
-            B = tf.shape(pix_labels_flat)[0]
-            K = tf.shape(pix_labels_flat)[1]
-
-            # Masked values: set background class 0 where not fg (or optionally mark invalid)
-            # Gather only fg indices; if none fg -> invalid
-            # Gather all fg positions
-            # To avoid ragged loops: use boolean_mask then compute counts via unsorted segment sum.
-            idx = tf.where(fg_flat)  # (M,2) pairs (sample,row)
-            sample_ids = idx[:, 0]
-            label_vals = tf.gather_nd(pix_labels_flat, idx)  # (M,)
-            # One-hot those labels and segment-sum
-            one_hot_counts = tf.one_hot(label_vals, depth=self.C, dtype=tf.int32)  # (M,C)
-            counts = tf.math.unsorted_segment_sum(one_hot_counts, sample_ids, B)  # (B,C)
-            # Determine if a sample had any fg
-            had_fg = tf.reduce_any(fg_flat, axis=1)
-            # Mode
-            labels = tf.argmax(counts, axis=-1, output_type=tf.int32)
-            return labels, had_fg if self.skip_empty else tf.ones_like(labels, tf.bool)
-
-        def batch_confusion(y_true_onehot, images):
-            # images used only for forward pass
-            logits = self._infer(images)  # (B,H,W,C)
-            # Prediction window match training window logic: same center window
-            h = tf.shape(logits)[1] // 2
-            w = tf.shape(logits)[2] // 2
-            half = ws // 2
-            win_pred = logits[:, h - half:h + half + 1, w - half:w + half + 1, :]  # (B,ws,ws,C)
-            win_pred_mean = tf.reduce_mean(win_pred, axis=(1, 2))  # (B,C)
-            pred_labels = tf.argmax(win_pred_mean, axis=-1, output_type=tf.int32)  # (B,)
-
-            true_labels, valid_mask = extract_labels(y_true_onehot)
-            true_labels = tf.boolean_mask(true_labels, valid_mask)
-            pred_labels = tf.boolean_mask(pred_labels, valid_mask)
-
-            # If after masking empty
-            def empty_case():
-                return tf.zeros((self.C, self.C), dtype=tf.int64)
-
-            def non_empty_case():
-                # Confusion matrix via bincount of (true * C + pred)
-                combined = true_labels * self.C + pred_labels
-                flat_counts = tf.math.bincount(
-                    combined,
-                    minlength=self.C * self.C,
-                    maxlength=self.C * self.C,
-                    dtype=tf.int64
-                )
-                return tf.reshape(flat_counts, (self.C, self.C))
-
-            return tf.cond(tf.size(true_labels) > 0, non_empty_case, empty_case)
-
-        # Compile per-batch update
-        @tf.function(jit_compile=False)
-        def update_step(images, one_hot):
-            batch_cm = batch_confusion(one_hot, images)
-            self.cm_var.assign_add(batch_cm)
-
-        self._update_step = update_step
-
-    def update(self, images, one_hot):
-        """
-        Accumulate confusion matrix for a batch. Handles distribution.
-        """
-        # If distributed, run on replicas
-        if isinstance(self.strategy, tf.distribute.Strategy) and \
-                not isinstance(self.strategy, tf.distribute.OneDeviceStrategy):
-            def replica_fn(imgs, y):
-                self._update_step(imgs, y)
-
-            self.strategy.run(replica_fn, args=(images, one_hot))
-        else:
-            self._update_step(images, one_hot)
-
-    def result(self):
-        cm = tf.cast(self.cm_var.read_value(), tf.float32)  # (C,C)
-        tp = tf.linalg.tensor_diag_part(cm)
-        pred_pos = tf.reduce_sum(cm, axis=0)
-        actual_pos = tf.reduce_sum(cm, axis=1)
-        precision = tf.math.divide_no_nan(tp, pred_pos)
-        recall = tf.math.divide_no_nan(tp, actual_pos)
-        f1 = tf.math.divide_no_nan(2.0 * precision * recall, precision + recall)
-        accuracy = tf.math.divide_no_nan(tf.reduce_sum(tp), tf.reduce_sum(cm))
-        support = actual_pos
-        macro_f1 = tf.reduce_mean(f1)
-        weighted_f1 = tf.math.divide_no_nan(tf.reduce_sum(f1 * support), tf.reduce_sum(support))
-        balanced_accuracy = tf.reduce_mean(recall)
-        total = tf.reduce_sum(cm)
-        pe = tf.reduce_sum(pred_pos * actual_pos) / (total * total)
-        po = tf.reduce_sum(tp) / total
-        kappa = tf.math.divide_no_nan(po - pe, 1.0 - pe)
-        return {
-            "confusion_matrix": tf.cast(cm, tf.int32),
-            "precision": precision,
-            "recall": recall,
-            "f1": f1,
-            "accuracy": accuracy,
-            "macro_f1": macro_f1,
-            "weighted_f1": weighted_f1,
-            "balanced_accuracy": balanced_accuracy,
-            "kappa": kappa,
-            "support": support,
-        }
-
-
 # ────────────────────────────────────────────────────────────────────────────────
 # Trainer encapsulating workflow
 # ────────────────────────────────────────────────────────────────────────────────
@@ -356,18 +103,6 @@ class Validator:
 class Trainer:
     def __init__(self, cfg: Config):
         self.cfg = cfg
-        self.tab10 = [
-            (0.12156862745098039, 0.4666666666666667, 0.7058823529411765),
-            (1.0, 0.4980392156862745, 0.054901960784313725),
-            (0.17254901960784313, 0.6274509803921569, 0.17254901960784313),
-            (0.8392156862745098, 0.15294117647058825, 0.1568627450980392),
-            (0.5803921568627451, 0.403921568627451, 0.7411764705882353),
-            (0.5490196078431373, 0.33725490196078434, 0.29411764705882354),
-            (0.8941176470588236, 0.4666666666666667, 0.7607843137254902),
-            (0.4980392156862745, 0.4980392156862745, 0.4980392156862745),
-            (0.7372549019607844, 0.7411764705882353, 0.13333333333333333),
-            (0.09019607843137255, 0.7450980392156863, 0.8117647058823529),
-        ]
 
         set_memory_growth()
         mixed_precision.set_global_policy("mixed_float16")
@@ -953,126 +688,6 @@ class Trainer:
         self._checkpoint(epoch=-1)
         self.tb_writer.flush()
         tf.print("[INFO] Interrupt handling complete; exiting after current step.")
-
-    # ────────────────────────────────────────────────────────────────────
-    # Debug / visualization helpers
-    # ────────────────────────────────────────────────────────────────────
-    def sample_batch(self):
-        """Return a *single* batch (x, y) sampled from the training streams."""
-        step = int(self.global_step.numpy())
-        if self.new_iter and tf.random.uniform(()) < self.p_new(step):
-            batch = next(self.new_iter)
-        else:
-            batch = next(self.old_iter)
-        if isinstance(batch, (list, tuple)) and len(batch) == 3:
-            _, x, y = batch
-        elif isinstance(batch, (list, tuple)) and len(batch) == 2:
-            x, y = batch
-        else:
-            raise ValueError("Unexpected batch structure fetched from dataset.")
-        return x, y
-
-    def visualize_sample(self, save_path: str | None = None, class_colors: list | None = None, alpha: float = 0.5,
-                         log_to_tb: bool = False):
-        """Visualize first image/mask prediction pair.
-
-        Handles ground-truth masks that may be one-hot (H, W, C) or single-channel (H, W).
-        Also robust to stray last-dimension of size 1. Casts all images to float32 for matplotlib.
-
-        Parameters
-        ----------
-        save_path : str | None
-            If provided, saves the composite figure (PNG). Otherwise displays.
-        class_colors : list | None
-            Optional list/array of RGB triples in [0,1] of length num_classes.
-        alpha : float
-            Blend between input image and predicted mask for overlay panel.
-        log_to_tb : bool
-            If True, also logs the composite panel as a TensorBoard image summary.
-        """
-        import numpy as np
-        import matplotlib.pyplot as plt
-        import tensorflow as tf
-        import io
-
-        x, y = self.sample_batch()
-        x0 = x[0:1]
-        y0 = y[0]
-
-        # Normalize ground truth shape to (H, W)
-        if y0.ndim == 3:
-            if y0.shape[-1] == self.cfg.num_classes:  # one-hot
-                y0 = tf.argmax(y0, axis=-1)
-            elif y0.shape[-1] == 1:  # redundant channel
-                y0 = tf.squeeze(y0, axis=-1)
-        y0 = tf.cast(y0, tf.int32)
-
-        logits = self.model(x0, training=False)
-        if logits.shape[-1] != self.cfg.num_classes:
-            raise ValueError(f"Model output last dim {logits.shape[-1]} != num_classes {self.cfg.num_classes}")
-        pred = tf.argmax(logits[0], axis=-1)
-        pred = tf.cast(pred, tf.int32)
-
-        num_classes = self.cfg.num_classes
-        if class_colors is None:
-            rng = np.random.default_rng(42)
-            class_colors = rng.uniform(0.15, 0.95, size=(num_classes, 3))
-            class_colors[0] = [0, 0, 0]
-        class_colors = np.asarray(class_colors, dtype=np.float32)
-
-        def colorize(mask_tensor):
-            mask_np = mask_tensor.numpy() if isinstance(mask_tensor, tf.Tensor) else mask_tensor
-            if mask_np.ndim == 3:
-                if mask_np.shape[-1] == 1:
-                    mask_np = mask_np[..., 0]
-                elif mask_np.shape[-1] == num_classes:
-                    mask_np = np.argmax(mask_np, axis=-1)
-            h, w = mask_np.shape
-            out = np.zeros((h, w, 3), dtype=np.float32)
-            for c in range(num_classes):
-                out[mask_np == c] = class_colors[c]
-            return out
-
-        pred_color = colorize(pred)
-        gt_color = colorize(y0)
-
-        x_img = x0[0].numpy()
-        if x_img.dtype == np.float16:
-            x_img = x_img.astype(np.float32)
-        if x_img.dtype != np.uint8:
-            x_img = (x_img - x_img.min()) / (x_img.ptp() + 1e-8)
-        if x_img.shape[-1] == 1:
-            x_img = np.repeat(x_img, 3, axis=-1)
-        x_img = x_img.astype(np.float32)
-        overlay = ((1 - alpha) * x_img + alpha * pred_color).astype(np.float32)
-
-        fig, axes = plt.subplots(1, 4, figsize=(16, 8))
-        panels = [("Input", x_img), ("Ground Truth", gt_color), ("Prediction", pred_color), ("Overlay", overlay)]
-        for ax, (title, img) in zip(axes, panels):
-            ax.set_title(title)
-            ax.imshow(img)
-            ax.axis("off")
-        plt.tight_layout()
-
-        if save_path:
-            fig.savefig(save_path, dpi=180)
-            tf.print(f"[DEBUG] Saved visualization to {save_path}")
-        if log_to_tb:
-            buf = io.BytesIO()
-            fig.savefig(buf, format="png", dpi=120)
-            buf.seek(0)
-            image = tf.image.decode_png(buf.getvalue(), channels=4)
-            image = tf.expand_dims(image, 0)
-            with self.tb_writer.as_default():
-                tf.summary.image("debug/sample_panel", image, step=int(self.global_step.numpy()))
-            self.tb_writer.flush()
-            tf.print("[DEBUG] Logged sample panel to TensorBoard.")
-        if not save_path:
-            plt.show()
-            plt.close(fig)
-            tf.print(f"[DEBUG] Saved visualization to {save_path}")
-        else:
-            plt.show()
 
     def debug_save(self, step: int):
         import traceback, pathlib
