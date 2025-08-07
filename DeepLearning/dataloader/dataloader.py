@@ -332,7 +332,8 @@ def get_dataset_from_json_v2(
 
     ds = ds.map(_process, num_parallel_calls=tf.data.experimental.AUTOTUNE)
 
-    ds = ds.batch(batch_size, drop_remainder=True)
+    if batch_size is not None:
+        ds = ds.batch(batch_size, drop_remainder=True)
 
     if transforms:
         def _transform_fn(imgs, masks):

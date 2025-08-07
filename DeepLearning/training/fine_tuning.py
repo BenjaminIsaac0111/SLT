@@ -53,6 +53,7 @@ from DeepLearning.training.utils import (
 )
 from DeepLearning.training.validator import Validator
 
+
 @dataclass
 class Config:
     """Aggregated hyper‑parameters and paths."""
@@ -292,24 +293,46 @@ class Trainer:
                 return batch[1], batch[2]
         raise ValueError("Unexpected batch structure — expected (x,y) or (id,x,y).")
 
-    def _make_dataset(self, labels_json: Path, images_dir: Path, repeat: bool = True) -> tf.data.Dataset:
-        ds = get_dataset_from_json_v2(
+    def _make_dataset(
+            self,
+            labels_json: Path,
+            images_dir: Path,
+            *,
+            repeat: bool = True
+    ) -> tf.data.Dataset:
+        # 1 ── Build a *finite* dataset first (no repeat, no batch)
+        base = get_dataset_from_json_v2(
             json_path=labels_json,
             images_dir=str(images_dir),
-            batch_size=self.cfg.batch_size,
-            repeat=repeat,
-            transforms=self.transforms,
+            batch_size=None,
+            repeat=False,  # important: keep it finite for shuffling
+            transforms=None,
         )
+
+        # 2 ── Shuffle ONCE PER EPOCH
+        ds = base.shuffle(
+            self.cfg.shuffle_buffer_size,
+            seed=self.cfg.shuffle_seed,
+            reshuffle_each_iteration=True,  # now it actually triggers
+        )
+
+        # 3 ── Repeat *after* shuffle so the iterator never terminates
         if repeat:
-            ds = ds.shuffle(
-                self.cfg.shuffle_buffer_size,
-                seed=self.cfg.shuffle_seed,
-                reshuffle_each_iteration=True,
-            )
-        return (
-            ds.map(self._extract_xy, num_parallel_calls=tf.data.AUTOTUNE)
+            ds = ds.repeat()
+
+        # 4 ── Batch and map; everything downstream sees the same API
+        ds = (
+            ds.batch(self.cfg.batch_size, drop_remainder=False)
+            .map(self._extract_xy, num_parallel_calls=tf.data.AUTOTUNE)
             .prefetch(tf.data.AUTOTUNE)
         )
+
+        def _transform_fn(imgs, masks):
+            imgs, masks = self.transforms(imgs, masks)
+            return imgs, masks
+
+        ds = ds.map(_transform_fn, num_parallel_calls=tf.data.experimental.AUTOTUNE)
+        return ds
 
     def p_new(self, step: int) -> float:
         """Probability of sampling from the new data at a given step."""
