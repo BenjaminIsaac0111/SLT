@@ -7,12 +7,11 @@ core training loop to avoid polluting the main Trainer class.
 
 from __future__ import annotations
 
+import io
 from typing import Sequence, Tuple
 
-import io
-
-import numpy as np
 import matplotlib.pyplot as plt
+import numpy as np
 import tensorflow as tf
 
 
@@ -147,55 +146,77 @@ def visualize_sample(
         plt.show()
 
 
-def confusion_matrix_to_image(cm_percent: tf.Tensor, class_names: Sequence[str] | None = None) -> tf.Tensor:
-    """Convert a percentage confusion matrix to a TensorBoard image.
+def confusion_matrix_to_image(cm_percent: tf.Tensor,
+                              class_names: Sequence[str] | None = None
+                              ) -> tf.Tensor:
+    """Convert a percentage confusion matrix to a TensorBoard image
+    with clear, readable class labels.
 
     Parameters
     ----------
-    cm_percent:
-        Matrix of shape ``(C, C)`` containing percentage values.
-    class_names:
-        Optional sequence of class labels used for axis tick labels.
+    cm_percent : tf.Tensor or array-like, shape (C, C)
+        Matrix of percentage values (0–100).
+    class_names : Sequence[str], optional
+        Labels for axes ticks.
 
     Returns
     -------
-    tf.Tensor
-        Image tensor of shape ``(1, H, W, 4)`` suitable for ``tf.summary.image``.
+    tf.Tensor, shape (1, H, W, 4)
+        RGBA image suitable for tf.summary.image.
     """
-
+    # --- prepare data
     cm_np = cm_percent.numpy() if isinstance(cm_percent, tf.Tensor) else np.asarray(cm_percent)
     num_classes = cm_np.shape[0]
+    labels = class_names if class_names is not None else [str(i) for i in range(num_classes)]
 
-    fig, ax = plt.subplots(figsize=(3 + 0.5 * num_classes, 3 + 0.5 * num_classes))
-    im = ax.imshow(cm_np, vmin=0, vmax=100, cmap="viridis")
-    ax.set_xlabel("Predicted label")
-    ax.set_ylabel("True label")
+    # --- figure & axes
+    fig, ax = plt.subplots(
+        figsize=(3 + 0.5 * num_classes, 3 + 0.5 * num_classes),
+    )
+    im = ax.imshow(cm_np, vmin=0, vmax=100, cmap="viridis")  # ensure viridis
+
+    # --- ticks & labels
     ax.set_xticks(range(num_classes))
     ax.set_yticks(range(num_classes))
-    labels = class_names if class_names is not None else range(num_classes)
-    ax.set_xticklabels(labels)
-    ax.set_yticklabels(labels)
-    ax.tick_params(top=True, bottom=False, labeltop=True, labelbottom=False)
 
-    fmt = ".1f"
+    ax.tick_params(
+        top=False, bottom=True,  # draw ticks at bottom only
+        labeltop=False, labelbottom=True
+    )
+
+    # now apply the rotated labels at the bottom, anchored on the tick
+    ax.set_xticklabels(
+        labels,
+        rotation=45,
+        rotation_mode="anchor",
+        ha="right",
+        fontsize=10
+    )
+    ax.set_yticklabels(labels, fontsize=10)
+
+    # --- annotations
     thresh = cm_np.max() / 2.0
     for i in range(num_classes):
         for j in range(num_classes):
             ax.text(
-                j,
-                i,
-                format(cm_np[i, j], fmt),
-                ha="center",
-                va="center",
+                j, i,
+                f"{cm_np[i, j]:.1f}",
+                ha="center", va="center",
                 color="white" if cm_np[i, j] > thresh else "black",
+                fontsize=9
             )
 
+    # --- colorbar
     cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    cbar.set_label("Percent")
+    cbar.set_label("Percent", fontsize=12)
+
+    # --- layout adjustments
+    fig.subplots_adjust(bottom=0.2, left=0.2)
     fig.tight_layout()
 
+    # --- render to tensor
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=180)
+    fig.savefig(buf, format="png", dpi=180, bbox_inches="tight")
     plt.close(fig)
     buf.seek(0)
     image = tf.image.decode_png(buf.getvalue(), channels=4)
