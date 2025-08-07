@@ -1,6 +1,13 @@
 import tensorflow as tf
 from tensorflow.keras import mixed_precision
-from tensorflow.keras.layers.experimental import preprocessing
+
+try:  # TensorFlow >= 2.12 exposes preprocessing layers at top level
+    from tensorflow.keras.layers import RandomFlip, RandomRotation, RandomTranslation
+except ImportError:  # pragma: no cover - fallback for older TF
+    from tensorflow.keras.layers.experimental import preprocessing
+    RandomFlip = preprocessing.RandomFlip
+    RandomRotation = preprocessing.RandomRotation
+    RandomTranslation = preprocessing.RandomTranslation
 
 
 class Transforms(tf.keras.layers.Layer):
@@ -17,10 +24,9 @@ class Transforms(tf.keras.layers.Layer):
         # Geometric transforms. Make sure these are applied to ground truth masks.
         self.transforms = tf.keras.Sequential(
             [
-                preprocessing.RandomFlip(seed=seed),
-                preprocessing.RandomRotation(factor=(-0.25, -0.25), fill_mode="reflect", interpolation="nearest"),
-                preprocessing.RandomTranslation(height_factor=0.1, width_factor=0.1,
-                                                fill_mode="reflect", interpolation="nearest")
+                RandomFlip(seed=seed),
+                RandomRotation(factor=(-0.25, -0.25), fill_mode="reflect", interpolation="nearest"),
+                RandomTranslation(height_factor=0.1, width_factor=0.1, fill_mode="reflect", interpolation="nearest"),
             ]
         )
         # Transforms that should not affect the ground truth mask.
