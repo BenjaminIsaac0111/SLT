@@ -55,6 +55,19 @@ from DeepLearning.training.validator import Validator
 from DeepLearning.training.visualization import confusion_matrix_to_image
 
 
+CLASS_NAMES = [
+    "Non-Informative",  # 0
+    "Tumour",  # 1
+    "Stroma",  # 2
+    "Necrosis",  # 3
+    "Vessel",  # 4
+    "Inflammation",  # 5
+    "Tumour-Lumen",  # 6
+    "Mucin",  # 7
+    "Muscle",  # 8
+]
+
+
 @dataclass
 class Config:
     """Aggregated hyper‑parameters and paths."""
@@ -516,7 +529,7 @@ class Trainer:
         cm = tf.cast(metrics["confusion_matrix"], tf.float32)  # shape (C, C)
         row_totals = tf.reduce_sum(cm, axis=1, keepdims=True)
         cm_percent = tf.math.divide_no_nan(cm * 100.0, row_totals)
-        cm_image = confusion_matrix_to_image(cm_percent)
+        cm_image = confusion_matrix_to_image(cm_percent, CLASS_NAMES)
 
         # Write percentage confusion matrix to TensorBoard and flush
         with self.tb_writer.as_default():
