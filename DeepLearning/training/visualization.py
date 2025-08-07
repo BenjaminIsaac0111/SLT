@@ -147,4 +147,59 @@ def visualize_sample(
         plt.show()
 
 
-__all__ = ["sample_batch", "visualize_sample"]
+def confusion_matrix_to_image(cm_percent: tf.Tensor, class_names: Sequence[str] | None = None) -> tf.Tensor:
+    """Convert a percentage confusion matrix to a TensorBoard image.
+
+    Parameters
+    ----------
+    cm_percent:
+        Matrix of shape ``(C, C)`` containing percentage values.
+    class_names:
+        Optional sequence of class labels used for axis tick labels.
+
+    Returns
+    -------
+    tf.Tensor
+        Image tensor of shape ``(1, H, W, 4)`` suitable for ``tf.summary.image``.
+    """
+
+    cm_np = cm_percent.numpy() if isinstance(cm_percent, tf.Tensor) else np.asarray(cm_percent)
+    num_classes = cm_np.shape[0]
+
+    fig, ax = plt.subplots(figsize=(3 + 0.5 * num_classes, 3 + 0.5 * num_classes))
+    im = ax.imshow(cm_np, vmin=0, vmax=100, cmap="viridis")
+    ax.set_xlabel("Predicted label")
+    ax.set_ylabel("True label")
+    ax.set_xticks(range(num_classes))
+    ax.set_yticks(range(num_classes))
+    labels = class_names if class_names is not None else range(num_classes)
+    ax.set_xticklabels(labels)
+    ax.set_yticklabels(labels)
+    ax.tick_params(top=True, bottom=False, labeltop=True, labelbottom=False)
+
+    fmt = ".1f"
+    thresh = cm_np.max() / 2.0
+    for i in range(num_classes):
+        for j in range(num_classes):
+            ax.text(
+                j,
+                i,
+                format(cm_np[i, j], fmt),
+                ha="center",
+                va="center",
+                color="white" if cm_np[i, j] > thresh else "black",
+            )
+
+    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label("Percent")
+    fig.tight_layout()
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=180)
+    plt.close(fig)
+    buf.seek(0)
+    image = tf.image.decode_png(buf.getvalue(), channels=4)
+    return tf.expand_dims(image, 0)
+
+
+__all__ = ["sample_batch", "visualize_sample", "confusion_matrix_to_image"]

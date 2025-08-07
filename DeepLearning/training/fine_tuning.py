@@ -52,6 +52,7 @@ from DeepLearning.training.utils import (
     xla_optional,
 )
 from DeepLearning.training.validator import Validator
+from DeepLearning.training.visualization import confusion_matrix_to_image
 
 
 @dataclass
@@ -511,21 +512,15 @@ class Trainer:
         metrics = self.validator.result()
         gstep = int(self.global_step.numpy())
 
-        # 1. Grab raw counts and cast to float
+        # Convert confusion matrix to percentage values for interpretability
         cm = tf.cast(metrics["confusion_matrix"], tf.float32)  # shape (C, C)
-        cm_raw_img = tf.reshape(cm, [1, self.cfg.num_classes, self.cfg.num_classes, 1])
-        with self.tb_writer.as_default():
-            tf.summary.image("val/confusion_matrix_raw", cm_raw_img, step=gstep)
-            self.tb_writer.flush()
-
-        # 2. Convert to row percentages for better interpretability
         row_totals = tf.reduce_sum(cm, axis=1, keepdims=True)
         cm_percent = tf.math.divide_no_nan(cm * 100.0, row_totals)
-        cm_img = tf.reshape(cm_percent / 100.0, [1, self.cfg.num_classes, self.cfg.num_classes, 1])
+        cm_image = confusion_matrix_to_image(cm_percent)
 
-        # 3. Write to TensorBoard and flush
+        # Write percentage confusion matrix to TensorBoard and flush
         with self.tb_writer.as_default():
-            tf.summary.image("val/confusion_matrix_percent", cm_img, step=gstep)
+            tf.summary.image("val/confusion_matrix", cm_image, step=gstep)
             self.tb_writer.flush()
 
 
