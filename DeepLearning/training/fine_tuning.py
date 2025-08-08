@@ -92,6 +92,8 @@ class Config:
     warmup_steps: int = 500
     decay_schedule: str = "half_life"
     half_life: int = 1000
+    focal_gamma: float = 2.0
+    prior_ema: float = 0.01
 
     val_labels_json: Path | None = None
     val_images_dir: Path | None = None
@@ -149,6 +151,12 @@ class Trainer:
                 0, trainable=False, dtype=tf.int64, name="epoch"
             )
             self.rng = tf.random.Generator.from_seed(self.cfg.shuffle_seed)
+            self.class_prior = tf.Variable(
+                tf.fill([self.cfg.num_classes], 1.0 / self.cfg.num_classes),
+                trainable=False,
+                dtype=tf.float32,
+                name="class_prior",
+            )
             self.compiled_train_step = self._build_train_step()
 
             # Persisted best‐so‐far metrics:
@@ -202,6 +210,7 @@ class Trainer:
                 baseline_val_weighted_f1=self.baseline_val_weighted_f1,
                 baseline_val_kappa=self.baseline_val_kappa,
                 rng=self.rng,
+                class_prior=self.class_prior,
             )
             self.ckpt_manager = tf.train.CheckpointManager(
                 self.ckpt,
@@ -411,11 +420,15 @@ class Trainer:
 
     def _build_train_step(self):
         @xla_optional(self.cfg.use_xla)
-        def _train_step(batch, alpha_t):
+        def _train_step(batch, alpha_t, prior_t, gamma_t, lambda_t):
             x, y = batch
             with tf.GradientTape() as tape:
                 logits = self.model(x, training=True)
-                loss = focal_loss(y_true=y, y_pred=logits, alpha_weights=alpha_t)
+                logits += lambda_t * tf.math.log(1.0 / tf.maximum(prior_t, 1e-8))
+                probs = tf.nn.softmax(logits)
+                loss = focal_loss(
+                    y_true=y, y_pred=probs, gamma=gamma_t, alpha_weights=alpha_t
+                )
                 scaled_loss = self.optimizer.get_scaled_loss(loss)
             scaled_grads = tape.gradient(scaled_loss, self.model.trainable_weights)
             grads = self.optimizer.get_unscaled_gradients(scaled_grads)
@@ -505,16 +518,40 @@ class Trainer:
             else:
                 batch = next(self.old_iter)
 
+            x, y = batch
+            counts = tf.reduce_sum(y, axis=[0, 1, 2])
+            batch_hist = counts / tf.maximum(tf.reduce_sum(counts), 1.0)
+            batch_alpha = tf.reduce_sum(batch_hist) / tf.maximum(batch_hist, 1e-8)
+            batch_alpha = tf.minimum(batch_alpha, 10.0 * tf.reduce_mean(batch_alpha))
+
             p_t = tf.convert_to_tensor(p, dtype=tf.float32)
             mix_hist = p_t * self.new_hist + (1.0 - p_t) * self.old_hist
-            alpha_t = tf.reduce_sum(mix_hist) / tf.maximum(mix_hist, 1e-8)
-            alpha_t = tf.minimum(alpha_t, 10.0 * tf.reduce_mean(alpha_t))
+            dataset_alpha = tf.reduce_sum(mix_hist) / tf.maximum(mix_hist, 1e-8)
+            dataset_alpha = tf.minimum(dataset_alpha, 10.0 * tf.reduce_mean(dataset_alpha))
 
-            loss_tensor = self.compiled_train_step(batch, alpha_t)
+            alpha_combined = 0.5 * dataset_alpha + 0.5 * batch_alpha
+            ramp = tf.minimum(
+                1.0,
+                tf.cast(self.global_step, tf.float32) / float(self.cfg.warmup_steps),
+            )
+            alpha_t = (1.0 - ramp) * tf.ones_like(alpha_combined) + ramp * alpha_combined
+            gamma_t = ramp * self.cfg.focal_gamma
+            lambda_t = ramp
+            prior_t = tf.identity(self.class_prior)
+
+            loss_tensor = self.compiled_train_step(
+                (x, y), alpha_t, prior_t, gamma_t, lambda_t
+            )
             loss_value = float(loss_tensor.numpy())
             running_loss += loss_value
             avg_loss = running_loss / idx
             alpha_last = alpha_t
+
+            batch_prior = batch_hist
+            self.class_prior.assign(
+                (1.0 - self.cfg.prior_ema) * self.class_prior
+                + self.cfg.prior_ema * batch_prior
+            )
 
             self.global_step.assign_add(1)
             gstep = int(self.global_step.numpy())
