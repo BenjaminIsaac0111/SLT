@@ -7,7 +7,7 @@
 #SBATCH --time=14:00:00
 #SBATCH --output=./logs/%x_%A_%a.out
 #SBATCH --error=./logs/%x_%A_%a.err
-#SBATCH --array=0-7
+#SBATCH --array=0-23
 
 FOLD="f1"
 REGIME="BALD"
@@ -30,12 +30,18 @@ WARMUP_STEPS=1024
 DECAY_SCHEDULE=half_life
 HALF_LIFE=20480
 
-# Decode strategy toggles from the array index (bit mask)
-DRW=$(( (SLURM_ARRAY_TASK_ID >> 2) & 1 ))
-LOGIT=$(( (SLURM_ARRAY_TASK_ID >> 1) & 1 ))
-BATCH_ALPHA=$(( SLURM_ARRAY_TASK_ID & 1 ))
+# Map array index to strategy toggles and random seed
+SEEDS=(11 22 33)
+SEED_IDX=$(( SLURM_ARRAY_TASK_ID / 8 ))
+STRAT_IDX=$(( SLURM_ARRAY_TASK_ID % 8 ))
+SEED=${SEEDS[$SEED_IDX]}
 
-MODEL_NAME="${FOLD}_${REGIME}_drw${DRW}_logit${LOGIT}_balpha${BATCH_ALPHA}_t${HALF_LIFE}"
+# Decode strategy toggles from the strategy index (bit mask)
+DRW=$(( (STRAT_IDX >> 2) & 1 ))
+LOGIT=$(( (STRAT_IDX >> 1) & 1 ))
+BATCH_ALPHA=$(( STRAT_IDX & 1 ))
+
+MODEL_NAME="${FOLD}_${REGIME}_drw${DRW}_logit${LOGIT}_balpha${BATCH_ALPHA}_t${HALF_LIFE}_s${SEED}"
 
 # Build optional arguments based on strategy toggles
 EXTRA_ARGS=""
@@ -53,7 +59,7 @@ conda activate tf215gpu
 
 export PYTHONPATH="/users/scbiw/DeepLearning/Attention-UNET:$PYTHONPATH"
 echo "Host: $(hostname)"
-echo "Task $SLURM_ARRAY_TASK_ID strategies: drw=$DRW logit=$LOGIT batch_alpha=$BATCH_ALPHA"
+echo "Task $SLURM_ARRAY_TASK_ID seed=$SEED strategies: drw=$DRW logit=$LOGIT batch_alpha=$BATCH_ALPHA"
 nvidia-smi
 
 python /users/scbiw/DeepLearning/Attention-UNET/DeepLearning/training/fine_tuning.py \
@@ -75,4 +81,5 @@ python /users/scbiw/DeepLearning/Attention-UNET/DeepLearning/training/fine_tunin
   --validate_every    1 \
   --calibrate_every   0 \
   --shuffle_buffer_size 1024 \
+  --shuffle_seed      "$SEED" \
   --epochs 128 $EXTRA_ARGS
