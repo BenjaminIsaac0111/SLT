@@ -7,7 +7,7 @@
 #SBATCH --time=14:00:00
 #SBATCH --output=./logs/%x_%A_%a.out
 #SBATCH --error=./logs/%x_%A_%a.err
-#SBATCH --array=0-8
+#SBATCH --array=0-7
 
 FOLD="f1"
 REGIME="BALD"
@@ -27,17 +27,21 @@ NUM_VAL_PATCHES=-1
 LEARNING_RATE=1e-7
 WARMUP_STEPS=1024
 
-SCHEDULES=(half_life linear cosine)
-DECAY_RATES=(10240 20480 40860)
+DECAY_SCHEDULE=half_life
+HALF_LIFE=20480
 
-NUM_RATES=${#DECAY_RATES[@]}
-SCH_IDX=$(( SLURM_ARRAY_TASK_ID / NUM_RATES ))
-RATE_IDX=$(( SLURM_ARRAY_TASK_ID % NUM_RATES ))
+# Decode strategy toggles from the array index (bit mask)
+DRW=$(( (SLURM_ARRAY_TASK_ID >> 2) & 1 ))
+LOGIT=$(( (SLURM_ARRAY_TASK_ID >> 1) & 1 ))
+BATCH_ALPHA=$(( SLURM_ARRAY_TASK_ID & 1 ))
 
-DECAY_SCHEDULE=${SCHEDULES[$SCH_IDX]}
-HALF_LIFE=${DECAY_RATES[$RATE_IDX]}
+MODEL_NAME="${FOLD}_${REGIME}_drw${DRW}_logit${LOGIT}_balpha${BATCH_ALPHA}_t${HALF_LIFE}"
 
-MODEL_NAME="${FOLD}_${REGIME}_${DECAY_SCHEDULE}_t${HALF_LIFE}_run_w_cm"
+# Build optional arguments based on strategy toggles
+EXTRA_ARGS=""
+if [[ $DRW -eq 1 ]]; then EXTRA_ARGS+=" --use_drw"; fi
+if [[ $LOGIT -eq 1 ]]; then EXTRA_ARGS+=" --use_logit_adjustment"; fi
+if [[ $BATCH_ALPHA -eq 1 ]]; then EXTRA_ARGS+=" --use_batch_alpha"; fi
 
 for f in "$LABELS_JSON" "$VAL_LABELS_JSON" "$INITIAL_WEIGHTS"; do
   [[ -f "$f" ]] || { echo "Missing $f"; exit 1; }
@@ -49,7 +53,7 @@ conda activate tf215gpu
 
 export PYTHONPATH="/users/scbiw/DeepLearning/Attention-UNET:$PYTHONPATH"
 echo "Host: $(hostname)"
-echo "Task $SLURM_ARRAY_TASK_ID ? schedule=$DECAY_SCHEDULE, half_life=$HALF_LIFE"
+echo "Task $SLURM_ARRAY_TASK_ID strategies: drw=$DRW logit=$LOGIT batch_alpha=$BATCH_ALPHA"
 nvidia-smi
 
 python /users/scbiw/DeepLearning/Attention-UNET/DeepLearning/training/fine_tuning.py \
@@ -71,4 +75,4 @@ python /users/scbiw/DeepLearning/Attention-UNET/DeepLearning/training/fine_tunin
   --validate_every    1 \
   --calibrate_every   0 \
   --shuffle_buffer_size 1024 \
-  --epochs 128
+  --epochs 128 $EXTRA_ARGS
