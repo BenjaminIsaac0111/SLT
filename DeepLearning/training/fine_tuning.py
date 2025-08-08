@@ -94,6 +94,9 @@ class Config:
     half_life: int = 1000
     focal_gamma: float = 2.0
     prior_ema: float = 0.01
+    use_drw: bool = False
+    use_logit_adjustment: bool = False
+    use_batch_alpha: bool = False
 
     val_labels_json: Path | None = None
     val_images_dir: Path | None = None
@@ -529,14 +532,23 @@ class Trainer:
             dataset_alpha = tf.reduce_sum(mix_hist) / tf.maximum(mix_hist, 1e-8)
             dataset_alpha = tf.minimum(dataset_alpha, 10.0 * tf.reduce_mean(dataset_alpha))
 
-            alpha_combined = 0.5 * dataset_alpha + 0.5 * batch_alpha
+            if self.cfg.use_batch_alpha:
+                alpha_combined = 0.5 * dataset_alpha + 0.5 * batch_alpha
+            else:
+                alpha_combined = dataset_alpha
+
             ramp = tf.minimum(
                 1.0,
                 tf.cast(self.global_step, tf.float32) / float(self.cfg.warmup_steps),
-            )
-            alpha_t = (1.0 - ramp) * tf.ones_like(alpha_combined) + ramp * alpha_combined
-            gamma_t = ramp * self.cfg.focal_gamma
-            lambda_t = ramp
+            ) if self.cfg.use_drw else 1.0
+            if self.cfg.use_drw:
+                alpha_t = (1.0 - ramp) * tf.ones_like(alpha_combined) + ramp * alpha_combined
+                gamma_t = ramp * self.cfg.focal_gamma
+            else:
+                alpha_t = alpha_combined
+                gamma_t = self.cfg.focal_gamma
+
+            lambda_t = ramp if self.cfg.use_logit_adjustment else 0.0
             prior_t = tf.identity(self.class_prior)
 
             loss_tensor = self.compiled_train_step(
@@ -547,11 +559,12 @@ class Trainer:
             avg_loss = running_loss / idx
             alpha_last = alpha_t
 
-            batch_prior = batch_hist
-            self.class_prior.assign(
-                (1.0 - self.cfg.prior_ema) * self.class_prior
-                + self.cfg.prior_ema * batch_prior
-            )
+            if self.cfg.use_logit_adjustment:
+                batch_prior = batch_hist
+                self.class_prior.assign(
+                    (1.0 - self.cfg.prior_ema) * self.class_prior
+                    + self.cfg.prior_ema * batch_prior
+                )
 
             self.global_step.assign_add(1)
             gstep = int(self.global_step.numpy())
@@ -560,6 +573,8 @@ class Trainer:
                 with self.tb_writer.as_default():
                     tf.summary.scalar("loss/batch", loss_value, step=gstep)
                     tf.summary.scalar("sampling/p_new", p, step=gstep)
+                    tf.summary.scalar("focal/gamma_t", gamma_t, step=gstep)
+                    tf.summary.scalar("logit/lambda_t", lambda_t, step=gstep)
             prog.update(idx, values=[("loss", loss_value), ("avg_loss", avg_loss)])
 
         # Epoch average logging using current global step
@@ -572,6 +587,8 @@ class Trainer:
                 tf.summary.histogram("alpha_t", alpha_last, step=int(self.global_step.numpy()))
                 for i, val in enumerate(tf.unstack(alpha_last)):
                     tf.summary.scalar(f"alpha_t/class_{i}", val, step=int(self.global_step.numpy()))
+            if self.cfg.use_logit_adjustment:
+                tf.summary.histogram("class_prior", self.class_prior, step=int(self.global_step.numpy()))
         self.tb_writer.flush()
         tf.print(f"[Epoch {epoch}] avg_loss = {avg_loss:.6f} (global_step={int(self.global_step.numpy())})")
 
@@ -856,6 +873,9 @@ def parse_args(argv: Sequence[str] | None = None) -> Config:
     parser.add_argument("--num_val_patches", type=int, default=-1, help="Number of validation patches per epoch")
     parser.add_argument("--validate_every", type=int, default=1, help="Run validation every N epochs")
     parser.add_argument("--calibrate_every", type=int, default=0, help="Compute calibration every N epochs (0=disable)")
+    parser.add_argument("--use_drw", action="store_true", help="Enable deferred re-weighting for alpha and gamma")
+    parser.add_argument("--use_logit_adjustment", action="store_true", help="Apply EMA prior logit adjustment")
+    parser.add_argument("--use_batch_alpha", action="store_true", help="Blend per-batch histogram into alpha weights")
     args = parser.parse_args(argv)
     return Config(**vars(args))
 
