@@ -82,4 +82,5 @@ python /users/scbiw/DeepLearning/Attention-UNET/DeepLearning/training/fine_tunin
   --calibrate_every   0 \
   --shuffle_buffer_size 1024 \
   --shuffle_seed      "$SEED" \
+  --use_penultimate_logits \
   --epochs 128 $EXTRA_ARGS

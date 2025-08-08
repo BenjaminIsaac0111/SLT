@@ -97,6 +97,7 @@ class Config:
     use_drw: bool = False
     use_logit_adjustment: bool = False
     use_batch_alpha: bool = False
+    use_penultimate_logits: bool = False
 
     val_labels_json: Path | None = None
     val_images_dir: Path | None = None
@@ -316,9 +317,16 @@ class Trainer:
         # Decide whether to load initial weights or existing H5 snapshot
         if self.cfg.h5_ckpt_path.exists():
             tf.print(f"[INFO] Loading existing H5 weights {self.cfg.h5_ckpt_path}")
-            return load_model(self.cfg.h5_ckpt_path, compile=False, custom_objects=custom_objs)
-        tf.print(f"[INFO] Loading initial weights from {self.cfg.initial_weights}")
-        return load_model(self.cfg.initial_weights, compile=False, custom_objects=custom_objs)
+            model = load_model(self.cfg.h5_ckpt_path, compile=False, custom_objects=custom_objs)
+        else:
+            tf.print(f"[INFO] Loading initial weights from {self.cfg.initial_weights}")
+            model = load_model(self.cfg.initial_weights, compile=False, custom_objects=custom_objs)
+
+        if self.cfg.use_penultimate_logits:
+            if len(model.layers) < 2:
+                raise ValueError("Model must have at least two layers to strip softmax")
+            model = tf.keras.Model(inputs=model.input, outputs=model.layers[-2].output)
+        return model
 
     @staticmethod
     def _extract_xy(*batch):
@@ -878,6 +886,11 @@ def parse_args(argv: Sequence[str] | None = None) -> Config:
     parser.add_argument("--use_drw", action="store_true", help="Enable deferred re-weighting for alpha and gamma")
     parser.add_argument("--use_logit_adjustment", action="store_true", help="Apply EMA prior logit adjustment")
     parser.add_argument("--use_batch_alpha", action="store_true", help="Blend per-batch histogram into alpha weights")
+    parser.add_argument(
+        "--use_penultimate_logits",
+        action="store_true",
+        help="Strip final softmax and use second-to-last layer logits",
+    )
     args = parser.parse_args(argv)
     return Config(**vars(args))
 
