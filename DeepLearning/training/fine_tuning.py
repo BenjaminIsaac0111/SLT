@@ -21,10 +21,15 @@ Only public TF 2.10.1 APIs and project modules are used.
 from __future__ import annotations
 
 import argparse
+import csv
+import datetime
 import math
+import os
 import shutil
 import signal
+import subprocess
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -127,6 +132,7 @@ class Trainer:
 
         set_memory_growth()
         mixed_precision.set_global_policy("mixed_float16")
+        self.start_time_utc = datetime.datetime.utcnow().isoformat()
 
         self.transforms = Transforms()
         old_counts = tf.constant(
@@ -297,10 +303,365 @@ class Trainer:
         signal.signal(signal.SIGINT, self._interrupt_handler)
 
         self.start_wall_time = tf.timestamp()
+        self._init_csv_logging()
 
     # ────────────────────────────────────────────────────────────────────
     # Build helpers
     # ────────────────────────────────────────────────────────────────────
+
+    def _init_csv_logging(self) -> None:
+        """Set up CSV log files and write run metadata."""
+        self.run_id_file = self.cfg.ckpt_dir / "run_id.txt"
+        if self.run_id_file.exists():
+            self.run_id = self.run_id_file.read_text().strip()
+        else:
+            self.run_id = uuid.uuid4().hex
+            self.run_id_file.write_text(self.run_id)
+
+        self.csv_dir = self.cfg.ckpt_dir
+        self.train_steps_path = self.csv_dir / "train_steps.csv"
+        self.train_epochs_path = self.csv_dir / "train_epochs.csv"
+        self.val_epochs_path = self.csv_dir / "val_epochs.csv"
+        self.val_confusion_path = self.csv_dir / "val_confusion_wide.csv"
+        self.val_per_class_path = self.csv_dir / "val_per_class.csv"
+        self.run_meta_path = self.csv_dir / "run_meta.csv"
+
+        self.train_steps_logged = self._load_existing_ids(self.train_steps_path)
+        self.train_epochs_logged = self._load_existing_ids(self.train_epochs_path)
+        self.val_epochs_logged = self._load_existing_ids(self.val_epochs_path)
+        self.val_confusion_logged = self._load_existing_ids(self.val_confusion_path)
+        self.val_per_class_logged = self._load_existing_ids(
+            self.val_per_class_path, key_tuple=True
+        )
+
+        self._write_run_meta()
+
+    def _load_existing_ids(self, path: Path, key_tuple: bool = False) -> set:
+        ids: set = set()
+        if path.exists():
+            with open(path, "r", newline="") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    if key_tuple:
+                        ids.add((int(row.get("global_step", 0)), int(row.get("class_id", -1))))
+                    else:
+                        ids.add(int(row.get("global_step", 0)))
+        return ids
+
+    def _write_row(
+        self,
+        path: Path,
+        fieldnames: list[str],
+        row: dict,
+        existing: set,
+        key: tuple | int | None,
+    ) -> None:
+        if key is not None and key in existing:
+            return
+        file_exists = path.exists()
+        with open(path, "a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow(row)
+            f.flush()
+        if key is not None:
+            existing.add(key)
+
+    def _write_run_meta(self) -> None:
+        devices = tf.config.list_physical_devices("GPU")
+        gpu_name = ""
+        if devices:
+            try:
+                gpu_name = tf.config.experimental.get_device_details(devices[0]).get(
+                    "device_name", ""
+                )
+            except Exception:  # noqa: BLE001
+                gpu_name = devices[0].name
+        num_gpus = len(devices)
+        cuda_version = os.environ.get("CUDA_VERSION", "")
+        cudnn_version = os.environ.get("CUDNN_VERSION", "")
+        policy = mixed_precision.global_policy().name
+
+        repo_root = Path(__file__).resolve().parents[2]
+        try:
+            git_commit = (
+                subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo_root)
+                .decode()
+                .strip()
+            )
+            git_dirty = int(
+                bool(
+                    subprocess.check_output(
+                        ["git", "status", "--porcelain"], cwd=repo_root
+                    ).strip()
+                )
+            )
+            repo_url = (
+                subprocess.check_output(
+                    ["git", "config", "--get", "remote.origin.url"], cwd=repo_root
+                )
+                .decode()
+                .strip()
+            )
+        except Exception:  # noqa: BLE001
+            git_commit = ""
+            git_dirty = 0
+            repo_url = ""
+
+        existing_runs = set()
+        if self.run_meta_path.exists():
+            with open(self.run_meta_path, "r", newline="") as f:
+                reader = csv.DictReader(f)
+                for r in reader:
+                    existing_runs.add(r.get("run_id"))
+        if self.run_id in existing_runs:
+            return
+
+        row = {
+            "run_id": self.run_id,
+            "labels_json": str(self.cfg.labels_json),
+            "images_dir": str(self.cfg.images_dir),
+            "new_labels_json": str(self.cfg.new_labels_json or ""),
+            "new_images_dir": str(self.cfg.new_images_dir or ""),
+            "val_labels_json": str(self.cfg.val_labels_json or ""),
+            "val_images_dir": str(self.cfg.val_images_dir or ""),
+            "initial_weights": str(self.cfg.initial_weights),
+            "model_dir": str(self.cfg.model_dir),
+            "model_name": self.cfg.model_name,
+            "old_size": self.old_size,
+            "new_size": self.new_size,
+            "num_classes": self.cfg.num_classes,
+            "batch_size": self.cfg.batch_size,
+            "num_patches": self.cfg.num_patches,
+            "epochs": self.cfg.epochs,
+            "learning_rate": self.cfg.learning_rate,
+            "shuffle_seed": self.cfg.shuffle_seed,
+            "shuffle_buffer_size": self.cfg.shuffle_buffer_size,
+            "use_xla": int(self.cfg.use_xla),
+            "use_drw": int(self.cfg.use_drw),
+            "use_logit_adjustment": int(self.cfg.use_logit_adjustment),
+            "use_batch_alpha": int(self.cfg.use_batch_alpha),
+            "use_penultimate_logits": int(self.cfg.use_penultimate_logits),
+            "warmup_steps": self.cfg.warmup_steps,
+            "drw_warmup_steps": self.cfg.drw_warmup_steps,
+            "decay_schedule": self.cfg.decay_schedule,
+            "half_life": self.cfg.half_life,
+            "focal_gamma": self.cfg.focal_gamma,
+            "prior_ema": self.cfg.prior_ema,
+            "validate_every": self.cfg.validate_every,
+            "num_val_patches": self.cfg.num_val_patches,
+            "calibrate_every": self.cfg.calibrate_every,
+            "log_every_n_batches": self.cfg.log_every_n_batches,
+            "tf_version": tf.__version__,
+            "cuda_version": cuda_version,
+            "cudnn_version": cudnn_version,
+            "gpu_name": gpu_name,
+            "num_gpus": num_gpus,
+            "mixed_precision_policy": policy,
+            "git_commit": git_commit,
+            "git_dirty": git_dirty,
+            "repo_url": repo_url,
+            "restored_from_ckpt": int(self._did_restore),
+            "start_epoch": int(self.epoch.numpy()),
+            "start_global_step": int(self.global_step.numpy()),
+            "start_time_utc": self.start_time_utc,
+        }
+        fieldnames = list(row.keys())
+        self._write_row(self.run_meta_path, fieldnames, row, set(), None)
+
+    # Logging helpers --------------------------------------------------
+    def _log_train_step(
+        self,
+        step: int,
+        epoch: int,
+        batch_idx: int,
+        p_new_val: float,
+        used_new: bool,
+        loss_value: float,
+        avg_loss: float,
+        gamma_t: float,
+        lambda_t: float,
+        alpha_t: tf.Tensor,
+    ) -> None:
+        alpha_mean = float(tf.reduce_mean(alpha_t))
+        alpha_min = float(tf.reduce_min(alpha_t))
+        alpha_max = float(tf.reduce_max(alpha_t))
+        if self.cfg.use_logit_adjustment:
+            class_prior_mean = float(tf.reduce_mean(self.class_prior))
+        else:
+            class_prior_mean = ""
+        row = {
+            "run_id": self.run_id,
+            "global_step": step,
+            "epoch": epoch,
+            "batch_idx_in_epoch": batch_idx,
+            "p_new": p_new_val,
+            "use_new_batch": int(used_new),
+            "loss_batch": loss_value,
+            "avg_loss_epoch_so_far": avg_loss,
+            "gamma_t": gamma_t,
+            "lambda_t": lambda_t,
+            "alpha_t_mean": alpha_mean,
+            "alpha_t_min": alpha_min,
+            "alpha_t_max": alpha_max,
+            "class_prior_mean": class_prior_mean,
+            "wall_time_s": float(tf.timestamp() - self.start_wall_time),
+            "lr": float(self.optimizer.learning_rate.numpy()),
+            "mixed_precision_policy": mixed_precision.global_policy().name,
+            "xla_enabled": int(self.cfg.use_xla),
+        }
+        fieldnames = [
+            "run_id",
+            "global_step",
+            "epoch",
+            "batch_idx_in_epoch",
+            "p_new",
+            "use_new_batch",
+            "loss_batch",
+            "avg_loss_epoch_so_far",
+            "gamma_t",
+            "lambda_t",
+            "alpha_t_mean",
+            "alpha_t_min",
+            "alpha_t_max",
+            "class_prior_mean",
+            "wall_time_s",
+            "lr",
+            "mixed_precision_policy",
+            "xla_enabled",
+        ]
+        self._write_row(self.train_steps_path, fieldnames, row, self.train_steps_logged, step)
+
+    def _log_train_epoch(
+        self,
+        epoch: int,
+        gstep: int,
+        avg_loss: float,
+        alpha_last: tf.Tensor | None,
+        secs: float,
+        ckpt_path: str,
+        h5_saved: int,
+    ) -> None:
+        alpha_mean = ""
+        alpha_entropy = ""
+        if alpha_last is not None:
+            alpha_mean = float(tf.reduce_mean(alpha_last))
+            norm = alpha_last / tf.reduce_sum(alpha_last)
+            alpha_entropy = float(
+                -tf.reduce_sum(norm * tf.math.log(norm + 1e-8))
+            )
+        if self.cfg.use_logit_adjustment:
+            prior_norm = self.class_prior / tf.reduce_sum(self.class_prior)
+            prior_entropy = float(
+                -tf.reduce_sum(prior_norm * tf.math.log(prior_norm + 1e-8))
+            )
+        else:
+            prior_entropy = ""
+        row = {
+            "run_id": self.run_id,
+            "epoch": epoch,
+            "global_step": gstep,
+            "loss_epoch_avg": avg_loss,
+            "alpha_t_mean_epoch": alpha_mean,
+            "alpha_t_entropy_epoch": alpha_entropy,
+            "class_prior_entropy_epoch": prior_entropy,
+            "secs_per_epoch": secs,
+            "steps_per_epoch": self.steps_per_epoch,
+            "ckpt_path": ckpt_path,
+            "h5_saved": h5_saved,
+        }
+        fieldnames = list(row.keys())
+        self._write_row(
+            self.train_epochs_path, fieldnames, row, self.train_epochs_logged, gstep
+        )
+
+    def _log_val_epoch(
+        self,
+        epoch: int,
+        gstep: int,
+        metrics: dict,
+        ece: float | None,
+        flags: dict,
+        paths: dict,
+    ) -> None:
+        row = {
+            "run_id": self.run_id,
+            "epoch": epoch,
+            "global_step": gstep,
+            "val_accuracy": metrics["accuracy"],
+            "val_macro_f1": metrics["macro_f1"],
+            "val_weighted_f1": metrics["weighted_f1"],
+            "val_balanced_accuracy": metrics["balanced_accuracy"],
+            "val_kappa": metrics["kappa"],
+            "val_ece": ece if ece is not None else "",
+            "is_new_best_accuracy": int(flags["acc"]),
+            "is_new_best_macro_f1": int(flags["macro_f1"]),
+            "is_new_best_balanced_accuracy": int(flags["balanced_acc"]),
+            "is_new_best_weighted_f1": int(flags["weighted_f1"]),
+            "is_new_best_kappa": int(flags["kappa"]),
+            "best_accuracy_so_far": float(self.best_val_accuracy.numpy()),
+            "best_macro_f1_so_far": float(self.best_val_macro_f1.numpy()),
+            "best_balanced_accuracy_so_far": float(self.best_val_balanced_acc.numpy()),
+            "best_weighted_f1_so_far": float(self.best_val_weighted_f1.numpy()),
+            "best_kappa_so_far": float(self.best_val_kappa.numpy()),
+            "best_accuracy_path": paths.get("acc", ""),
+            "best_f1_path": paths.get("macro_f1", ""),
+            "best_balanced_accuracy_path": paths.get("balanced_acc", ""),
+            "best_weighted_f1_path": paths.get("weighted_f1", ""),
+            "best_kappa_path": paths.get("kappa", ""),
+        }
+        fieldnames = list(row.keys())
+        self._write_row(self.val_epochs_path, fieldnames, row, self.val_epochs_logged, gstep)
+
+    def _log_val_confusion(self, epoch: int, gstep: int, cm: tf.Tensor) -> None:
+        cm = tf.cast(cm, tf.int32).numpy()
+        cm_dict = {f"cm_{i}_{j}": int(cm[i, j]) for i in range(cm.shape[0]) for j in range(cm.shape[1])}
+        row = {"run_id": self.run_id, "epoch": epoch, "global_step": gstep}
+        row.update(cm_dict)
+        fieldnames = list(row.keys())
+        self._write_row(
+            self.val_confusion_path, fieldnames, row, self.val_confusion_logged, gstep
+        )
+
+    def _log_val_per_class(self, epoch: int, gstep: int, cm: tf.Tensor, metrics: dict) -> None:
+        cm_np = tf.cast(cm, tf.float32).numpy()
+        total = cm_np.sum()
+        for i in range(cm_np.shape[0]):
+            tp = cm_np[i, i]
+            fn = cm_np[i, :].sum() - tp
+            fp = cm_np[:, i].sum() - tp
+            tn = total - tp - fn - fp
+            tpr = metrics["recall"][i].numpy()
+            tnr = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+            ppv = metrics["precision"][i].numpy()
+            npv = tn / (tn + fn) if (tn + fn) > 0 else 0.0
+            f1 = metrics["f1"][i].numpy()
+            support = metrics["support"][i].numpy()
+            row = {
+                "run_id": self.run_id,
+                "epoch": epoch,
+                "global_step": gstep,
+                "class_id": i,
+                "class_name": CLASS_NAMES[i] if i < len(CLASS_NAMES) else str(i),
+                "support": support,
+                "precision": ppv,
+                "recall": tpr,
+                "f1": f1,
+                "tpr": tpr,
+                "tnr": tnr,
+                "ppv": ppv,
+                "npv": npv,
+            }
+            fieldnames = list(row.keys())
+            key = (gstep, i)
+            self._write_row(
+                self.val_per_class_path,
+                fieldnames,
+                row,
+                self.val_per_class_logged,
+                key,
+            )
 
     def _build_optimizer(self) -> optimizers.Optimizer:
         base_lr = self.cfg.learning_rate * self.cfg.batch_size
@@ -534,11 +895,15 @@ class Trainer:
             if self._stop_training:
                 break
             epoch = e + 1
-            self._train_one_epoch(epoch)
+            avg_loss, alpha_last, secs = self._train_one_epoch(epoch)
             if epoch % self.cfg.validate_every == 0:
                 self._validate_one_epoch(epoch)
             self.epoch.assign(epoch)
-            self._checkpoint(epoch)
+            ckpt_path, h5_saved = self._checkpoint(epoch)
+            gstep = int(self.global_step.numpy())
+            self._log_train_epoch(
+                epoch, gstep, avg_loss, alpha_last, secs, ckpt_path, h5_saved
+            )
 
         tf.print("[INFO] Training completed.")
 
@@ -550,14 +915,17 @@ class Trainer:
         prog = Progbar(self.steps_per_epoch, stateful_metrics=None, verbose=1, unit_name="step")
         running_loss = 0.0
         alpha_last = None
+        epoch_start = tf.timestamp()
 
         for idx in range(1, self.steps_per_epoch + 1):
             step = int(self.global_step.numpy())
             p = self.p_new(step)
             if self.rng.uniform(shape=[], dtype=tf.float32) < p:
                 batch = next(self.new_iter)
+                used_new = True
             else:
                 batch = next(self.old_iter)
+                used_new = False
 
             x, y = batch
             counts = tf.reduce_sum(y, axis=[0, 1, 2])
@@ -619,6 +987,18 @@ class Trainer:
                     tf.summary.scalar("focal/gamma_t", gamma_t, step=gstep)
                     tf.summary.scalar("logit/lambda_t", lambda_t, step=gstep)
             prog.update(idx, values=[("loss", loss_value), ("avg_loss", avg_loss)])
+            self._log_train_step(
+                step,
+                epoch,
+                idx,
+                float(p),
+                used_new,
+                loss_value,
+                avg_loss,
+                float(gamma_t),
+                float(lambda_t),
+                alpha_t,
+            )
 
         # Epoch average logging using current global step
         with self.tb_writer.as_default():
@@ -633,7 +1013,11 @@ class Trainer:
             if self.cfg.use_logit_adjustment:
                 tf.summary.histogram("class_prior", self.class_prior, step=int(self.global_step.numpy()))
         self.tb_writer.flush()
-        tf.print(f"[Epoch {epoch}] avg_loss = {avg_loss:.6f} (global_step={int(self.global_step.numpy())})")
+        tf.print(
+            f"[Epoch {epoch}] avg_loss = {avg_loss:.6f} (global_step={int(self.global_step.numpy())})"
+        )
+        secs = float(tf.timestamp() - epoch_start)
+        return avg_loss, alpha_last, secs
 
     def _validate_one_epoch(self, epoch: int):
         if self.val_dataset is None:
@@ -701,35 +1085,48 @@ class Trainer:
         current_weighted_f1 = float(metrics["weighted_f1"].numpy())
         current_kappa = float(metrics["kappa"].numpy())
 
+        flags = {"acc": False, "macro_f1": False, "balanced_acc": False, "weighted_f1": False, "kappa": False}
+        paths = {}
+
         if current_acc > float(self.best_val_accuracy):
             self.best_val_accuracy.assign(current_acc)
             best_acc_path = self.cfg.ckpt_dir / "best_accuracy_model.h5"
             self.model.save(best_acc_path)
             tf.print(f"[INFO] New best accuracy {current_acc:.4f} → {best_acc_path}")
+            flags["acc"] = True
+            paths["acc"] = str(best_acc_path)
 
         if current_f1 > float(self.best_val_macro_f1):
             self.best_val_macro_f1.assign(current_f1)
             best_f1_path = self.cfg.ckpt_dir / "best_f1_model.h5"
             self.model.save(best_f1_path)
             tf.print(f"[INFO] New best macro_f1 {current_f1:.4f} → {best_f1_path}")
+            flags["macro_f1"] = True
+            paths["macro_f1"] = str(best_f1_path)
 
         if current_bal_acc > float(self.best_val_balanced_acc):
             self.best_val_balanced_acc.assign(current_bal_acc)
             best_bal_path = self.cfg.ckpt_dir / "best_balanced_accuracy_model.h5"
             self.model.save(best_bal_path)
             tf.print(f"[INFO] New best balanced_accuracy {current_bal_acc:.4f} → {best_bal_path}")
+            flags["balanced_acc"] = True
+            paths["balanced_acc"] = str(best_bal_path)
 
         if current_weighted_f1 > float(self.best_val_weighted_f1):
             self.best_val_weighted_f1.assign(current_weighted_f1)
             best_wf1_path = self.cfg.ckpt_dir / "best_weighted_f1_model.h5"
             self.model.save(best_wf1_path)
             tf.print(f"[INFO] New best weighted_f1 {current_weighted_f1:.4f} → {best_wf1_path}")
+            flags["weighted_f1"] = True
+            paths["weighted_f1"] = str(best_wf1_path)
 
         if current_kappa > float(self.best_val_kappa):
             self.best_val_kappa.assign(current_kappa)
             best_kappa_path = self.cfg.ckpt_dir / "best_kappa_model.h5"
             self.model.save(best_kappa_path)
             tf.print(f"[INFO] New best kappa {current_kappa:.4f} → {best_kappa_path}")
+            flags["kappa"] = True
+            paths["kappa"] = str(best_kappa_path)
 
         gstep = int(self.global_step.numpy())
         with self.tb_writer.as_default():
@@ -757,6 +1154,16 @@ class Trainer:
             f"weighted_f1={metrics['weighted_f1']:.4f} "
             f"kappa={metrics['kappa']:.4f}"
         )
+        val_dict = {
+            "accuracy": float(metrics["accuracy"].numpy()),
+            "macro_f1": float(metrics["macro_f1"].numpy()),
+            "weighted_f1": float(metrics["weighted_f1"].numpy()),
+            "balanced_accuracy": float(metrics["balanced_accuracy"].numpy()),
+            "kappa": float(metrics["kappa"].numpy()),
+        }
+        self._log_val_epoch(epoch, gstep, val_dict, ece, flags, paths)
+        self._log_val_confusion(epoch, gstep, metrics["confusion_matrix"])
+        self._log_val_per_class(epoch, gstep, metrics["confusion_matrix"], metrics)
 
     def _evaluate_baseline(self):
         """Run validation once on the freshly loaded model to get pre‑training metrics."""
@@ -822,15 +1229,18 @@ class Trainer:
         self.model.save(baseline_path)
         tf.print(f"[INFO] Saved baseline model to {baseline_path}")
 
-    def _checkpoint(self, epoch: int):
+    def _checkpoint(self, epoch: int) -> tuple[str, int]:
         # Object-based checkpoint (persists epoch & global_step)
         ckpt_path = self.robust_save(step=int(self.epoch.numpy()))
         tf.print(f"[INFO] Saved checkpoint: {ckpt_path}")
+        h5_saved = 0
         # Optional: also export an H5 snapshot of the full model each epoch
         try:
             self.model.save(self.cfg.h5_ckpt_path)
+            h5_saved = 1
         except Exception as exc:  # noqa: BLE001
             tf.print(f"[WARN] Could not save H5 snapshot: {exc}")
+        return ckpt_path, h5_saved
 
     def _interrupt_handler(self, *_):  # signal handler
         # Graceful interrupt: save state and flush summaries
