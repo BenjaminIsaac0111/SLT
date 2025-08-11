@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from collections import Counter
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable, Iterable, List
 
 import tensorflow as tf
 
@@ -25,8 +25,8 @@ def set_memory_growth() -> None:
             tf.print(f"[WARN] Could not set memory growth on {gpu}: {exc}")
 
 
-def compute_class_weights_from_json(json_path: Path, num_classes: int) -> list[float]:
-    """Compute inverse-frequency class weights.
+def compute_class_histogram_from_json(json_path: Path, num_classes: int) -> List[int]:
+    """Compute class count histogram from a JSON annotation file.
 
     The JSON file is expected to map sample identifiers to a list of mark
     dictionaries that contain a ``class_id`` field.
@@ -36,8 +36,8 @@ def compute_class_weights_from_json(json_path: Path, num_classes: int) -> list[f
         num_classes: Total number of classes.
 
     Returns:
-        A list of weights for each class. Missing classes receive a weight of
-        ``0.0``.
+        A list with the number of occurrences for each class. Missing classes
+        receive a count of ``0``.
     """
 
     with json_path.open() as fp:
@@ -50,11 +50,7 @@ def compute_class_weights_from_json(json_path: Path, num_classes: int) -> list[f
         if 0 <= m["class_id"] < num_classes
     )
 
-    total = sum(counts.values()) or 1  # avoid division by zero
-    return [
-        (total / (num_classes * counts[c])) if counts.get(c) else 0.0
-        for c in range(num_classes)
-    ]
+    return [counts.get(c, 0) for c in range(num_classes)]
 
 
 def xla_optional(jit: bool = True) -> Callable:
@@ -98,7 +94,7 @@ def count_samples_from_json(json_path: Path) -> int:
 
 __all__ = [
     "set_memory_growth",
-    "compute_class_weights_from_json",
+    "compute_class_histogram_from_json",
     "xla_optional",
     "count_samples_from_json",
 ]

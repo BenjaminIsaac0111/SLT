@@ -46,14 +46,13 @@ from DeepLearning.models.custom_layers import (
 )
 from DeepLearning.processing.transforms import Transforms
 from DeepLearning.training.utils import (
-    compute_class_weights_from_json,
+    compute_class_histogram_from_json,
     count_samples_from_json,
     set_memory_growth,
     xla_optional,
 )
 from DeepLearning.training.validator import Validator
 from DeepLearning.training.visualization import confusion_matrix_to_image
-
 
 CLASS_NAMES = [
     "Non-Informative",  # 0
@@ -78,7 +77,7 @@ class Config:
     model_dir: Path
     model_name: str
     num_classes: int = 9
-    batch_size: int = 4
+    batch_size: int = 1
     num_patches: int = 400
     shuffle_seed: int = 42
     shuffle_buffer_size: int = 256
@@ -92,6 +91,12 @@ class Config:
     warmup_steps: int = 500
     decay_schedule: str = "half_life"
     half_life: int = 1000
+    focal_gamma: float = 2.0
+    prior_ema: float = 0.01
+    use_drw: bool = False
+    use_logit_adjustment: bool = False
+    use_batch_alpha: bool = False
+    use_penultimate_logits: bool = False
 
     val_labels_json: Path | None = None
     val_images_dir: Path | None = None
@@ -123,10 +128,19 @@ class Trainer:
         mixed_precision.set_global_policy("mixed_float16")
 
         self.transforms = Transforms()
-        self.class_weights = tf.constant(
-            compute_class_weights_from_json(cfg.labels_json, cfg.num_classes),
+        old_counts = tf.constant(
+            compute_class_histogram_from_json(cfg.labels_json, cfg.num_classes),
             dtype=tf.float32,
         )
+        self.old_hist = old_counts / tf.reduce_sum(old_counts)
+        if cfg.new_labels_json:
+            new_counts = tf.constant(
+                compute_class_histogram_from_json(cfg.new_labels_json, cfg.num_classes),
+                dtype=tf.float32,
+            )
+            self.new_hist = new_counts / tf.reduce_sum(new_counts)
+        else:
+            self.new_hist = self.old_hist
 
         self.strategy = tf.distribute.get_strategy()
         with self.strategy.scope():
@@ -138,6 +152,13 @@ class Trainer:
             )
             self.epoch = tf.Variable(
                 0, trainable=False, dtype=tf.int64, name="epoch"
+            )
+            self.rng = tf.random.Generator.from_seed(self.cfg.shuffle_seed)
+            self.class_prior = tf.Variable(
+                tf.fill([self.cfg.num_classes], 1.0 / self.cfg.num_classes),
+                trainable=False,
+                dtype=tf.float32,
+                name="class_prior",
             )
             self.compiled_train_step = self._build_train_step()
 
@@ -191,6 +212,8 @@ class Trainer:
                 baseline_val_balanced_acc=self.baseline_val_balanced_acc,
                 baseline_val_weighted_f1=self.baseline_val_weighted_f1,
                 baseline_val_kappa=self.baseline_val_kappa,
+                rng=self.rng,
+                class_prior=self.class_prior,
             )
             self.ckpt_manager = tf.train.CheckpointManager(
                 self.ckpt,
@@ -293,9 +316,21 @@ class Trainer:
         # Decide whether to load initial weights or existing H5 snapshot
         if self.cfg.h5_ckpt_path.exists():
             tf.print(f"[INFO] Loading existing H5 weights {self.cfg.h5_ckpt_path}")
-            return load_model(self.cfg.h5_ckpt_path, compile=False, custom_objects=custom_objs)
-        tf.print(f"[INFO] Loading initial weights from {self.cfg.initial_weights}")
-        return load_model(self.cfg.initial_weights, compile=False, custom_objects=custom_objs)
+            model = load_model(self.cfg.h5_ckpt_path, compile=False, custom_objects=custom_objs)
+        else:
+            tf.print(f"[INFO] Loading initial weights from {self.cfg.initial_weights}")
+            model = load_model(self.cfg.initial_weights, compile=False, custom_objects=custom_objs)
+
+        # If the last layer is Softmax, strip it to get logits
+        last = model.layers[-1]
+        last_act = getattr(last, "activation", None)
+        if isinstance(last, tf.keras.layers.Softmax) or last_act is tf.keras.activations.softmax:
+            tf.print("[INFO] Detected terminal Softmax — using pre-Softmax logits")
+            model = tf.keras.Model(inputs=model.input, outputs=model.layers[-2].output)
+        else:
+            tf.print("[INFO] Model already outputs logits")
+
+        return model
 
     @staticmethod
     def _extract_xy(*batch):
@@ -400,12 +435,41 @@ class Trainer:
 
     def _build_train_step(self):
         @xla_optional(self.cfg.use_xla)
-        def _train_step(batch):
+        def _train_step(batch, alpha_t, prior_t, gamma_t, lambda_t):
             x, y = batch
+
+            # Enforce dtypes/shapes expected by the math
+            alpha_t = tf.cast(alpha_t, tf.float32)  # [C]
+            prior_t = tf.cast(prior_t, tf.float32)  # [C]
+            gamma_t = tf.cast(gamma_t, tf.float32)  # scalar
+            lambda_t = tf.cast(lambda_t, tf.float32)  # scalar
+            y = tf.cast(y, tf.float32)  # [B,H,W,C]
+
             with tf.GradientTape() as tape:
-                logits = self.model(x, training=True)
-                loss = focal_loss(y_true=y, y_pred=logits, alpha_weights=self.class_weights)
+                logits = self.model(x, training=True)  # [B,H,W,C], likely float16
+
+                # --- Logit adjustment done in fp32 ---
+                # clip prior to avoid log(0); broadcast to [1,1,1,C]
+                prior_t = tf.clip_by_value(prior_t, 1e-6, 1.0)
+                log_adj = lambda_t * tf.math.log(1.0 / prior_t)  # [C] fp32
+                log_adj = log_adj[None, None, None, :]  # [1,1,1,C]
+
+                logits_f32 = tf.cast(logits, tf.float32) + log_adj  # [B,H,W,C] fp32
+
+                # Softmax in fp32; focal expects probabilities, not logits
+                probs = tf.nn.softmax(logits_f32, axis=-1)  # [B,H,W,C] fp32
+
+                # Compute focal loss in fp32
+                loss = focal_loss(
+                    y_true=y,
+                    y_pred=probs,
+                    gamma=gamma_t,  # tensor scalar is fine
+                    alpha_weights=alpha_t  # [C]
+                )
+
+                # Loss scaling as usual
                 scaled_loss = self.optimizer.get_scaled_loss(loss)
+
             scaled_grads = tape.gradient(scaled_loss, self.model.trainable_weights)
             grads = self.optimizer.get_unscaled_gradients(scaled_grads)
             self.optimizer.apply_gradients(zip(grads, self.model.trainable_weights))
@@ -484,24 +548,70 @@ class Trainer:
     def _train_one_epoch(self, epoch: int):
         prog = Progbar(self.steps_per_epoch, stateful_metrics=None, verbose=1, unit_name="step")
         running_loss = 0.0
+        alpha_last = None
 
         for idx in range(1, self.steps_per_epoch + 1):
             step = int(self.global_step.numpy())
-            if tf.random.uniform(()) < self.p_new(step):
+            p = self.p_new(step)
+            if self.rng.uniform(shape=[], dtype=tf.float32) < p:
                 batch = next(self.new_iter)
             else:
                 batch = next(self.old_iter)
-            loss_tensor = self.compiled_train_step(batch)
+
+            x, y = batch
+            counts = tf.reduce_sum(y, axis=[0, 1, 2])
+            batch_hist = counts / tf.maximum(tf.reduce_sum(counts), 1.0)
+            batch_alpha = tf.reduce_sum(batch_hist) / tf.maximum(batch_hist, 1e-8)
+            batch_alpha = tf.minimum(batch_alpha, 10.0 * tf.reduce_mean(batch_alpha))
+
+            p_t = tf.convert_to_tensor(p, dtype=tf.float32)
+            mix_hist = p_t * self.new_hist + (1.0 - p_t) * self.old_hist
+            dataset_alpha = tf.reduce_sum(mix_hist) / tf.maximum(mix_hist, 1e-8)
+            dataset_alpha = tf.minimum(dataset_alpha, 10.0 * tf.reduce_mean(dataset_alpha))
+
+            if self.cfg.use_batch_alpha:
+                alpha_combined = 0.5 * dataset_alpha + 0.5 * batch_alpha
+            else:
+                alpha_combined = dataset_alpha
+
+            ramp = tf.minimum(
+                1.0,
+                tf.cast(self.global_step, tf.float32) / float(self.cfg.warmup_steps),
+            ) if self.cfg.use_drw else 1.0
+            if self.cfg.use_drw:
+                alpha_t = (1.0 - ramp) * tf.ones_like(alpha_combined) + ramp * alpha_combined
+                gamma_t = ramp * self.cfg.focal_gamma
+            else:
+                alpha_t = alpha_combined
+                gamma_t = self.cfg.focal_gamma
+
+            lambda_t = ramp if self.cfg.use_logit_adjustment else 0.0
+            prior_t = tf.identity(self.class_prior)
+
+            loss_tensor = self.compiled_train_step(
+                (x, y), alpha_t, prior_t, gamma_t, lambda_t
+            )
             loss_value = float(loss_tensor.numpy())
             running_loss += loss_value
             avg_loss = running_loss / idx
+            alpha_last = alpha_t
+
+            if self.cfg.use_logit_adjustment:
+                batch_prior = batch_hist
+                self.class_prior.assign(
+                    (1.0 - self.cfg.prior_ema) * self.class_prior
+                    + self.cfg.prior_ema * batch_prior
+                )
 
             self.global_step.assign_add(1)
             gstep = int(self.global_step.numpy())
 
-            with self.tb_writer.as_default():
-                tf.summary.scalar("loss/batch", loss_value, step=gstep)
-                tf.summary.scalar("sampling/p_new", self.p_new(step), step=step)
+            if gstep % self.cfg.log_every_n_batches == 0:
+                with self.tb_writer.as_default():
+                    tf.summary.scalar("loss/batch", loss_value, step=gstep)
+                    tf.summary.scalar("sampling/p_new", p, step=gstep)
+                    tf.summary.scalar("focal/gamma_t", gamma_t, step=gstep)
+                    tf.summary.scalar("logit/lambda_t", lambda_t, step=gstep)
             prog.update(idx, values=[("loss", loss_value), ("avg_loss", avg_loss)])
 
         # Epoch average logging using current global step
@@ -510,6 +620,12 @@ class Trainer:
             tf.summary.scalar(
                 "time/elapsed_sec", float(tf.timestamp() - self.start_wall_time), step=int(self.global_step.numpy())
             )
+            if alpha_last is not None:
+                tf.summary.histogram("alpha_t", alpha_last, step=int(self.global_step.numpy()))
+                for i, val in enumerate(tf.unstack(alpha_last)):
+                    tf.summary.scalar(f"alpha_t/class_{i}", val, step=int(self.global_step.numpy()))
+            if self.cfg.use_logit_adjustment:
+                tf.summary.histogram("class_prior", self.class_prior, step=int(self.global_step.numpy()))
         self.tb_writer.flush()
         tf.print(f"[Epoch {epoch}] avg_loss = {avg_loss:.6f} (global_step={int(self.global_step.numpy())})")
 
@@ -613,20 +729,21 @@ class Trainer:
         with self.tb_writer.as_default():
             tf.summary.scalar("val/best_accuracy", self.best_val_accuracy, step=gstep)
             tf.summary.scalar("val/best_macro_f1", self.best_val_macro_f1, step=gstep)
-            tf.summary.scalar("val/best_balanced_accuracy", self.best_val_balanced_acc, step=gstep)
-            tf.summary.scalar("val/best_weighted_f1", self.best_val_weighted_f1, step=gstep)
+            tf.summary.scalar(
+                "val/best_balanced_accuracy", self.best_val_balanced_acc, step=gstep
+            )
+            tf.summary.scalar(
+                "val/best_weighted_f1", self.best_val_weighted_f1, step=gstep
+            )
             tf.summary.scalar("val/best_kappa", self.best_val_kappa, step=gstep)
-            self.tb_writer.flush()
-
-        metrics = self.validator.result()
-        gstep = int(self.global_step.numpy())
-        with self.tb_writer.as_default():
             tf.summary.scalar("val/accuracy", metrics["accuracy"], step=gstep)
             tf.summary.scalar("val/macro_f1", metrics["macro_f1"], step=gstep)
             tf.summary.scalar("val/weighted_f1", metrics["weighted_f1"], step=gstep)
-            tf.summary.scalar("val/balanced_accuracy", metrics["balanced_accuracy"], step=gstep)
+            tf.summary.scalar(
+                "val/balanced_accuracy", metrics["balanced_accuracy"], step=gstep
+            )
             tf.summary.scalar("val/kappa", metrics["kappa"], step=gstep)
-        self.tb_writer.flush()
+            self.tb_writer.flush()
         tf.print(
             f"[Epoch {epoch}] val_accuracy={metrics['accuracy']:.4f} "
             f"macro_f1={metrics['macro_f1']:.4f} "
@@ -652,28 +769,25 @@ class Trainer:
         metrics = self.validator.result()
         gstep = int(self.global_step.numpy())  # should be 0 at this point
 
-        # Log scalars (accuracy, f1) for baseline
+        # Log scalars (accuracy, f1) for baseline and initialise best trackers
         with self.tb_writer.as_default():
             tf.summary.scalar("val/accuracy", metrics["accuracy"], step=gstep)
             tf.summary.scalar("val/macro_f1", metrics["macro_f1"], step=gstep)
             tf.summary.scalar("val/weighted_f1", metrics["weighted_f1"], step=gstep)
             tf.summary.scalar("val/balanced_accuracy", metrics["balanced_accuracy"], step=gstep)
             tf.summary.scalar("val/kappa", metrics["kappa"], step=gstep)
-            tf.summary.scalar("baseline/best_accuracy", metrics["accuracy"], step=gstep)
-            tf.summary.scalar("baseline/best_macro_f1", metrics["macro_f1"], step=gstep)
-            tf.summary.scalar("baseline/best_weighted_f1", metrics["weighted_f1"], step=gstep)
-            tf.summary.scalar("baseline/best_balanced_accuracy", metrics["balanced_accuracy"], step=gstep)
-            tf.summary.scalar("baseline/best_kappa", metrics["kappa"], step=gstep)
             tf.summary.scalar("baseline/accuracy", metrics["accuracy"], step=gstep)
             tf.summary.scalar("baseline/macro_f1", metrics["macro_f1"], step=gstep)
             tf.summary.scalar("baseline/weighted_f1", metrics["weighted_f1"], step=gstep)
             tf.summary.scalar("baseline/balanced_accuracy", metrics["balanced_accuracy"], step=gstep)
             tf.summary.scalar("baseline/kappa", metrics["kappa"], step=gstep)
-            tf.summary.scalar("baseline/best_accuracy", metrics["accuracy"], step=gstep)
-            tf.summary.scalar("baseline/best_macro_f1", metrics["macro_f1"], step=gstep)
-            tf.summary.scalar("baseline/best_weighted_f1", metrics["weighted_f1"], step=gstep)
-            tf.summary.scalar("baseline/best_balanced_accuracy", metrics["balanced_accuracy"], step=gstep)
-            tf.summary.scalar("baseline/best_kappa", metrics["kappa"], step=gstep)
+            tf.summary.scalar("val/best_accuracy", metrics["accuracy"], step=gstep)
+            tf.summary.scalar("val/best_macro_f1", metrics["macro_f1"], step=gstep)
+            tf.summary.scalar("val/best_weighted_f1", metrics["weighted_f1"], step=gstep)
+            tf.summary.scalar(
+                "val/best_balanced_accuracy", metrics["balanced_accuracy"], step=gstep
+            )
+            tf.summary.scalar("val/best_kappa", metrics["kappa"], step=gstep)
             self.tb_writer.flush()
 
         tf.print(
@@ -776,10 +890,10 @@ def parse_args(argv: Sequence[str] | None = None) -> Config:
     parser.add_argument("--model_name", type=str, required=True, help="Base checkpoint name")
     parser.add_argument("--num_classes", type=int, default=9)
     parser.add_argument("--batch_size", type=int, default=1)
-    parser.add_argument("--num_patches", type=int, default=-1)
+    parser.add_argument("--num_patches", type=int, default=64)
     parser.add_argument("--shuffle_seed", type=int, default=42)
     parser.add_argument("--shuffle_buffer_size", type=int, default=128)
-    parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--epochs", type=int, default=1000)
     parser.add_argument("--learning_rate", type=float, default=1e-7)
     parser.add_argument("--no_xla", action="store_false", dest="use_xla", help="Disable XLA JIT.")
     parser.add_argument("--log_every_n_batches", type=int, default=1, help="Scalar logging frequency (in batches)")
@@ -795,9 +909,17 @@ def parse_args(argv: Sequence[str] | None = None) -> Config:
     parser.add_argument("--half_life", type=int, default=1000, help="Half-life parameter for exponential schedule")
     parser.add_argument("--val_labels_json", type=Path, help="Validation annotation JSON file")
     parser.add_argument("--val_images_dir", type=Path, help="Directory with validation image patches")
-    parser.add_argument("--num_val_patches", type=int, default=-1, help="Number of validation patches per epoch")
+    parser.add_argument("--num_val_patches", type=int, default=1024, help="Number of validation patches per epoch")
     parser.add_argument("--validate_every", type=int, default=1, help="Run validation every N epochs")
     parser.add_argument("--calibrate_every", type=int, default=0, help="Compute calibration every N epochs (0=disable)")
+    parser.add_argument("--use_drw", action="store_true", help="Enable deferred re-weighting for alpha and gamma")
+    parser.add_argument("--use_logit_adjustment", action="store_true", help="Apply EMA prior logit adjustment")
+    parser.add_argument("--use_batch_alpha", action="store_true", help="Blend per-batch histogram into alpha weights")
+    parser.add_argument(
+        "--use_penultimate_logits",
+        action="store_true",
+        help="Strip final softmax and use second-to-last layer logits",
+    )
     args = parser.parse_args(argv)
     return Config(**vars(args))
 
