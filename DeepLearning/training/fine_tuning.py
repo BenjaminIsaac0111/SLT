@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""train_tuned_model_refactored_with_step_logging.py
-=====================================================
+"""train_tuned_model_refactored.py
+==================================
 Fine‑tunes a segmentation/classification model with focal loss using
 mixed‑precision training. This version improves *ordered, resumable*
-TensorBoard logging and checkpointing compared to the earlier script.
+TensorBoard logging, checkpointing and adds CSV logging for validation
+metrics compared to the earlier script.
 
 Key Improvements Over Previous Version
 --------------------------------------
@@ -319,15 +320,11 @@ class Trainer:
             self.run_id_file.write_text(self.run_id)
 
         self.csv_dir = self.cfg.ckpt_dir
-        self.train_steps_path = self.csv_dir / "train_steps.csv"
-        self.train_epochs_path = self.csv_dir / "train_epochs.csv"
         self.val_epochs_path = self.csv_dir / "val_epochs.csv"
         self.val_confusion_path = self.csv_dir / "val_confusion_wide.csv"
         self.val_per_class_path = self.csv_dir / "val_per_class.csv"
         self.run_meta_path = self.csv_dir / "run_meta.csv"
 
-        self.train_steps_logged = self._load_existing_ids(self.train_steps_path)
-        self.train_epochs_logged = self._load_existing_ids(self.train_epochs_path)
         self.val_epochs_logged = self._load_existing_ids(self.val_epochs_path)
         self.val_confusion_logged = self._load_existing_ids(self.val_confusion_path)
         self.val_per_class_logged = self._load_existing_ids(
@@ -471,111 +468,6 @@ class Trainer:
         self._write_row(self.run_meta_path, fieldnames, row, set(), None)
 
     # Logging helpers --------------------------------------------------
-    def _log_train_step(
-        self,
-        step: int,
-        epoch: int,
-        batch_idx: int,
-        p_new_val: float,
-        used_new: bool,
-        loss_value: float,
-        avg_loss: float,
-        gamma_t: float,
-        lambda_t: float,
-        alpha_t: tf.Tensor,
-    ) -> None:
-        alpha_mean = float(tf.reduce_mean(alpha_t))
-        alpha_min = float(tf.reduce_min(alpha_t))
-        alpha_max = float(tf.reduce_max(alpha_t))
-        if self.cfg.use_logit_adjustment:
-            class_prior_mean = float(tf.reduce_mean(self.class_prior))
-        else:
-            class_prior_mean = ""
-        row = {
-            "run_id": self.run_id,
-            "global_step": step,
-            "epoch": epoch,
-            "batch_idx_in_epoch": batch_idx,
-            "p_new": p_new_val,
-            "use_new_batch": int(used_new),
-            "loss_batch": loss_value,
-            "avg_loss_epoch_so_far": avg_loss,
-            "gamma_t": gamma_t,
-            "lambda_t": lambda_t,
-            "alpha_t_mean": alpha_mean,
-            "alpha_t_min": alpha_min,
-            "alpha_t_max": alpha_max,
-            "class_prior_mean": class_prior_mean,
-            "wall_time_s": float(tf.timestamp() - self.start_wall_time),
-            "lr": float(self.optimizer.learning_rate.numpy()),
-            "mixed_precision_policy": mixed_precision.global_policy().name,
-            "xla_enabled": int(self.cfg.use_xla),
-        }
-        fieldnames = [
-            "run_id",
-            "global_step",
-            "epoch",
-            "batch_idx_in_epoch",
-            "p_new",
-            "use_new_batch",
-            "loss_batch",
-            "avg_loss_epoch_so_far",
-            "gamma_t",
-            "lambda_t",
-            "alpha_t_mean",
-            "alpha_t_min",
-            "alpha_t_max",
-            "class_prior_mean",
-            "wall_time_s",
-            "lr",
-            "mixed_precision_policy",
-            "xla_enabled",
-        ]
-        self._write_row(self.train_steps_path, fieldnames, row, self.train_steps_logged, step)
-
-    def _log_train_epoch(
-        self,
-        epoch: int,
-        gstep: int,
-        avg_loss: float,
-        alpha_last: tf.Tensor | None,
-        secs: float,
-        ckpt_path: str,
-        h5_saved: int,
-    ) -> None:
-        alpha_mean = ""
-        alpha_entropy = ""
-        if alpha_last is not None:
-            alpha_mean = float(tf.reduce_mean(alpha_last))
-            norm = alpha_last / tf.reduce_sum(alpha_last)
-            alpha_entropy = float(
-                -tf.reduce_sum(norm * tf.math.log(norm + 1e-8))
-            )
-        if self.cfg.use_logit_adjustment:
-            prior_norm = self.class_prior / tf.reduce_sum(self.class_prior)
-            prior_entropy = float(
-                -tf.reduce_sum(prior_norm * tf.math.log(prior_norm + 1e-8))
-            )
-        else:
-            prior_entropy = ""
-        row = {
-            "run_id": self.run_id,
-            "epoch": epoch,
-            "global_step": gstep,
-            "loss_epoch_avg": avg_loss,
-            "alpha_t_mean_epoch": alpha_mean,
-            "alpha_t_entropy_epoch": alpha_entropy,
-            "class_prior_entropy_epoch": prior_entropy,
-            "secs_per_epoch": secs,
-            "steps_per_epoch": self.steps_per_epoch,
-            "ckpt_path": ckpt_path,
-            "h5_saved": h5_saved,
-        }
-        fieldnames = list(row.keys())
-        self._write_row(
-            self.train_epochs_path, fieldnames, row, self.train_epochs_logged, gstep
-        )
-
     def _log_val_epoch(
         self,
         epoch: int,
@@ -895,15 +787,11 @@ class Trainer:
             if self._stop_training:
                 break
             epoch = e + 1
-            avg_loss, alpha_last, secs = self._train_one_epoch(epoch)
+            self._train_one_epoch(epoch)
             if epoch % self.cfg.validate_every == 0:
                 self._validate_one_epoch(epoch)
             self.epoch.assign(epoch)
-            ckpt_path, h5_saved = self._checkpoint(epoch)
-            gstep = int(self.global_step.numpy())
-            self._log_train_epoch(
-                epoch, gstep, avg_loss, alpha_last, secs, ckpt_path, h5_saved
-            )
+            self._checkpoint(epoch)
 
         tf.print("[INFO] Training completed.")
 
@@ -987,18 +875,6 @@ class Trainer:
                     tf.summary.scalar("focal/gamma_t", gamma_t, step=gstep)
                     tf.summary.scalar("logit/lambda_t", lambda_t, step=gstep)
             prog.update(idx, values=[("loss", loss_value), ("avg_loss", avg_loss)])
-            self._log_train_step(
-                step,
-                epoch,
-                idx,
-                float(p),
-                used_new,
-                loss_value,
-                avg_loss,
-                float(gamma_t),
-                float(lambda_t),
-                alpha_t,
-            )
 
         # Epoch average logging using current global step
         with self.tb_writer.as_default():
