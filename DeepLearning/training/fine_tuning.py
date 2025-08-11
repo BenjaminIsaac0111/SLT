@@ -54,7 +54,6 @@ from DeepLearning.training.utils import (
 from DeepLearning.training.validator import Validator
 from DeepLearning.training.visualization import confusion_matrix_to_image
 
-
 CLASS_NAMES = [
     "Non-Informative",  # 0
     "Tumour",  # 1
@@ -322,10 +321,15 @@ class Trainer:
             tf.print(f"[INFO] Loading initial weights from {self.cfg.initial_weights}")
             model = load_model(self.cfg.initial_weights, compile=False, custom_objects=custom_objs)
 
-        if self.cfg.use_penultimate_logits:
-            if len(model.layers) < 2:
-                raise ValueError("Model must have at least two layers to strip softmax")
+        # If the last layer is Softmax, strip it to get logits
+        last = model.layers[-1]
+        last_act = getattr(last, "activation", None)
+        if isinstance(last, tf.keras.layers.Softmax) or last_act is tf.keras.activations.softmax:
+            tf.print("[INFO] Detected terminal Softmax — using pre-Softmax logits")
             model = tf.keras.Model(inputs=model.input, outputs=model.layers[-2].output)
+        else:
+            tf.print("[INFO] Model already outputs logits")
+
         return model
 
     @staticmethod
@@ -433,14 +437,39 @@ class Trainer:
         @xla_optional(self.cfg.use_xla)
         def _train_step(batch, alpha_t, prior_t, gamma_t, lambda_t):
             x, y = batch
+
+            # Enforce dtypes/shapes expected by the math
+            alpha_t = tf.cast(alpha_t, tf.float32)  # [C]
+            prior_t = tf.cast(prior_t, tf.float32)  # [C]
+            gamma_t = tf.cast(gamma_t, tf.float32)  # scalar
+            lambda_t = tf.cast(lambda_t, tf.float32)  # scalar
+            y = tf.cast(y, tf.float32)  # [B,H,W,C]
+
             with tf.GradientTape() as tape:
-                logits = self.model(x, training=True)
-                logits += lambda_t * tf.math.log(1.0 / tf.maximum(prior_t, 1e-8))
-                probs = tf.nn.softmax(logits)
+                logits = self.model(x, training=True)  # [B,H,W,C], likely float16
+
+                # --- Logit adjustment done in fp32 ---
+                # clip prior to avoid log(0); broadcast to [1,1,1,C]
+                prior_t = tf.clip_by_value(prior_t, 1e-6, 1.0)
+                log_adj = lambda_t * tf.math.log(1.0 / prior_t)  # [C] fp32
+                log_adj = log_adj[None, None, None, :]  # [1,1,1,C]
+
+                logits_f32 = tf.cast(logits, tf.float32) + log_adj  # [B,H,W,C] fp32
+
+                # Softmax in fp32; focal expects probabilities, not logits
+                probs = tf.nn.softmax(logits_f32, axis=-1)  # [B,H,W,C] fp32
+
+                # Compute focal loss in fp32
                 loss = focal_loss(
-                    y_true=y, y_pred=probs, gamma=gamma_t, alpha_weights=alpha_t
+                    y_true=y,
+                    y_pred=probs,
+                    gamma=gamma_t,  # tensor scalar is fine
+                    alpha_weights=alpha_t  # [C]
                 )
+
+                # Loss scaling as usual
                 scaled_loss = self.optimizer.get_scaled_loss(loss)
+
             scaled_grads = tape.gradient(scaled_loss, self.model.trainable_weights)
             grads = self.optimizer.get_unscaled_gradients(scaled_grads)
             self.optimizer.apply_gradients(zip(grads, self.model.trainable_weights))
@@ -861,7 +890,7 @@ def parse_args(argv: Sequence[str] | None = None) -> Config:
     parser.add_argument("--model_name", type=str, required=True, help="Base checkpoint name")
     parser.add_argument("--num_classes", type=int, default=9)
     parser.add_argument("--batch_size", type=int, default=1)
-    parser.add_argument("--num_patches", type=int, default=-1)
+    parser.add_argument("--num_patches", type=int, default=64)
     parser.add_argument("--shuffle_seed", type=int, default=42)
     parser.add_argument("--shuffle_buffer_size", type=int, default=128)
     parser.add_argument("--epochs", type=int, default=1000)
