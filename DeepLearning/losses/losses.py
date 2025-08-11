@@ -26,36 +26,32 @@ def ce_loss(y_true, y_pred, class_weight=None):
     return ce_loss
 
 
-def focal_loss(y_true, y_pred, gamma=2.0, alpha_weights=None):
-    """
-    Calculate the focal loss for each pixel with class weighting and then average across all pixels.
+def focal_loss(y_true, y_pred, gamma: float = 2.0, alpha_weights=None):
+    """Compute focal loss over *labeled* pixels only.
 
-    Args:
-        y_true (tensor): True labels with shape [batch, height, width, num_classes].
-        y_pred (tensor): Predictions with shape [batch, height, width, num_classes].
-        gamma (float): Focusing parameter.
-        alpha_weights (tensor): Class weights. It should have the same shape as the class axis of y_true/y_pred.
-
-    Returns:
-        loss (tensor): Computed focal loss value.
+    The loss is masked to ignore unlabeled pixels (where the one-hot target sums
+    to zero) and normalized by the count of labeled pixels in each patch.
     """
     epsilon = tf.keras.backend.epsilon()
-    y_pred = tf.clip_by_value(y_pred, epsilon, 1. - epsilon)
+    y_pred = tf.clip_by_value(y_pred, epsilon, 1.0 - epsilon)
 
-    # Calculate cross entropy loss
     cross_entropy = -y_true * tf.math.log(y_pred)
 
-    # If alpha_weights provided, use them, otherwise use the default alpha scalar.
     if alpha_weights is not None:
         alpha_factor = y_true * alpha_weights
     else:
         alpha_factor = 1.0
 
-    # Calculate focal loss components
-    loss = alpha_factor * tf.math.pow(1 - y_pred, gamma) * cross_entropy
+    loss = alpha_factor * tf.math.pow(1.0 - y_pred, gamma) * cross_entropy
+    loss = tf.reduce_sum(loss, axis=-1)  # [B,H,W]
 
-    # Sum over the class dimension and average over all other dimensions
-    return tf.reduce_mean(tf.reduce_sum(loss, axis=-1))
+    mask = tf.reduce_sum(y_true, axis=-1)  # [B,H,W]; 1 for labeled pixels
+    loss = loss * mask
+
+    per_example = tf.reduce_sum(loss, axis=[1, 2])
+    counts = tf.reduce_sum(mask, axis=[1, 2])
+    loss = tf.math.divide_no_nan(per_example, counts)
+    return tf.reduce_mean(loss)
 
 
 def kl_distillation_loss(teacher_logits, student_logits, temperature=2.0):
