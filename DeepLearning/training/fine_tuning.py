@@ -561,7 +561,8 @@ class Trainer:
 
             x, y = batch
             counts = tf.reduce_sum(y, axis=[0, 1, 2])
-            batch_hist = counts / tf.maximum(tf.reduce_sum(counts), 1.0)
+            count_sum = tf.reduce_sum(counts)
+            batch_hist = tf.math.divide_no_nan(counts, count_sum)
             batch_alpha = tf.reduce_sum(batch_hist) / tf.maximum(batch_hist, 1e-8)
             batch_alpha = tf.minimum(batch_alpha, 10.0 * tf.reduce_mean(batch_alpha))
 
@@ -571,7 +572,11 @@ class Trainer:
             dataset_alpha = tf.minimum(dataset_alpha, 10.0 * tf.reduce_mean(dataset_alpha))
 
             if self.cfg.use_batch_alpha:
-                alpha_combined = 0.5 * dataset_alpha + 0.5 * batch_alpha
+                alpha_combined = tf.cond(
+                    count_sum > 0.0,
+                    lambda: 0.5 * dataset_alpha + 0.5 * batch_alpha,
+                    lambda: dataset_alpha,
+                )
             else:
                 alpha_combined = dataset_alpha
 
