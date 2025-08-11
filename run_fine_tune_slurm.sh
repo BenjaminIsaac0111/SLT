@@ -11,4 +11,4 @@
 module load anaconda || true
 source activate SLT || true
 
-python DeepLearning/training/fine_tuning.py "$@"
+python DeepLearning/training/fine_tuning.py "$@" --use_batch_alpha

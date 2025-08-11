@@ -89,6 +89,7 @@ class Config:
     new_labels_json: Path | None = None
     new_images_dir: Path | None = None
     warmup_steps: int = 500
+    drw_warmup_steps: int = 1024  # how long to ramp α,γ AFTER new-data warmup
     decay_schedule: str = "half_life"
     half_life: int = 1000
     focal_gamma: float = 2.0
@@ -574,14 +575,14 @@ class Trainer:
             else:
                 alpha_combined = dataset_alpha
 
-            ramp = tf.minimum(
-                1.0,
-                tf.cast(self.global_step, tf.float32) / float(self.cfg.warmup_steps),
-            ) if self.cfg.use_drw else 1.0
             if self.cfg.use_drw:
+                step_f = tf.cast(self.global_step, tf.float32)
+                post = tf.nn.relu(step_f - float(self.cfg.warmup_steps))
+                ramp = tf.minimum(1.0, post / float(self.cfg.drw_warmup_steps))
                 alpha_t = (1.0 - ramp) * tf.ones_like(alpha_combined) + ramp * alpha_combined
                 gamma_t = ramp * self.cfg.focal_gamma
             else:
+                ramp = 1.0
                 alpha_t = alpha_combined
                 gamma_t = self.cfg.focal_gamma
 
@@ -900,6 +901,12 @@ def parse_args(argv: Sequence[str] | None = None) -> Config:
     parser.add_argument("--new_labels_json", type=Path, help="Annotation JSON for new data")
     parser.add_argument("--new_images_dir", type=Path, help="Directory with new image patches")
     parser.add_argument("--warmup_steps", type=int, default=512, help="Number of warm-up steps using only new data")
+    parser.add_argument(
+        "--drw_warmup_steps",
+        type=int,
+        default=1024,
+        help="How long to ramp α,γ after new-data warmup",
+    )
     parser.add_argument(
         "--decay_schedule",
         type=str,
