@@ -899,10 +899,19 @@ class Trainer:
         if self.val_dataset is None:
             return
         self.validator.reset()
+
+        step_f = tf.cast(self.global_step, tf.float32)
+        if self.cfg.use_drw:
+            post = tf.nn.relu(step_f - float(self.cfg.warmup_steps))
+            ramp = tf.minimum(1.0, post / float(self.cfg.drw_warmup_steps))
+        else:
+            ramp = 1.0
+        lambda_t = ramp if self.cfg.use_logit_adjustment else 0.0
+
         prog = Progbar(self.val_steps, stateful_metrics=None, verbose=1, unit_name="val_step")
         for step, batch in enumerate(self.val_dataset.take(self.val_steps), start=1):
             x, y = batch
-            self.validator.update(x, y)
+            self.validator.update(x, y, self.class_prior, lambda_t)
             prog.update(step)
         metrics = self.validator.result()
         gstep = int(self.global_step.numpy())
@@ -929,6 +938,12 @@ class Trainer:
             for step, batch in enumerate(self.val_dataset.take(self.val_steps), start=1):
                 x, y = batch
                 logits = self.model(x, training=False)
+                logits = tf.cast(logits, tf.float32)
+                if self.cfg.use_logit_adjustment:
+                    log_adj = lambda_t * tf.math.log(
+                        1.0 / tf.clip_by_value(self.class_prior, 1e-6, 1.0)
+                    )
+                    logits += log_adj
                 h = tf.shape(logits)[1] // 2
                 w = tf.shape(logits)[2] // 2
                 half = self.validator.window_size // 2
@@ -1049,10 +1064,19 @@ class Trainer:
 
         tf.print("[INFO] Evaluating baseline (pre‑training) model…")
         self.validator.reset()
+
+        step_f = tf.cast(self.global_step, tf.float32)
+        if self.cfg.use_drw:
+            post = tf.nn.relu(step_f - float(self.cfg.warmup_steps))
+            ramp = tf.minimum(1.0, post / float(self.cfg.drw_warmup_steps))
+        else:
+            ramp = 1.0
+        lambda_t = ramp if self.cfg.use_logit_adjustment else 0.0
+
         prog = Progbar(self.val_steps, stateful_metrics=None, verbose=1, unit_name="val_step")
         for step, batch in enumerate(self.val_dataset.take(self.val_steps), start=1):
             x, y = batch
-            self.validator.update(x, y)
+            self.validator.update(x, y, self.class_prior, lambda_t)
             prog.update(step)
 
         metrics = self.validator.result()
