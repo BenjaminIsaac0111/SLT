@@ -101,7 +101,7 @@ class Config:
     focal_gamma: float = 2.0
     prior_ema: float = 0.01
     use_drw: bool = False
-    use_logit_adjustment: bool = False
+    use_logit_adjustment: bool = False  # disables alpha_t weighting when True
     use_batch_alpha: bool = False
     use_penultimate_logits: bool = False
 
@@ -846,6 +846,11 @@ class Trainer:
                 ramp = 1.0
                 alpha_t = alpha_combined
                 gamma_t = self.cfg.focal_gamma
+
+            if self.cfg.use_logit_adjustment:
+                # When applying logit adjustment, disable inverse-frequency alpha
+                # weighting to avoid over-correcting class imbalance.
+                alpha_t = tf.ones_like(alpha_t)
 
             lambda_t = ramp if self.cfg.use_logit_adjustment else 0.0
             prior_t = tf.identity(self.class_prior)
