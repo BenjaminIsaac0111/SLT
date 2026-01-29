@@ -67,8 +67,6 @@ In "cold start" scenarios (limited annotation budget, $N \approx 400$ points), w
 
 **Key Insight:** For low-budget adaptation, establishing feature coverage (via Random/Typicality sampling) is more effective than refining decision boundaries (via Uncertainty) in the early stages. However, Uncertainty is essential for safety and artefact removal.
 
-Here is the raw Markdown for the "Getting Started" and "User Guide" sections.
-
 ## Getting Started
 
 ### Environment
