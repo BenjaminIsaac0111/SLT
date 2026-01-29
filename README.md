@@ -171,5 +171,3 @@ build_exe.bat
 | Previous Cluster | Left Arrow | Navigate back one batch. |
 | Zoom | `Ctrl` + `Scroll` | Or use the slider in the panel. |
 | Toggle Overlays | `H` | Toggle annotation visibility on/off. |
-
-```
