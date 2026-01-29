@@ -8,7 +8,7 @@ This repository provides two major components:
 
 **Note:** This project is not production-ready and remains a proof of concept. Software behaviour may change between versions.
 
-![Project Screenshot](GUI/assets/AL Workflow.png)
+![Project Screenshot](GUI/assets/AL%20Workflow.png)
 
 The goal of this project was to develop a system that leverages uncertainty measures derived from uncertainty-aware CNN segmentation models for smart point-counting annotation of (though not limited to) Colorectal Cancer histopathology images. The motivation was to experiment with deep learning model-adaptation strategies in settings with low annotation budgets, such as with medical imaging. The typical workflow involves training an initial segmentation model on a single data domain, performing inference to generate probability maps and uncertainties, and then using the graphical interface to rapidly label point annotations guided by the uncertainty scores. The new annotations can be fed back into the training scripts to iteratively improve deep learning models.
 
@@ -27,7 +27,7 @@ The goal of this project was to develop a system that leverages uncertainty meas
 - Autosave, project management, and preview dialogues to inspect full-size images with the new annotations overlayed.
 - Export of labelled points to JSON for further model training or analysis.
 
-![Project Screenshot](GUI/assets/Manual Labelling a Crop.png)
+![Project Screenshot](GUI/assets/Manual%20Labelling%20a%20Crop.png)
 
 ## Getting Started
 ### Environment
