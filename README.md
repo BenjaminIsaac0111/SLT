@@ -67,10 +67,109 @@ In "cold start" scenarios (limited annotation budget, $N \approx 400$ points), w
 
 **Key Insight:** For low-budget adaptation, establishing feature coverage (via Random/Typicality sampling) is more effective than refining decision boundaries (via Uncertainty) in the early stages. However, Uncertainty is essential for safety and artefact removal.
 
+Here is the raw Markdown for the "Getting Started" and "User Guide" sections.
+
 ## Getting Started
 
 ### Environment
+
 Install the dependencies with Conda:
+
 ```bash
 conda env create -f environment.yml
-conda activate SLT
+
+```
+
+Activate the environment with `conda activate SLT`.
+
+### Training a Model
+
+Edit `configurations/configuration.yaml` to match your dataset. Start training with:
+
+```bash
+python DeepLearning/training/main.py --config configurations/configuration.yaml
+
+```
+
+Checkpoints and logs will be written to the directory specified in the configuration file.
+
+### Running Inference
+
+The scripts under `DeepLearning/inference/` generate prediction logits and uncertainty measures that the GUI can read. See `main_infer.py` for a minimal example.
+
+### Launching the Smart Labelling Tool
+
+Run the GUI from the repository root:
+
+```bash
+python gui_main.py
+
+```
+
+A start-up dialogue allows you to continue a previous session, load an existing project, or create a new one from a predictions database. Label clusters of points and export the results when finished.
+
+### Building the Executable (Windows)
+
+To create a standalone `.exe` file for distribution to clinicians who do not have Python installed:
+
+1. Ensure **PyInstaller** is installed in your environment (`pip install pyinstaller`).
+2. Run the provided batch script (renamed to `.bat` for Windows compatibility):
+```cmd
+build_exe.bat
+
+```
+
+
+3. The output file `SmartLabellingTool.exe` will be generated in the `dist/` folder.
+
+## User Guide
+
+### Suggested Workflow
+
+1. **Label Crops:** Label every visible crop using the class-number shortcuts (0--8) or the buttons in the control panel.
+2. **Manual Locking:** Right-click individual patches to label and "lock" them. This prevents bulk actions from overriding your decision. Locked patches are highlighted with a black border.
+3. **Agree with Model:** Press `Space` to agree with the remaining model predictions. This action will only affect patches that have not been manually locked.
+4. **Auto-Advance:** If enabled, the tool automatically jumps to the next recommended cluster after pressing `Agree`.
+5. **Navigation:** You may manually click **Go to next recommended** once the current cluster is fully assessed.
+6. **Backtracking:** Use `Backspace` if you need to revisit the previous cluster.
+7. **Repeat:** Continue until no clusters remain or the target coverage is reached.
+
+### Class-Number Mapping (Histopathology)
+
+| Key | Class Name | Description |
+| --- | --- | --- |
+| **0** | Non-Informative | Background, adipose tissue, or unclassifiable |
+| **1** | Tumour | Lands on a tumour cell |
+| **2** | Stroma | Fibroblast, collagen, fibrosis, or stromal compartment |
+| **3** | Necrosis | Area of definite necrosis |
+| **4** | Vessel | Blood or lymphatic vessel |
+| **5** | Inflammation | Inflammation, multinucleate giant cell, neutrophils |
+| **6** | Tumour-Lumen | Lumen of a tumour gland |
+| **7** | Mucin | Extracellular mucin |
+| **8** | Muscle | Smooth or skeletal muscle |
+| **A** | Artefact | Blur, fold, out-of-focus, debris, pen mark, etc. |
+| **U** | Unsure | Request second scoring for this point |
+
+**Mnemonic:** Keys follow the numeric row; class names appear on the corresponding GUI buttons in the control panel on the right for reference.
+
+**Annotation Notes:**
+
+* **Tumour-Lumen:** Applies to points within a gland's lumen surrounded by tumour cells. If the lumen contains necrotic debris or mucin, code based on the material (3 or 7), not as lumen.
+* **Inflammation:** Assign '5' for well-defined lymphocyte foci, neutrophilic infiltrates, or giant cells. Scattered background lymphocytes in stroma should be scored as Stroma ('2').
+
+### Essential Shortcuts
+
+| Action | Key | Notes |
+| --- | --- | --- |
+| Assign Class | `0` ... `8` | See mapping table above. |
+| Agree | `Space` | Skips manually locked crops. |
+| Force Agree | `Ctrl` + `Space` | Overwrites manual labels. |
+| Unlabel | `-` | Removes label & restores original uncertainty. |
+| Mark Unsure | `U` | Flag for later review. |
+| Mark Artefact | `A` | Flags debris, folds, or blur. |
+| Next Cluster | Enter/Return | Navigate to the next recommended batch. |
+| Previous Cluster | Left Arrow | Navigate back one batch. |
+| Zoom | `Ctrl` + `Scroll` | Or use the slider in the panel. |
+| Toggle Overlays | `H` | Toggle annotation visibility on/off. |
+
+```
