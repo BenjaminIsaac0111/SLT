@@ -63,7 +63,7 @@ In "cold start" scenarios (limited annotation budget, $N \approx 400$ points), w
 | :--- | :--- | :--- | :--- |
 | **Random Subset + Rehearsal** | **0.60 ± 0.03** | **0.78 ± 0.02** | Most effective for initial "Phase 1" representation learning. |
 | **Uncertainty (BALD) + Rehearsal** | 0.56 ± 0.02 | 0.76 ± 0.02 | Effective for identifying errors, but less effective for stabilising features in early adaptation. |
-| **Full Supervision (Upper Bound)** | 0.60 ± 0.03 | 0.78 ± 0.02 | Random sampling with only ~400 points matched full supervision performance. |
+| **Full Supervision (Upper Bound)** | 0.60 ± 0.03 | 0.78 ± 0.02 | Random sampling of a complete set of points from CLASICC as upper bound of performance. |
 
 **Key Insight:** For low-budget adaptation, establishing feature coverage (via Random/Typicality sampling) is more effective than refining decision boundaries (via Uncertainty) in the early stages. However, Uncertainty is essential for safety and artefact removal.
 
