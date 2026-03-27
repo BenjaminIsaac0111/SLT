@@ -181,7 +181,7 @@ def _main_window(view, controller, tasks_tab=None) -> QMainWindow:  # noqa: D401
         tabs.addTab(tasks_tab, "Tasks")
     else:
         from GUI.views.TasksTab import TasksTab
-        tasks_tab = TasksTab()
+        tasks_tab = TasksTab(controller.scheduler)
         tabs.addTab(tasks_tab, "Tasks")
     win.setCentralWidget(tabs)
 
@@ -229,10 +229,12 @@ def main() -> None:  # noqa: D401
     from GUI.views.ClusteredCropsView import ClusteredCropsView
     from GUI.views.TasksTab import TasksTab
     from GUI.controllers.MainController import MainController
+    from GUI.controllers.JobScheduler import JobScheduler
 
     view = ClusteredCropsView()
-    tasks_tab = TasksTab()
-    controller = MainController(model=None, view=view, tasks_widget=tasks_tab)
+    scheduler = JobScheduler()
+    tasks_tab = TasksTab(scheduler)
+    controller = MainController(model=None, view=view, tasks_widget=tasks_tab, scheduler=scheduler)
 
     _win = _main_window(view, controller, tasks_tab)  # Needs to be stored for persistence.
     sys.exit(app.exec_())
