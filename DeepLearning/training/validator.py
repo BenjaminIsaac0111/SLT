@@ -7,8 +7,6 @@ clarify the responsibilities of validation within the training pipeline.
 
 from __future__ import annotations
 
-from typing import Callable
-
 import tensorflow as tf
 
 
@@ -100,8 +98,13 @@ class Validator:
             labels = tf.argmax(counts, axis=-1, output_type=tf.int32)
             return labels, had_fg if self.skip_empty else tf.ones_like(labels, tf.bool)
 
-        def batch_confusion(y_true_onehot, images):
+        def batch_confusion(y_true_onehot, images, class_prior, lambda_t):
             logits = self._infer(images)
+            logits = tf.cast(logits, tf.float32)
+            log_adj = lambda_t * tf.math.log(
+                1.0 / tf.clip_by_value(class_prior, 1e-6, 1.0)
+            )
+            logits += log_adj
             h = tf.shape(logits)[1] // 2
             w = tf.shape(logits)[2] // 2
             half = ws // 2
@@ -129,25 +132,46 @@ class Validator:
             return tf.cond(tf.size(true_labels) > 0, non_empty_case, empty_case)
 
         @tf.function(jit_compile=False)
-        def update_step(images, one_hot):
-            batch_cm = batch_confusion(one_hot, images)
+        def update_step(images, one_hot, class_prior, lambda_t):
+            batch_cm = batch_confusion(one_hot, images, class_prior, lambda_t)
             self.cm_var.assign_add(batch_cm)
 
         self._update_step = update_step
 
     # ------------------------------------------------------------------
-    def update(self, images, one_hot) -> None:
-        """Accumulate the confusion matrix for a batch."""
+    def update(
+        self,
+        images,
+        one_hot,
+        class_prior: tf.Tensor | None = None,
+        lambda_t: float = 0.0,
+    ) -> None:
+        """Accumulate the confusion matrix for a batch.
+
+        Parameters
+        ----------
+        images: Tensor of shape `[B, H, W, C]` containing input images.
+        one_hot: Tensor of shape `[B, H, W, num_classes]` with one‑hot labels.
+        class_prior: Optional prior probabilities for logit adjustment.
+        lambda_t: Scaling factor for logit adjustment.
+        """
+
+        if class_prior is None:
+            class_prior = tf.fill([self.C], 1.0 / self.C)
+        class_prior = tf.convert_to_tensor(class_prior, dtype=tf.float32)
+        lambda_t = tf.convert_to_tensor(lambda_t, dtype=tf.float32)
 
         if isinstance(self.strategy, tf.distribute.Strategy) and not isinstance(
             self.strategy, tf.distribute.OneDeviceStrategy
         ):
-            def replica_fn(imgs, y):
-                self._update_step(imgs, y)
+            def replica_fn(imgs, y, prior, lamb):
+                self._update_step(imgs, y, prior, lamb)
 
-            self.strategy.run(replica_fn, args=(images, one_hot))
+            self.strategy.run(
+                replica_fn, args=(images, one_hot, class_prior, lambda_t)
+            )
         else:
-            self._update_step(images, one_hot)
+            self._update_step(images, one_hot, class_prior, lambda_t)
 
     # ------------------------------------------------------------------
     def result(self) -> dict[str, tf.Tensor]:
