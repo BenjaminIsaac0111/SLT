@@ -39,11 +39,12 @@ class MainController(QObject):
     AUTOSAVE_IDLE_MS = 10_000
     _UNASSESSED_LABELS = {-1}
 
-    def __init__(self, model: Optional[BaseImageDataModel], view: ClusteredCropsView, tasks_widget=None):
+    def __init__(self, model: Optional[BaseImageDataModel], view: ClusteredCropsView, tasks_widget=None, scheduler=None):
         super().__init__()
         self.image_data_model = model
         self.view = view
         self.tasks_widget = tasks_widget
+        self.scheduler = scheduler
 
         # ---------- core sub‑controllers ---------------------------------
         self.annotation_generator = LocalMaximaPointAnnotationGenerator()
@@ -52,6 +53,10 @@ class MainController(QObject):
         self.io = ProjectIOService(data_anchor=Path(model.data_path) if model else None)
         self._export_usecase = ExportAnnotationsUseCase()
         self.threadpool = QThreadPool.globalInstance()
+        if self.scheduler is None:
+            from GUI.controllers.JobScheduler import JobScheduler
+
+            self.scheduler = JobScheduler(pool=self.threadpool)
 
         self.cluster_selector = make_selector("greedy", self.clustering_controller)
 
@@ -67,7 +72,6 @@ class MainController(QObject):
         self._idle_timer = QTimer(singleShot=True)
         self._idle_timer.timeout.connect(self._autosave_if_dirty)
 
-        self._mc_widget = None
         self._mc_worker = None
 
         self._connect_signals()
@@ -691,23 +695,17 @@ class MainController(QObject):
 
         worker = MCBankerWorker(config, resume=resume)
         self._mc_worker = worker
-        widget = getattr(self.tasks_widget, "mc_widget", None)
-        if widget is not None:
-            widget.start(str(output_file), total)
-            worker.signals.progress.connect(widget.update_progress)
-            widget.request_pause.connect(worker.pause)
-            widget.request_resume.connect(worker.resume_task)
-            widget.request_cancel.connect(worker.cancel)
-
         worker.signals.finished.connect(self._on_mc_banker_finished)
-        self._mc_widget = widget
-        self.threadpool.start(worker)
+
+        if self.scheduler is not None:
+            job_id = self.scheduler.schedule_job("MC Banker", worker, config)
+            if hasattr(self.tasks_widget, "add_active_job"):
+                self.tasks_widget.add_active_job(job_id, "MC Banker", config, worker)
+        else:
+            self.threadpool.start(worker)
 
     @pyqtSlot(bool)
     def _on_mc_banker_finished(self, success: bool) -> None:
-        if getattr(self, "_mc_widget", None):
-            self._mc_widget.finish()
-            self._mc_widget = None
         self._mc_worker = None
         msg = "HDF5 file generated." if success else "HDF5 generation failed."
         QMessageBox.information(self.view, "MC Inference", msg)
